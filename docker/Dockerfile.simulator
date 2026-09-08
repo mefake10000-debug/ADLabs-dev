@@ -1,0 +1,28 @@
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    ca-certificates \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install MediaMTX binary (v1.9.3)
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+        "arm64") ARCH="arm64v8" ;; \
+        *) ARCH="amd64" ;; \
+    esac && \
+    curl -sL "https://github.com/bluenviron/mediamtx/releases/download/v1.9.3/mediamtx_v1.9.3_linux_${ARCH}.tar.gz" | tar -xz -C /usr/local/bin/ mediamtx
+
+WORKDIR /app
+
+COPY docker/simulator_entrypoint.sh /app/simulator_entrypoint.sh
+RUN chmod +x /app/simulator_entrypoint.sh
+
+EXPOSE 8554 8889 1935
+
+ENTRYPOINT ["/app/simulator_entrypoint.sh"]
+

@@ -1,0 +1,52 @@
+services:
+  # 1. Synthetic RTSP Multi-Camera Broadcaster
+  rtsp-simulator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.simulator
+    container_name: adlabs-rtsp-simulator
+    ports:
+      - "8554:8554"   # RTSP stream port
+    volumes:
+      - ./data/sample_videos:/app/data/sample_videos:ro
+    restart: unless-stopped
+
+  # 2. On-Premise Edge Analytics Engine
+  edge-analyzer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.edge
+    container_name: adlabs-edge-analyzer
+    depends_on:
+      - rtsp-simulator
+      - cloud-dashboard
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./src:/app/src:ro
+      - ./data/sample_videos:/app/data/sample_videos:ro
+      - ./data/storage:/app/data/storage
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIPELINE_CONFIG=/app/configs/pipeline.yaml
+      - CAMERAS_CONFIG=/app/configs/cameras.yaml
+    restart: unless-stopped
+
+  # 3. Cloud Telemetry Ingestion & Web Analytics Dashboard
+  cloud-dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
+    container_name: adlabs-cloud-dashboard
+    ports:
+      - "8000:8000"   # FastAPI Telemetry Ingestion Endpoint
+      - "8501:8501"   # Streamlit Real-Time Operations UI
+    volumes:
+      - ./server:/app/server:ro
+      - ./configs:/app/configs
+      - ./data/storage:/app/data/storage
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CAMERAS_CONFIG=/app/configs/cameras.yaml
+    restart: unless-stopped
+

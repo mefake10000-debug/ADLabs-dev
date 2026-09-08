@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements-dashboard.txt .
+RUN pip install --no-cache-dir -r requirements-dashboard.txt
+
+COPY server/ ./server/
+RUN mkdir -p /app/data/storage
+
+EXPOSE 8000 8501
+
+# Entrypoint script that starts both FastAPI telemetry receiver and Streamlit dashboard
+CMD ["sh", "-c", "uvicorn server.app:app --host 0.0.0.0 --port 8000 & streamlit run server/dashboard.py --server.port 8501 --server.address 0.0.0.0"]
+

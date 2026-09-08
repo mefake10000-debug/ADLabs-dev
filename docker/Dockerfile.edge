@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Install runtime dependencies for OpenCV and video decoding
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements-edge.txt .
+RUN pip install --no-cache-dir -r requirements-edge.txt
+
+# Copy source code and default configs
+COPY configs/ ./configs/
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+
+# Create data directories
+RUN mkdir -p /app/data/sample_videos /app/data/storage /app/models
+
+CMD ["python", "-m", "src.main"]
+

@@ -1,0 +1,37 @@
+# AD Labs EdgeSight - Pipeline Configuration
+
+edge:
+  store_id: "store_mumbai_001"
+  device_id: "edge_node_macmini_01"
+  hardware_backend: "auto" # "auto", "coreml", "cuda", or "cpu"
+
+perception:
+  model_name: "yolo26m.pt"
+  confidence_threshold: 0.50  # Tuned for retail edge to suppress cardboard cutouts and noise
+  iou_threshold: 0.45         # Suppress duplicate overlapping boxes on the same person
+  min_height: 95              # Suppress small shelf items and price tags
+  min_width: 30
+  min_aspect_ratio: 1.0       # Suppress wide/horizontal displays (baskets, flat signs)
+  max_aspect_ratio: 4.2       # Suppress vertical slivers / poles
+  min_area: 3000
+  classes: [0]                # Class 0 is 'person' in COCO
+
+tracking:
+  tracker_type: "bytetrack"
+  track_thresh: 0.50
+  match_thresh: 0.45          # Tuned IoU matching to prevent ID switching & track fragmentation
+  track_buffer: 30            # Max frames to keep lost track alive
+  min_hits: 4                 # Temporal confirmation to eliminate 1-frame detector flicker
+  filter_stationary: true     # Suppress static cardboard displays / mannequins
+
+storage:
+  db_path: "data/storage/edgesight.db"
+  rollup_interval_seconds: 10
+
+telemetry:
+  cloud_endpoint: "http://cloud-dashboard:8000/api/v1/telemetry"
+  # Fallback for local testing outside docker:
+  local_endpoint: "http://localhost:8000/api/v1/telemetry"
+  push_interval_seconds: 10
+  retry_backoff_seconds: 3
+
