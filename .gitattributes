@@ -1,0 +1,3 @@
+   # Force LF line endings for scripts that run inside Linux containers,
+   # regardless of the cloning machine's OS or local autocrlf setting.
+   *.sh text eol=lf
