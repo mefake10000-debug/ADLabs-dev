@@ -1,7 +1,7 @@
 cameras:
 - id: cam_entrance_01
   name: Main Store Floor & Entrance
-  source: data/sample_videos/entrance_sample.mp4
+  source: data/sample_videos/entrance_sample.mp4 #test_footage1.mp4
   fps_target: 15
   resolution:
   - 1270

@@ -20,7 +20,7 @@ tracking:
   tracker_type: "bytetrack"
   track_thresh: 0.50
   match_thresh: 0.45          # Tuned IoU matching to prevent ID switching & track fragmentation
-  track_buffer: 30            # Max frames to keep lost track alive
+  track_buffer: 45            # Max frames to keep lost track alive
   min_hits: 4                 # Temporal confirmation to eliminate 1-frame detector flicker
   filter_stationary: true     # Suppress static cardboard displays / mannequins
 
