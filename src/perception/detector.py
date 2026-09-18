@@ -7,6 +7,11 @@ try:
 except ImportError:
     np = None
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 logger = logging.getLogger(__name__)
 
 class PersonDetector:
@@ -32,6 +37,7 @@ class PersonDetector:
         self.max_aspect_ratio = max_aspect_ratio
         self.min_area = min_area
         self.model = None
+        self._hog = None
         self.device = self._select_device()
         self._init_model()
 
@@ -42,7 +48,9 @@ class PersonDetector:
                 return "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 return "mps"  # Apple Silicon GPU acceleration
-        except ImportError:
+        except Exception:
+            # torch may be absent, or present but broken (e.g. a native DLL/.so
+            # failing to load) -- either way, fall back to CPU rather than crash.
             pass
         return "cpu"
 
@@ -138,7 +146,48 @@ class PersonDetector:
         return keep
 
     def _fallback_detect(self, frame: Any) -> List[Dict[str, Any]]:
-        """Simple background subtraction / contour fallback if neural model is loading."""
-        # Provides graceful degraded execution during startup or in minimal test environments
-        return []
+        """Classical HOG+SVM person detector, used when the neural model (YOLO)
+        cannot be loaded. Noticeably less accurate than YOLO -- particularly on
+        small/distant/occluded figures -- but real detection is strictly better
+        than silently returning zero people."""
+        if cv2 is None:
+            return []
+
+        if self._hog is None:
+            self._hog = cv2.HOGDescriptor()
+            self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
+        try:
+            rects, weights = self._hog.detectMultiScale(
+                frame, winStride=(8, 8), padding=(8, 8), scale=1.05
+            )
+        except Exception as e:
+            logger.error(f"Fallback HOG detection error: {e}")
+            return []
+
+        detections = []
+        for (x, y, w, h), weight in zip(rects, weights):
+            area = w * h
+            aspect = h / max(1.0, w)
+
+            if h < self.min_height or w < self.min_width:
+                continue
+            if area < self.min_area:
+                continue
+            if aspect < self.min_aspect_ratio or aspect > self.max_aspect_ratio:
+                continue
+
+            # HOG's SVM decision score isn't a probability; squash to (0, 1) for a
+            # confidence-shaped value comparable in spirit to the YOLO path.
+            confidence = float(1.0 / (1.0 + np.exp(-weight))) if np is not None else 0.5
+            if confidence < self.conf_thresh:
+                continue
+
+            detections.append({
+                "bbox": [round(float(x), 1), round(float(y), 1), round(float(x + w), 1), round(float(y + h), 1)],
+                "confidence": round(confidence, 3),
+                "class_id": 0
+            })
+
+        return self._suppress_contained_duplicates(detections)
 

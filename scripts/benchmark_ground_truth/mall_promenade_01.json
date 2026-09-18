@@ -1,0 +1,7 @@
+{
+  "video": "data/sample_videos/mall_promenade_01.mp4",
+  "method": "point-in-time headcount",
+  "frame_index": 900,
+  "expected_visible_people": 4,
+  "notes": "Manually counted by visually inspecting frame 900 (Claude, 2026-09-18): 4 clearly distinguishable pedestrians on the near promenade walkway (red coat, dark coat, person browsing a shop window, pink/salmon coat). Faint figures visible through glass reflections on the upper mall level (left of frame) were excluded as ambiguous -- may include real people not counted here. This is a manual visual estimate, not exhaustive frame-by-frame annotation; treat as approximate ground truth."
+}

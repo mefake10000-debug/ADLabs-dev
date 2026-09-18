@@ -9,6 +9,11 @@ from src.perception.detector import PersonDetector
 from src.perception.tracker import Track, SimpleByteTracker
 from src.analytics.tripwire import Tripwire
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 class TestFalsePositiveFiltering(unittest.TestCase):
 
     def test_anthropometric_filtering(self):
@@ -83,6 +88,35 @@ class TestFalsePositiveFiltering(unittest.TestCase):
 
         self.assertFalse(tracker.tracks[0].is_stationary)
         self.assertEqual(len(active), 1)
+
+    def test_fallback_detector_returns_well_formed_detections_without_crashing(self):
+        # Regression coverage: PersonDetector._fallback_detect used to be a
+        # no-op stub returning [] unconditionally, silently reporting zero
+        # people whenever the neural model (YOLO) fails to load. It's now a
+        # real classical HOG+SVM detector; this just verifies it runs and
+        # produces correctly-shaped output, not detection accuracy (which is
+        # covered separately by scripts/benchmark_tracking.py).
+        if np is None:
+            self.skipTest("numpy not available")
+
+        detector = PersonDetector.__new__(PersonDetector)
+        detector.model = None  # force the fallback path regardless of ultralytics availability
+        detector._hog = None
+        detector.min_height = 40.0
+        detector.min_width = 15.0
+        detector.min_area = 600.0
+        detector.min_aspect_ratio = 1.0
+        detector.max_aspect_ratio = 4.5
+        detector.conf_thresh = 0.35
+
+        blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        detections = detector.detect(blank_frame)
+        self.assertIsInstance(detections, list)
+        for det in detections:
+            self.assertIn("bbox", det)
+            self.assertIn("confidence", det)
+            self.assertIn("class_id", det)
+            self.assertEqual(len(det["bbox"]), 4)
 
     def test_tripwire_lifetime_deduping(self):
         tw = Tripwire(

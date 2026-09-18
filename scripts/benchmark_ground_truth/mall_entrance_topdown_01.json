@@ -1,0 +1,7 @@
+{
+  "video": "data/sample_videos/mall_entrance_topdown_01.mp4",
+  "method": "point-in-time headcount",
+  "frame_index": 500,
+  "expected_visible_people": 9,
+  "notes": "Manually counted by visually inspecting frame 500 (Claude, 2026-09-18): 9 clearly distinguishable pedestrians across the atrium's mid and lower balcony levels and ground floor. A cluster of additional figures near the distant background fountain plaza (top of frame) was excluded as too small/ambiguous to count confidently -- true count may be modestly higher. This is a manual visual estimate, not exhaustive frame-by-frame annotation; treat as approximate ground truth."
+}
