@@ -315,6 +315,11 @@ class EdgePipeline:
         queue_len = 0
         avg_wait = 0.0
         alert_active = 0
+        if ctx["queues"]:
+            queue_metrics = [q.get_metrics() for q in ctx["queues"]]
+            queue_len = max(m["queue_length"] for m in queue_metrics)
+            avg_wait = max(m["avg_wait_seconds"] for m in queue_metrics)
+            alert_active = int(any(m["alert_active"] for m in queue_metrics))
 
         rollup = {
             "store_id": self.store_id,

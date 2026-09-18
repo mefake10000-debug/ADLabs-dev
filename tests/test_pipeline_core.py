@@ -12,6 +12,7 @@ from src.perception.tracker import Track, SimpleByteTracker
 from src.analytics.tripwire import Tripwire, intersect
 from src.analytics.zones import Zone, point_in_polygon
 from src.analytics.queue_analyzer import QueueAnalyzer
+from src.main import EdgePipeline
 
 class TestEdgeSightCore(unittest.TestCase):
 
@@ -140,6 +141,58 @@ class TestEdgeSightCore(unittest.TestCase):
 
         self.assertEqual(qa.queue_length, 3)
         self.assertTrue(qa.alert_active)  # Exceeded max_comfortable_queue (2)
+
+    def test_rollup_includes_queue_metrics(self):
+        # Regression test for M0: _generate_and_save_rollup used to hardcode
+        # queue_length/avg_queue_wait_seconds/queue_alert_active to zero instead
+        # of reading them from the camera's QueueAnalyzer instances.
+        db_path = "data/storage/test_rollup_queue.db"
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+
+        pipeline = EdgePipeline.__new__(EdgePipeline)
+        pipeline.store_id = "test_store"
+        pipeline.device_id = "test_mac_01"
+        pipeline.local_buffer = LocalBuffer(db_path=db_path)
+
+        poly = [[400, 200], [800, 200], [800, 600], [400, 600]]
+        qa = QueueAnalyzer("q_01", "Counter", poly, max_comfortable_queue=2, congestion_threshold_seconds=10.0)
+        t0 = time.time()
+        t1 = Track(1, [450, 250, 500, 350], 0.9, t0)
+        t2 = Track(2, [550, 250, 600, 350], 0.9, t0)
+        t3 = Track(3, [650, 250, 700, 350], 0.9, t0)
+        qa.update([t1, t2, t3], t0)
+        qa.update([t1, t2, t3], t0 + 6.0)  # 3 people waiting >5s -> non-zero queue metrics
+
+        ctx = {
+            "tripwires": [],
+            "zones": [],
+            "queues": [qa],
+            "tracked_ids_today": {1, 2, 3},
+            "last_unique_count": 0,
+            "current_active_tracks": [t1, t2, t3],
+            "rollup_start_time": t0,
+        }
+
+        pipeline._generate_and_save_rollup("cam_01", ctx, t0 + 6.0)
+
+        saved = pipeline.local_buffer.get_unexported_rollups(limit=10)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["queue_length"], 3)
+        self.assertGreater(saved[0]["avg_queue_wait_seconds"], 0.0)
+        self.assertEqual(saved[0]["queue_alert_active"], 1)
+
+        del pipeline
+        import gc
+        gc.collect()
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     unittest.main()

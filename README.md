@@ -104,7 +104,7 @@ pip install -r requirements-edge.txt
 pip install -r requirements-dashboard.txt
 
 # 2. Run unit tests
-python -m unittest tests/test_pipeline_core.py
+python -m unittest discover tests
 
 # 3. Start Cloud Receiver API & Dashboard
 uvicorn server.app:app --port 8000 &

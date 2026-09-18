@@ -139,9 +139,9 @@ def get_live_metrics(store_id: str = "store_mumbai_001"):
             "total_exits": total_out,
             "net_occupancy": live_people_count,
             "avg_dwell_seconds": avg_dwell,
-            "queue_length": 0,
-            "avg_queue_wait_seconds": 0.0,
-            "queue_alert_active": False,
+            "queue_length": latest["queue_length"] if latest else 0,
+            "avg_queue_wait_seconds": latest["avg_queue_wait_seconds"] if latest else 0.0,
+            "queue_alert_active": bool(latest["queue_alert_active"]) if latest else False,
             "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
         }
 
