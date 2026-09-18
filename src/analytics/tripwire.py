@@ -23,10 +23,13 @@ class Tripwire:
         self.out_count = 0
         self._crossed_track_ids: Set[int] = set()
 
-    def update(self, tracks: List[Track], current_time: float):
+    def update(self, tracks: List[Track], current_time: float) -> List[Dict[str, Any]]:
+        """Updates in/out counters and returns crossing events detected this call."""
         # Bound crossed history memory to last 5000 tracks
         if len(self._crossed_track_ids) > 5000:
             self._crossed_track_ids = set(list(self._crossed_track_ids)[-2500:])
+
+        events: List[Dict[str, Any]] = []
 
         for track in tracks:
             # Stationary fixtures or already-counted tracks must not trigger crossings
@@ -55,12 +58,21 @@ class Tripwire:
                 else:
                     is_in = cross > 0
 
+                direction = "in" if is_in else "out"
                 if is_in:
                     self.in_count += 1
                 else:
                     self.out_count += 1
 
                 self._crossed_track_ids.add(track.track_id)
+                events.append({
+                    "wire_id": self.wire_id,
+                    "track_id": track.track_id,
+                    "direction": direction,
+                    "timestamp": current_time
+                })
+
+        return events
 
     def get_counts(self) -> Dict[str, Any]:
         return {

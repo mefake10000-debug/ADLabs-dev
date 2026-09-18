@@ -65,5 +65,64 @@ class TestLiveMetricsAPI(unittest.TestCase):
         self.assertEqual(data["avg_queue_wait_seconds"], 65.5)
         self.assertTrue(data["queue_alert_active"])
 
+class TestCrossingEventsAPI(unittest.TestCase):
+    """Coverage for M1: per-crossing events must be individually ingestible
+    and queryable, independent of rollup aggregation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        if os.path.exists(DB_PATH):
+            try:
+                os.remove(DB_PATH)
+            except OSError:
+                pass
+
+    def test_events_ingested_and_individually_queryable(self):
+        store_id = "test_store_events"
+        payload = {
+            "batch_size": 2,
+            "exported_at": time.time(),
+            "events": [
+                {
+                    "store_id": store_id,
+                    "device_id": "test_mac_01",
+                    "camera_id": "cam_entrance",
+                    "wire_id": "tw_01",
+                    "track_id": 42,
+                    "direction": "in",
+                    "event_timestamp": "2026-09-18 10:00:00"
+                },
+                {
+                    "store_id": store_id,
+                    "device_id": "test_mac_01",
+                    "camera_id": "cam_entrance",
+                    "wire_id": "tw_01",
+                    "track_id": 43,
+                    "direction": "out",
+                    "event_timestamp": "2026-09-18 10:00:05"
+                }
+            ]
+        }
+        resp = self.client.post("/api/v1/telemetry/events", json=payload)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["processed_records"], 2)
+
+        events = self.client.get("/api/v1/events", params={"store_id": store_id})
+        self.assertEqual(events.status_code, 200)
+        rows = events.json()["events"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["track_id"] for r in rows}, {42, 43})
+        self.assertEqual({r["direction"] for r in rows}, {"in", "out"})
+
+        filtered = self.client.get("/api/v1/events", params={"store_id": store_id, "camera_id": "cam_entrance"})
+        self.assertEqual(len(filtered.json()["events"]), 2)
+
+        no_match = self.client.get("/api/v1/events", params={"store_id": store_id, "camera_id": "cam_checkout"})
+        self.assertEqual(len(no_match.json()["events"]), 0)
+
 if __name__ == "__main__":
     unittest.main()

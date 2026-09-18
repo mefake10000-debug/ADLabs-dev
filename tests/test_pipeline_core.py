@@ -99,6 +99,104 @@ class TestEdgeSightCore(unittest.TestCase):
         counts = tw.get_counts()
         self.assertEqual(counts["out_count"], 1)
 
+    def test_tripwire_crossing_emits_persistable_event(self):
+        # Regression coverage for M1: Tripwire.update must return a discrete
+        # crossing event (not just update in-memory counters) so main.py can
+        # persist it durably, independent of the 10s rollup cycle.
+        tw = Tripwire(
+            wire_id="tw_01",
+            name="Main Door",
+            line=[[400, 360], [880, 360]],
+            in_direction="top_to_bottom"
+        )
+        now = time.time()
+        track_in = Track(track_id=42, bbox=[580, 250, 620, 350], confidence=0.9, timestamp=now - 0.1)
+        track_in.update([580, 320, 620, 420], 0.9, now)
+
+        events = tw.update([track_in], now)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["track_id"], 42)
+        self.assertEqual(events[0]["direction"], "in")
+        self.assertEqual(events[0]["wire_id"], "tw_01")
+
+        # A track that doesn't cross produces no event
+        self.assertEqual(tw.update([track_in], now), [])
+
+        db_path = "data/storage/test_events.db"
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+        buffer = LocalBuffer(db_path=db_path)
+        row_id = buffer.save_event({
+            "store_id": "test_store",
+            "device_id": "test_mac_01",
+            "camera_id": "cam_entrance",
+            "wire_id": events[0]["wire_id"],
+            "track_id": events[0]["track_id"],
+            "direction": events[0]["direction"],
+            "event_timestamp": "2026-09-18 10:00:00"
+        })
+        self.assertGreater(row_id, 0)
+        saved = buffer.get_unexported_events(limit=10)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["track_id"], 42)
+        self.assertEqual(saved[0]["camera_id"], "cam_entrance")
+        self.assertEqual(saved[0]["direction"], "in")
+
+        del buffer
+        import gc
+        gc.collect()
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    def test_crossing_events_survive_independent_of_rollup(self):
+        # Regression/crash-recovery coverage for M1: events must be durable as
+        # soon as they occur, not only once a rollup happens to flush.
+        db_path = "data/storage/test_events_independent.db"
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+
+        pipeline = EdgePipeline.__new__(EdgePipeline)
+        pipeline.store_id = "test_store"
+        pipeline.device_id = "test_mac_01"
+        pipeline.local_buffer = LocalBuffer(db_path=db_path)
+
+        tw = Tripwire("tw_01", "Main Door", [[400, 360], [880, 360]], in_direction="top_to_bottom")
+        now = time.time()
+        track_in = Track(track_id=7, bbox=[580, 250, 620, 350], confidence=0.9, timestamp=now - 0.1)
+        track_in.update([580, 320, 620, 420], 0.9, now)
+        events = tw.update([track_in], now)
+        self.assertEqual(len(events), 1)
+
+        # Persist the crossing event only -- deliberately never call
+        # _generate_and_save_rollup, simulating a crash before the next
+        # rollup boundary.
+        pipeline._persist_crossing_events("cam_01", events)
+
+        saved_events = pipeline.local_buffer.get_unexported_events(limit=10)
+        saved_rollups = pipeline.local_buffer.get_unexported_rollups(limit=10)
+        self.assertEqual(len(saved_events), 1)
+        self.assertEqual(saved_events[0]["direction"], "in")
+        self.assertEqual(saved_events[0]["track_id"], 7)
+        self.assertEqual(len(saved_rollups), 0)
+
+        del pipeline
+        import gc
+        gc.collect()
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+
     def test_zone_point_in_polygon_and_dwell(self):
         # Polygon square from (100, 100) to (300, 300)
         poly = [[100, 100], [300, 100], [300, 300], [100, 300]]

@@ -52,6 +52,19 @@ def init_db():
             received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS telemetry_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_id TEXT,
+            device_id TEXT,
+            camera_id TEXT,
+            wire_id TEXT,
+            track_id INTEGER,
+            direction TEXT,
+            event_timestamp TEXT,
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
         conn.commit()
 
 init_db()
@@ -74,6 +87,21 @@ class RollupItem(BaseModel):
 class TelemetryPayload(BaseModel):
     batch_size: int
     rollups: List[RollupItem]
+    exported_at: float
+
+class EventItem(BaseModel):
+    id: Optional[int] = None
+    store_id: str
+    device_id: str
+    camera_id: str
+    wire_id: str
+    track_id: int
+    direction: str
+    event_timestamp: str
+
+class EventBatchPayload(BaseModel):
+    batch_size: int
+    events: List[EventItem]
     exported_at: float
 
 # Web App Entrypoint (Structured Production SPA)
@@ -103,6 +131,36 @@ def receive_telemetry(payload: TelemetryPayload):
             ))
         conn.commit()
     return {"status": "success", "processed_records": len(payload.rollups)}
+
+# Per-Crossing Event Sync Endpoint (durable, independent of rollup aggregation)
+@app.post("/api/v1/telemetry/events")
+def receive_events(payload: EventBatchPayload):
+    with sqlite3.connect(DB_PATH) as conn:
+        for e in payload.events:
+            conn.execute("""
+            INSERT INTO telemetry_events (
+                store_id, device_id, camera_id, wire_id, track_id, direction, event_timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                e.store_id, e.device_id, e.camera_id, e.wire_id, e.track_id, e.direction, e.event_timestamp
+            ))
+        conn.commit()
+    return {"status": "success", "processed_records": len(payload.events)}
+
+# Individually Queryable Crossing Events (audit trail, independent of rollups)
+@app.get("/api/v1/events")
+def get_events(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None, limit: int = 100):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM telemetry_events WHERE store_id = ?"
+        params: List[Any] = [store_id]
+        if camera_id:
+            query += " AND camera_id = ?"
+            params.append(camera_id)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        return {"events": [dict(r) for r in reversed(rows)]}
 
 # Live Store Telemetry
 @app.get("/api/v1/live")
@@ -150,6 +208,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001"):
 def reset_metrics():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM telemetry_rollups")
+        conn.execute("DELETE FROM telemetry_events")
         conn.commit()
     return {"status": "success", "message": "Telemetry database reset successfully."}
 

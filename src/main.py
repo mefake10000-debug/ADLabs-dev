@@ -185,8 +185,11 @@ class EdgePipeline:
                     ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
 
                     # 3. Spatial Analytics
+                    crossing_events: List[Dict[str, Any]] = []
                     for tw in ctx["tripwires"]:
-                        tw.update(active_tracks, frame_time)
+                        crossing_events.extend(tw.update(active_tracks, frame_time))
+                    if crossing_events:
+                        self._persist_crossing_events(cam_id, crossing_events)
 
                     for zone in ctx["zones"]:
                         zone.update(active_tracks, frame_time)
@@ -284,6 +287,21 @@ class EdgePipeline:
                 ctx["zones"] = new_zones
                 ctx["queues"] = new_queues
                 logger.info(f"Hot-reloaded {len(new_tripwires)} tripwires and {len(new_zones) + len(new_queues)} zones for {cam_id}")
+
+    def _persist_crossing_events(self, cam_id: str, events: List[Dict[str, Any]]):
+        """Persists individual tripwire crossings as durable events, independent of
+        the periodic rollup aggregation, so a crash between rollup flushes cannot
+        lose the underlying crossings."""
+        for event in events:
+            self.local_buffer.save_event({
+                "store_id": self.store_id,
+                "device_id": self.device_id,
+                "camera_id": cam_id,
+                "wire_id": event["wire_id"],
+                "track_id": event["track_id"],
+                "direction": event["direction"],
+                "event_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(event["timestamp"]))
+            })
 
     def _generate_and_save_rollup(self, cam_id: str, ctx: Dict[str, Any], current_time: float):
         if ctx["tripwires"]:

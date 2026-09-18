@@ -72,6 +72,49 @@ class LocalBuffer:
         finally:
             conn.close()
 
+    def save_event(self, event: Dict[str, Any]) -> int:
+        query = """
+        INSERT INTO crossing_events (
+            store_id, device_id, camera_id, wire_id, track_id, direction, event_timestamp, exported
+        ) VALUES (
+            :store_id, :device_id, :camera_id, :wire_id, :track_id, :direction, :event_timestamp, 0
+        )
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                cursor = conn.execute(query, event)
+                return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def get_unexported_events(self, limit: int = 200) -> List[Dict[str, Any]]:
+        query = """
+        SELECT * FROM crossing_events
+        WHERE exported = 0
+        ORDER BY id ASC
+        LIMIT ?
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(query, (limit,))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def mark_events_as_exported(self, event_ids: List[int]):
+        if not event_ids:
+            return
+        placeholders = ",".join("?" for _ in event_ids)
+        query = f"UPDATE crossing_events SET exported = 1 WHERE id IN ({placeholders})"
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(query, event_ids)
+        finally:
+            conn.close()
+
     def log_camera_health(self, camera_id: str, status: str, fps: float, dropped: int, latency_ms: float):
         query = """
         INSERT INTO camera_health (camera_id, status, fps, dropped_frames, latency_ms)
