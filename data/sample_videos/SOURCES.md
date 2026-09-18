@@ -24,6 +24,22 @@ candidate test inputs for tracker/detector benchmarking (see `docs/mvp-gap-analy
 §8 M4), the same way `test_footage1.mp4` was left as a commented candidate rather than
 switched to automatically.
 
+## Decision: Oxford Town Centre dataset -- not used
+
+The Oxford Town Centre pedestrian-tracking dataset was considered as a
+candidate for M4 benchmarking (real CCTV footage with natural occlusion).
+It was **not used**: its own maintainers took the official page down in June
+2020 specifically because pedestrians were filmed without consent, and it's
+documented by [exposing.ai](https://exposing.ai/oxford_town_centre/) as a
+cautionary surveillance-ethics case study (the footage propagated into 60+
+research projects, including uses -- e.g. automated sex classification --
+the filmed individuals never agreed to). Given EdgeSight's privacy-first
+positioning, Mihir decided to skip it (2026-09-18)
+rather than use it even as a dev-only asset. If occlusion-heavy benchmark
+footage is needed later, the options are: real pilot-store CCTV footage
+(once available) or a dataset with documented consent/synthetic origin --
+not this one.
+
 ## Licensing caveat
 
 Genuinely open-licensed (CC0/permissive), continuous, single-take CCTV-style footage
