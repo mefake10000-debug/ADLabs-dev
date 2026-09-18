@@ -164,24 +164,33 @@ def get_events(store_id: str = "store_mumbai_001", camera_id: Optional[str] = No
 
 # Live Store Telemetry
 @app.get("/api/v1/live")
-def get_live_metrics(store_id: str = "store_mumbai_001"):
+def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
 
         # Latest rollup for active tracks count
-        latest = conn.execute("""
-        SELECT * FROM telemetry_rollups WHERE store_id = ? ORDER BY id DESC LIMIT 1
-        """, (store_id,)).fetchone()
+        latest_query = "SELECT * FROM telemetry_rollups WHERE store_id = ?"
+        latest_params: List[Any] = [store_id]
+        if camera_id:
+            latest_query += " AND camera_id = ?"
+            latest_params.append(camera_id)
+        latest_query += " ORDER BY id DESC LIMIT 1"
+        latest = conn.execute(latest_query, latest_params).fetchone()
 
         # Real-time people count currently visible in the camera frame
         live_people_count = latest["current_occupancy"] if latest else 0
 
         # Aggregated totals today (filtering by current date so old test data doesn't pollute counts)
-        row_footfall = conn.execute("""
+        footfall_query = """
         SELECT SUM(in_count) as total_visitors, SUM(out_count) as total_exits, AVG(avg_dwell_seconds) as avg_dwell
         FROM telemetry_rollups
         WHERE store_id = ? AND date(received_at) = date('now')
-        """, (store_id,)).fetchone()
+        """
+        footfall_params: List[Any] = [store_id]
+        if camera_id:
+            footfall_query += " AND camera_id = ?"
+            footfall_params.append(camera_id)
+        row_footfall = conn.execute(footfall_query, footfall_params).fetchone()
 
         total_in = row_footfall["total_visitors"] if row_footfall and row_footfall["total_visitors"] is not None else 0
         total_out = row_footfall["total_exits"] if row_footfall and row_footfall["total_exits"] is not None else 0
@@ -193,6 +202,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001"):
 
         return {
             "store_id": store_id,
+            "camera_id": camera_id,
             "total_visitors": total_in,
             "total_exits": total_out,
             "net_occupancy": live_people_count,
@@ -214,15 +224,77 @@ def reset_metrics():
 
 # Historical Rollup Series for Charts
 @app.get("/api/v1/history")
-def get_history(store_id: str = "store_mumbai_001", limit: int = 50):
+def get_history(
+    store_id: str = "store_mumbai_001",
+    camera_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 50
+):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-        SELECT * FROM telemetry_rollups
-        WHERE store_id = ?
-        ORDER BY id DESC LIMIT ?
-        """, (store_id, limit)).fetchall()
+        query = "SELECT * FROM telemetry_rollups WHERE store_id = ?"
+        params: List[Any] = [store_id]
+        if camera_id:
+            query += " AND camera_id = ?"
+            params.append(camera_id)
+        if start_date:
+            query += " AND date(received_at) >= date(?)"
+            params.append(start_date)
+        if end_date:
+            query += " AND date(received_at) <= date(?)"
+            params.append(end_date)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+# Peak/Average Traffic Analytics Summary
+@app.get("/api/v1/analytics/summary")
+def get_analytics_summary(
+    store_id: str = "store_mumbai_001",
+    camera_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        query = """
+        SELECT strftime('%Y-%m-%d %H:00:00', received_at) AS hour_bucket,
+               SUM(in_count) AS visitors
+        FROM telemetry_rollups
+        WHERE store_id = ?
+        """
+        params: List[Any] = [store_id]
+        if camera_id:
+            query += " AND camera_id = ?"
+            params.append(camera_id)
+        if start_date:
+            query += " AND date(received_at) >= date(?)"
+            params.append(start_date)
+        if end_date:
+            query += " AND date(received_at) <= date(?)"
+            params.append(end_date)
+        query += " GROUP BY hour_bucket ORDER BY hour_bucket ASC"
+        rows = conn.execute(query, params).fetchall()
+
+        hourly = [{"hour": r["hour_bucket"], "visitors": r["visitors"] or 0} for r in rows]
+        if hourly:
+            peak = max(hourly, key=lambda h: h["visitors"])
+            avg_visitors_per_hour = round(sum(h["visitors"] for h in hourly) / len(hourly), 1)
+        else:
+            peak = None
+            avg_visitors_per_hour = 0.0
+
+        return {
+            "store_id": store_id,
+            "camera_id": camera_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "peak_period": peak,
+            "avg_visitors_per_hour": avg_visitors_per_hour,
+            "hourly_breakdown": hourly
+        }
 
 # Camera Discovery Endpoint
 @app.get("/api/v1/cameras")

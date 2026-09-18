@@ -124,5 +124,80 @@ class TestCrossingEventsAPI(unittest.TestCase):
         no_match = self.client.get("/api/v1/events", params={"store_id": store_id, "camera_id": "cam_checkout"})
         self.assertEqual(len(no_match.json()["events"]), 0)
 
+class TestAnalyticsAndFilteringAPI(unittest.TestCase):
+    """Coverage for M3: camera-level filtering on /api/v1/history, date-range
+    filtering, and the new /api/v1/analytics/summary peak/average endpoint."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        if os.path.exists(DB_PATH):
+            try:
+                os.remove(DB_PATH)
+            except OSError:
+                pass
+
+    def _seed_rollup(self, store_id, camera_id, in_count, received_at):
+        import sqlite3
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""
+            INSERT INTO telemetry_rollups (
+                store_id, device_id, camera_id, timestamp_start, timestamp_end,
+                in_count, out_count, current_occupancy, avg_dwell_seconds,
+                queue_length, avg_queue_wait_seconds, queue_alert_active, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                store_id, "test_mac_01", camera_id, received_at, received_at,
+                in_count, 0, 0, 0.0, 0, 0.0, 0, received_at
+            ))
+            conn.commit()
+
+    def test_history_filters_by_camera_and_date_range(self):
+        store_id = "test_store_m3_history"
+        self._seed_rollup(store_id, "cam_a", 10, "2026-09-01 09:00:00")
+        self._seed_rollup(store_id, "cam_b", 20, "2026-09-01 10:00:00")
+        self._seed_rollup(store_id, "cam_a", 30, "2026-09-05 09:00:00")
+
+        all_rows = self.client.get("/api/v1/history", params={"store_id": store_id}).json()
+        self.assertEqual(len(all_rows), 3)
+
+        cam_a_only = self.client.get("/api/v1/history", params={"store_id": store_id, "camera_id": "cam_a"}).json()
+        self.assertEqual(len(cam_a_only), 2)
+        self.assertTrue(all(r["camera_id"] == "cam_a" for r in cam_a_only))
+
+        ranged = self.client.get("/api/v1/history", params={
+            "store_id": store_id, "start_date": "2026-09-01", "end_date": "2026-09-01"
+        }).json()
+        self.assertEqual(len(ranged), 2)
+
+    def test_live_metrics_filters_by_camera(self):
+        store_id = "test_store_m3_live"
+        self._seed_rollup(store_id, "cam_a", 10, "2026-09-01 09:00:00")
+        self._seed_rollup(store_id, "cam_b", 999, "2026-09-01 09:05:00")
+
+        cam_a_live = self.client.get("/api/v1/live", params={"store_id": store_id, "camera_id": "cam_a"}).json()
+        self.assertEqual(cam_a_live["camera_id"], "cam_a")
+        self.assertEqual(cam_a_live["total_visitors"], 10)
+
+    def test_analytics_summary_peak_and_average(self):
+        store_id = "test_store_m3_summary"
+        self._seed_rollup(store_id, "cam_a", 5, "2026-09-01 09:00:00")
+        self._seed_rollup(store_id, "cam_a", 15, "2026-09-01 09:30:00")  # same hour bucket -> 20 total
+        self._seed_rollup(store_id, "cam_a", 50, "2026-09-01 17:00:00")  # peak hour
+
+        summary = self.client.get("/api/v1/analytics/summary", params={"store_id": store_id}).json()
+        self.assertEqual(summary["peak_period"]["hour"], "2026-09-01 17:00:00")
+        self.assertEqual(summary["peak_period"]["visitors"], 50)
+        # two hour buckets: 20 and 50 -> average 35.0
+        self.assertEqual(summary["avg_visitors_per_hour"], 35.0)
+
+    def test_analytics_summary_empty_range_returns_no_peak(self):
+        summary = self.client.get("/api/v1/analytics/summary", params={"store_id": "test_store_never_seen"}).json()
+        self.assertIsNone(summary["peak_period"])
+        self.assertEqual(summary["avg_visitors_per_hour"], 0.0)
+
 if __name__ == "__main__":
     unittest.main()
