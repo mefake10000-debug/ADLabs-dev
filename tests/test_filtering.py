@@ -2,6 +2,7 @@ import unittest
 import os
 import sys
 import time
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -9,10 +10,6 @@ from src.perception.detector import PersonDetector
 from src.perception.tracker import Track, SimpleByteTracker
 from src.analytics.tripwire import Tripwire
 
-try:
-    import numpy as np
-except ImportError:
-    np = None
 
 class TestFalsePositiveFiltering(unittest.TestCase):
 
@@ -89,34 +86,21 @@ class TestFalsePositiveFiltering(unittest.TestCase):
         self.assertFalse(tracker.tracks[0].is_stationary)
         self.assertEqual(len(active), 1)
 
-    def test_fallback_detector_returns_well_formed_detections_without_crashing(self):
-        # Regression coverage: PersonDetector._fallback_detect used to be a
-        # no-op stub returning [] unconditionally, silently reporting zero
-        # people whenever the neural model (YOLO) fails to load. It's now a
-        # real classical HOG+SVM detector; this just verifies it runs and
-        # produces correctly-shaped output, not detection accuracy (which is
-        # covered separately by scripts/benchmark_tracking.py).
-        if np is None:
-            self.skipTest("numpy not available")
+    def test_detector_without_a_model_returns_nothing_but_says_so(self):
+        # There is no lower-accuracy fallback detector any more (the HOG one recovered ~7-14% of people on
+        # real footage). A detector whose model failed to load must not look like a working one.
+        with patch.dict(sys.modules, {"ultralytics": None}):   # makes `from ultralytics import YOLO` fail
+            detector = PersonDetector(model_name="yolov8n.pt")
+        self.assertIsNone(detector.model)
+        with self.assertLogs("src.perception.detector", level="ERROR") as logs:
+            self.assertEqual(detector.detect(object()), [])
+        self.assertIn("no model loaded", logs.output[0])
 
-        detector = PersonDetector.__new__(PersonDetector)
-        detector.model = None  # force the fallback path regardless of ultralytics availability
-        detector._hog = None
-        detector.min_height = 40.0
-        detector.min_width = 15.0
-        detector.min_area = 600.0
-        detector.min_aspect_ratio = 1.0
-        detector.max_aspect_ratio = 4.5
-        detector.conf_thresh = 0.35
-
-        blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        detections = detector.detect(blank_frame)
-        self.assertIsInstance(detections, list)
-        for det in detections:
-            self.assertIn("bbox", det)
-            self.assertIn("confidence", det)
-            self.assertIn("class_id", det)
-            self.assertEqual(len(det["bbox"]), 4)
+    def test_require_model_makes_a_failed_model_load_a_startup_error(self):
+        with patch.dict(sys.modules, {"ultralytics": None}):
+            with self.assertRaises(RuntimeError) as ctx:
+                PersonDetector(model_name="yolov8n.pt", require_model=True)
+        self.assertIn("Refusing to run without a working detector", str(ctx.exception))
 
     def test_tripwire_lifetime_deduping(self):
         tw = Tripwire(

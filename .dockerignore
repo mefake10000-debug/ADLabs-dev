@@ -1,0 +1,13 @@
+# Keep the build context small: none of these are COPY'd into any image
+# (sample videos, models and storage are bind-mounted by docker-compose.yml instead).
+.git
+.gitattributes
+.vscode
+.idea
+**/__pycache__
+**/*.pyc
+data
+models
+docs
+tests
+*.md

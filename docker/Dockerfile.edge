@@ -14,7 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python dependencies
+# PyTorch first, in its own cached layer, from the CPU-only wheel index.
+# The default PyPI build for Linux bundles ~4GB of CUDA libraries (nvidia-*, triton) that Docker Desktop
+# and the Mac mini target cannot use. For an NVIDIA GPU host, build with e.g.
+#   TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 docker compose build edge-analyzer
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch torchvision --index-url ${TORCH_INDEX_URL}
+
+# Everything else. Editing requirements-edge.txt no longer re-downloads torch.
 COPY requirements-edge.txt .
 RUN pip install --no-cache-dir -r requirements-edge.txt
 
@@ -27,4 +34,3 @@ COPY scripts/ ./scripts/
 RUN mkdir -p /app/data/sample_videos /app/data/storage /app/models
 
 CMD ["python", "-m", "src.main"]
-

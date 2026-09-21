@@ -6,7 +6,7 @@ edge:
   hardware_backend: "auto" # "auto", "coreml", "cuda", or "cpu"
 
 perception:
-  model_name: "yolo26m.pt"
+  model_name: "models/yolo26m.pt"   # cached in ./models (bind-mounted), so it is downloaded once, not per container
   confidence_threshold: 0.50  # Tuned for retail edge to suppress cardboard cutouts and noise
   iou_threshold: 0.45         # Suppress duplicate overlapping boxes on the same person
   min_height: 95              # Suppress small shelf items and price tags
@@ -15,6 +15,7 @@ perception:
   max_aspect_ratio: 4.2       # Suppress vertical slivers / poles
   min_area: 3000
   classes: [0]                # Class 0 is 'person' in COCO
+  require_model: true         # Fail at startup if YOLO cannot load, instead of silently reporting zero people
 
 tracking:
   tracker_type: "bytetrack"

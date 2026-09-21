@@ -16,6 +16,9 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.edge
+      args:
+        # CPU-only torch by default; set TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 for NVIDIA GPU hosts
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     container_name: adlabs-edge-analyzer
     depends_on:
       - rtsp-simulator
@@ -23,6 +26,7 @@ services:
     volumes:
       - ./configs:/app/configs:ro
       - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro   # benchmark scripts + ground truth run without rebuilding the image
       - ./data/sample_videos:/app/data/sample_videos:ro
       - ./data/storage:/app/data/storage
       - ./models:/app/models
@@ -45,6 +49,7 @@ services:
       - ./server:/app/server:ro
       - ./configs:/app/configs
       - ./data/storage:/app/data/storage
+      - ./data/sample_videos:/app/data/sample_videos:ro   # lets the dashboard list/validate selectable video sources
     environment:
       - PYTHONUNBUFFERED=1
       - CAMERAS_CONFIG=/app/configs/cameras.yaml

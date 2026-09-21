@@ -1,12 +1,11 @@
-opencv-python-headless>=4.8.0,<5.0.0  # cv2.HOGDescriptor (used by PersonDetector's classical CV fallback) was removed in 5.0
-numpy>=1.24.0
+# Note: the Docker image installs torch/torchvision from the CPU wheel index first (see docker/Dockerfile.edge);
+# they are listed here for native (non-Docker) installs.
 torch>=2.0.0
 torchvision>=0.15.0
 ultralytics>=8.0.0
+# ultralytics depends on the full opencv-python; declaring opencv-python-headless as well installs two
+# conflicting cv2 builds into the same directory.
+opencv-python>=4.8.0
+numpy>=1.24.0
 pyyaml>=6.0
 requests>=2.31.0
-pydantic>=2.0.0
-shapely>=2.0.0
-filterpy>=1.4.5
-lapx>=0.5.5
-

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 try:
     import cv2
@@ -23,7 +23,8 @@ class DebugOverlay:
         zones: List[Zone],
         queues: List[QueueAnalyzer],
         camera_name: str = "Camera",
-        fps: float = 0.0
+        fps: float = 0.0,
+        infer_fps: Optional[float] = None
     ) -> Any:
         if cv2 is None or np is None or frame is None:
             return frame
@@ -100,7 +101,8 @@ class DebugOverlay:
 
         # 5. Draw HUD Bar at top
         cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 40), (20, 20, 20), -1)
-        hud_text = f"AD Labs EdgeSight | {camera_name} | FPS: {fps:.1f} | People Count: {len(tracks)}"
+        fps_text = f"FPS: {fps:.1f}" if infer_fps is None else f"Decode {fps:.1f} | Infer {infer_fps:.1f} FPS"
+        hud_text = f"AD Labs EdgeSight | {camera_name} | {fps_text} | People Count: {len(tracks)}"
         cv2.putText(canvas, hud_text, (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         return canvas

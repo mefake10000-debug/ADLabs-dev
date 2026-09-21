@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import signal
 import yaml
 import logging
@@ -73,7 +74,9 @@ class EdgePipeline:
             min_width=min_width,
             min_aspect_ratio=min_aspect_ratio,
             max_aspect_ratio=max_aspect_ratio,
-            min_area=min_area
+            min_area=min_area,
+            # a pipeline running without a working detector would report plausible-looking zeros
+            require_model=p_cfg.get("require_model", True)
         )
 
         self.cameras_cfg_path = cameras_config_path
@@ -93,68 +96,80 @@ class EdgePipeline:
         with open(path, "r") as f:
             return yaml.safe_load(f) or {}
 
-    def _init_cameras(self):
-        cameras_list = self.cameras_cfg.get("cameras", [])
-        t_cfg = self.pipeline_cfg.get("tracking", {})
-        for cam in cameras_list:
-            cam_id = cam["id"]
-            cam_name = cam.get("name", cam_id)
-            source = cam.get("source", "")
-            fps_target = cam.get("fps_target", 15)
+    @staticmethod
+    def _build_analytics(cam: Dict[str, Any]):
+        tripwires = []
+        for tw in cam.get("tripwires", []):
+            tripwires.append(Tripwire(
+                wire_id=tw["id"],
+                name=tw.get("name", tw["id"]),
+                line=tw["line"],
+                in_direction=tw.get("in_direction", "top_to_bottom")
+            ))
 
-            reader = StreamReader(camera_id=cam_id, source=source, fps_target=fps_target)
-            tracker = SimpleByteTracker(
+        zones = []
+        queues = []
+        for z in cam.get("zones", []):
+            if z.get("type") == "queue":
+                queues.append(QueueAnalyzer(
+                    zone_id=z["id"],
+                    name=z.get("name", z["id"]),
+                    polygon=z["polygon"],
+                    max_comfortable_queue=z.get("max_comfortable_queue", 4),
+                    congestion_threshold_seconds=z.get("congestion_threshold_seconds", 120.0)
+                ))
+            else:
+                zones.append(Zone(
+                    zone_id=z["id"],
+                    name=z.get("name", z["id"]),
+                    polygon=z["polygon"],
+                    zone_type=z.get("type", "dwell")
+                ))
+        return tripwires, zones, queues
+
+    @staticmethod
+    def _calibration_signature(cam: Dict[str, Any]) -> str:
+        return json.dumps({"tripwires": cam.get("tripwires", []), "zones": cam.get("zones", [])}, sort_keys=True)
+
+    def _build_camera_context(self, cam: Dict[str, Any]) -> Dict[str, Any]:
+        t_cfg = self.pipeline_cfg.get("tracking", {})
+        cam_id = cam["id"]
+        source = cam.get("source", "")
+        fps_target = cam.get("fps_target", 15)
+
+        tripwires, zones, queues = self._build_analytics(cam)
+        return {
+            "name": cam.get("name", cam_id),
+            "source": source,
+            "fps_target": fps_target,
+            "calibration_sig": self._calibration_signature(cam),
+            "reader": StreamReader(camera_id=cam_id, source=source, fps_target=fps_target),
+            "tracker": SimpleByteTracker(
                 max_age=t_cfg.get("track_buffer", 30),
                 iou_threshold=t_cfg.get("match_thresh", 0.45),
                 min_hits=t_cfg.get("min_hits", 4),
                 filter_stationary=t_cfg.get("filter_stationary", True)
-            )
+            ),
+            "tripwires": tripwires,
+            "zones": zones,
+            "queues": queues,
+            "tracked_ids_today": set(),
+            "last_unique_count": 0,
+            "current_active_tracks": [],
+            "last_rollup_time": time.time(),
+            "rollup_start_time": time.time(),
+            "frames_processed": 0,
+            "processed_fps": 0.0,
+            "fps_window_start": time.time(),
+            "fps_window_frames": 0,
+            "last_in_count": 0,
+            "last_out_count": 0
+        }
 
-            tripwires = []
-            for tw in cam.get("tripwires", []):
-                tripwires.append(Tripwire(
-                    wire_id=tw["id"],
-                    name=tw.get("name", tw["id"]),
-                    line=tw["line"],
-                    in_direction=tw.get("in_direction", "top_to_bottom")
-                ))
-
-            zones = []
-            queues = []
-            for z in cam.get("zones", []):
-                if z.get("type") == "queue":
-                    queues.append(QueueAnalyzer(
-                        zone_id=z["id"],
-                        name=z.get("name", z["id"]),
-                        polygon=z["polygon"],
-                        max_comfortable_queue=z.get("max_comfortable_queue", 4),
-                        congestion_threshold_seconds=z.get("congestion_threshold_seconds", 120.0)
-                    ))
-                else:
-                    zones.append(Zone(
-                        zone_id=z["id"],
-                        name=z.get("name", z["id"]),
-                        polygon=z["polygon"],
-                        zone_type=z.get("type", "dwell")
-                    ))
-
-            self.camera_contexts[cam_id] = {
-                "name": cam_name,
-                "reader": reader,
-                "tracker": tracker,
-                "tripwires": tripwires,
-                "zones": zones,
-                "queues": queues,
-                "tracked_ids_today": set(),
-                "last_unique_count": 0,
-                "current_active_tracks": [],
-                "last_rollup_time": time.time(),
-                "rollup_start_time": time.time(),
-                "frames_processed": 0,
-                "last_in_count": 0,
-                "last_out_count": 0
-            }
-            logger.info(f"Initialized pipeline for camera: {cam_name} ({cam_id})")
+    def _init_cameras(self):
+        for cam in self.cameras_cfg.get("cameras", []):
+            self.camera_contexts[cam["id"]] = self._build_camera_context(cam)
+            logger.info(f"Initialized pipeline for camera: {cam.get('name', cam['id'])} ({cam['id']})")
 
     def start(self):
         self.running = True
@@ -175,6 +190,15 @@ class EdgePipeline:
 
                     frame_idx, frame_time, frame = item
                     ctx["frames_processed"] += 1
+
+                    # Inference throughput (frames actually run through detect+track), as opposed to
+                    # the reader's decode rate: the ring buffer silently drops frames when inference lags.
+                    ctx["fps_window_frames"] += 1
+                    window = time.time() - ctx["fps_window_start"]
+                    if window >= 2.0:
+                        ctx["processed_fps"] = round(ctx["fps_window_frames"] / window, 1)
+                        ctx["fps_window_start"] = time.time()
+                        ctx["fps_window_frames"] = 0
 
                     # 1. Perception
                     detections = self.detector.detect(frame)
@@ -207,7 +231,8 @@ class EdgePipeline:
                                 zones=ctx["zones"],
                                 queues=ctx["queues"],
                                 camera_name=ctx["name"],
-                                fps=ctx["reader"].fps_actual
+                                fps=ctx["reader"].fps_actual,
+                                infer_fps=ctx["processed_fps"]
                             )
                             frame_path = os.path.join(self.frames_dir, f"{cam_id}.jpg")
                             tmp_path = os.path.join(self.frames_dir, f"{cam_id}.tmp.jpg")
@@ -250,43 +275,51 @@ class EdgePipeline:
             logger.error(f"Error checking hot-reload: {e}")
 
     def _apply_camera_config_update(self, new_cfg: Dict[str, Any]):
-        for cam in new_cfg.get("cameras", []):
-            cam_id = cam["id"]
-            if cam_id in self.camera_contexts:
-                ctx = self.camera_contexts[cam_id]
-                # Update Tripwires
-                new_tripwires = []
-                for tw in cam.get("tripwires", []):
-                    new_tripwires.append(Tripwire(
-                        wire_id=tw["id"],
-                        name=tw.get("name", tw["id"]),
-                        line=tw["line"],
-                        in_direction=tw.get("in_direction", "top_to_bottom")
-                    ))
-                ctx["tripwires"] = new_tripwires
+        """Reconciles running cameras with the config file: adds new cameras, removes
+        deleted ones, restarts a camera whose source/FPS changed (fresh tracker and
+        counters -- it's a different scene), and swaps calibration in place otherwise."""
+        new_cams = {c["id"]: c for c in new_cfg.get("cameras", []) if c.get("id")}
 
-                # Update Zones & Queues
-                new_zones = []
-                new_queues = []
-                for z in cam.get("zones", []):
-                    if z.get("type") == "queue":
-                        new_queues.append(QueueAnalyzer(
-                            zone_id=z["id"],
-                            name=z.get("name", z["id"]),
-                            polygon=z["polygon"],
-                            max_comfortable_queue=z.get("max_comfortable_queue", 4),
-                            congestion_threshold_seconds=z.get("congestion_threshold_seconds", 120.0)
-                        ))
-                    else:
-                        new_zones.append(Zone(
-                            zone_id=z["id"],
-                            name=z.get("name", z["id"]),
-                            polygon=z["polygon"],
-                            zone_type=z.get("type", "dwell")
-                        ))
-                ctx["zones"] = new_zones
-                ctx["queues"] = new_queues
-                logger.info(f"Hot-reloaded {len(new_tripwires)} tripwires and {len(new_zones) + len(new_queues)} zones for {cam_id}")
+        for cam_id in list(self.camera_contexts):
+            if cam_id not in new_cams:
+                old = self.camera_contexts.pop(cam_id)
+                self._generate_and_save_rollup(cam_id, old, time.time())
+                old["reader"].stop()
+                logger.info(f"Camera {cam_id} removed from config; stopped.")
+
+        for cam_id, cam in new_cams.items():
+            ctx = self.camera_contexts.get(cam_id)
+
+            if ctx is None:
+                self.camera_contexts[cam_id] = self._build_camera_context(cam)
+                if self.running:
+                    self.camera_contexts[cam_id]["reader"].start()
+                logger.info(f"Camera {cam_id} added from config.")
+                continue
+
+            if cam.get("source", "") != ctx["source"] or cam.get("fps_target", 15) != ctx["fps_target"]:
+                self._generate_and_save_rollup(cam_id, ctx, time.time())
+                ctx["reader"].stop()
+                self.camera_contexts[cam_id] = self._build_camera_context(cam)
+                if self.running:
+                    self.camera_contexts[cam_id]["reader"].start()
+                logger.info(f"Camera {cam_id} source changed: {ctx['source']} -> {cam.get('source', '')}")
+                continue
+
+            ctx["name"] = cam.get("name", cam_id)
+            if self._calibration_signature(cam) != ctx["calibration_sig"]:
+                # Flush the old counters first, then reset the delta baselines: the new
+                # Tripwire objects start at zero, so a stale last_in_count would make the
+                # next rollup's delta negative.
+                self._generate_and_save_rollup(cam_id, ctx, time.time())
+                ctx["tripwires"], ctx["zones"], ctx["queues"] = self._build_analytics(cam)
+                ctx["calibration_sig"] = self._calibration_signature(cam)
+                ctx["last_in_count"] = 0
+                ctx["last_out_count"] = 0
+                logger.info(
+                    f"Hot-reloaded {len(ctx['tripwires'])} tripwires and "
+                    f"{len(ctx['zones']) + len(ctx['queues'])} zones for {cam_id}"
+                )
 
     def _persist_crossing_events(self, cam_id: str, events: List[Dict[str, Any]]):
         """Persists individual tripwire crossings as durable events, independent of
@@ -360,7 +393,8 @@ class EdgePipeline:
 
         logger.info(
             f"[{cam_id}] People Count: {current_occupancy} live | "
-            f"New Shoppers: +{delta_in} | Total Unique: {len(ctx['tracked_ids_today'])}"
+            f"New Shoppers: +{delta_in} | Total Unique: {len(ctx['tracked_ids_today'])} | "
+            f"Decode FPS: {getattr(ctx.get('reader'), 'fps_actual', 0.0)} | Inference FPS: {ctx.get('processed_fps', 0.0)}"
         )
 
     def stop(self):

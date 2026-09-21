@@ -7,15 +7,17 @@ try:
 except ImportError:
     np = None
 
-try:
-    import cv2
-except ImportError:
-    cv2 = None
-
 logger = logging.getLogger(__name__)
 
 class PersonDetector:
-    """YOLO-based person detector with automatic device selection and offline fallback."""
+    """YOLO-based person detector with automatic device selection.
+
+    There is deliberately no lower-accuracy fallback detector: the classical HOG+SVM detector this
+    used to fall back to recovered only ~7-14% of people on real shop footage (see
+    docs/tracking-benchmark.md), i.e. it produced plausible-looking but wrong numbers. With
+    require_model=True (what the edge pipeline uses) a model that cannot load is a startup error.
+    Without it (unit tests, dev machines without torch) the detector returns no detections and
+    logs an error, so nothing downstream mistakes it for a working detector."""
 
     def __init__(
         self,
@@ -26,7 +28,8 @@ class PersonDetector:
         min_width: float = 30.0,
         min_aspect_ratio: float = 1.0,
         max_aspect_ratio: float = 4.2,
-        min_area: float = 3000.0
+        min_area: float = 3000.0,
+        require_model: bool = False
     ):
         self.model_name = model_name
         self.conf_thresh = conf_thresh
@@ -37,7 +40,8 @@ class PersonDetector:
         self.max_aspect_ratio = max_aspect_ratio
         self.min_area = min_area
         self.model = None
-        self._hog = None
+        self.require_model = require_model
+        self._warned_no_model = False
         self.device = self._select_device()
         self._init_model()
 
@@ -62,13 +66,21 @@ class PersonDetector:
             self.model = YOLO(self.model_name)
             logger.info("YOLO model successfully loaded.")
         except Exception as e:
-            logger.warning(f"Could not initialize Ultralytics YOLO ({e}). Initializing fallback detector.")
             self.model = None
+            if self.require_model:
+                raise RuntimeError(
+                    f"Could not load YOLO model '{self.model_name}': {e}. Refusing to run without a working "
+                    f"detector (set perception.require_model: false only for development)."
+                ) from e
+            logger.error(f"Could not initialize Ultralytics YOLO ({e}). This detector will return NO detections.")
 
     def detect(self, frame: Any) -> List[Dict[str, Any]]:
         """Detect people in frame. Returns list of bounding boxes with confidence scores."""
         if self.model is None:
-            return self._fallback_detect(frame)
+            if not self._warned_no_model:
+                logger.error("PersonDetector has no model loaded; returning no detections.")
+                self._warned_no_model = True
+            return []
 
         try:
             # Run inference targeting class 0 ('person' in COCO dataset)
@@ -144,50 +156,3 @@ class PersonDetector:
                 keep.append(det)
 
         return keep
-
-    def _fallback_detect(self, frame: Any) -> List[Dict[str, Any]]:
-        """Classical HOG+SVM person detector, used when the neural model (YOLO)
-        cannot be loaded. Noticeably less accurate than YOLO -- particularly on
-        small/distant/occluded figures -- but real detection is strictly better
-        than silently returning zero people."""
-        if cv2 is None:
-            return []
-
-        if self._hog is None:
-            self._hog = cv2.HOGDescriptor()
-            self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
-        try:
-            rects, weights = self._hog.detectMultiScale(
-                frame, winStride=(8, 8), padding=(8, 8), scale=1.05
-            )
-        except Exception as e:
-            logger.error(f"Fallback HOG detection error: {e}")
-            return []
-
-        detections = []
-        for (x, y, w, h), weight in zip(rects, weights):
-            area = w * h
-            aspect = h / max(1.0, w)
-
-            if h < self.min_height or w < self.min_width:
-                continue
-            if area < self.min_area:
-                continue
-            if aspect < self.min_aspect_ratio or aspect > self.max_aspect_ratio:
-                continue
-
-            # HOG's SVM decision score isn't a probability; squash to (0, 1) for a
-            # confidence-shaped value comparable in spirit to the YOLO path.
-            confidence = float(1.0 / (1.0 + np.exp(-weight))) if np is not None else 0.5
-            if confidence < self.conf_thresh:
-                continue
-
-            detections.append({
-                "bbox": [round(float(x), 1), round(float(y), 1), round(float(x + w), 1), round(float(y + h), 1)],
-                "confidence": round(confidence, 3),
-                "class_id": 0
-            })
-
-        return self._suppress_contained_duplicates(detections)
-
