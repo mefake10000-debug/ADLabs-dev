@@ -1,7 +1,22 @@
 # M4 — Tracking Accuracy Benchmark
 
 **Status: baseline established, but NOT authoritative.** Every number in this
-report was produced by the classical HOG+SVM fallback detector, not YOLO. See
+report was produced by the classical HOG+SVM fallback detector, not YOLO.
+
+> **Correction (2026-09-19):** an earlier version of this document called `entrance_sample.mp4` synthetic. That
+> was wrong -- it is real IP-camera footage of a shop, and the best benchmark clip in the repo. Only
+> `checkout_sample.mp4` is synthetic. See [recorded-run-analysis.md](recorded-run-analysis.md) for the analysis of a
+> real-YOLO Docker run on it, and `scripts/benchmark_ground_truth/entrance_sample.json` for hand-counted checkpoints.
+
+> **Update (2026-09-20): the HOG fallback detector was removed.** It recovered only 7-14% of people on real shop
+> footage, so it produced plausible-but-wrong numbers rather than a useful degraded mode; in the Docker image it
+> would not even have run (`ultralytics` pulls in the full `opencv-python` 5.0, which has no `cv2.HOGDescriptor`,
+> silently defeating the `<5.0.0` pin described below). `PersonDetector` now raises at startup when
+> `perception.require_model` is true (the default for the edge pipeline) and the benchmark script refuses to run
+> without YOLO. Every HOG-based number in this file is historical and only a floor. Sections below that describe the
+> HOG fallback as a fix are superseded by this note.
+
+Below, this report's caveat still applies: See
 [Environment limitation](#environment-limitation-this-run-used-hog-not-yolo)
 before drawing any conclusion about production accuracy.
 
@@ -13,10 +28,11 @@ compares the result to a manually-verified ground truth JSON file
 (`scripts/benchmark_ground_truth/*.json`). Two ground-truth methods are
 supported:
 
-- **point-in-time headcount**: a specific frame index plus a manually counted
-  number of clearly-visible pedestrians in that frame. Compared against
-  `detector.detect()`'s raw detection count at that same frame ("detection
-  recall").
+- **point-in-time headcount**: one or more `checkpoints` (frame index + manually
+  counted visible people). At each, the harness reports the detector's raw count
+  *and* the tracker's output (what analytics/dashboard actually see, after `min_hits`
+  and stationary suppression), so the cost of the tracker's filtering is measured
+  directly. Detector/tracker settings come from `configs/pipeline.yaml`.
 - **tripwire crossings**: expected IN/OUT counts for a defined line, compared
   against the tracker-driven `Tripwire`'s actual counts ("count accuracy"),
   plus a rough ID-fragmentation estimate (`unique track IDs seen - expected
@@ -48,36 +64,29 @@ claim (see [Results](#results)).
 | `mall_entrance_topdown_01.mp4` | HOG+SVM fallback | 550 (22.0s) | 9 people @ frame 500 (manual count) | **9/9 detected (100% recall)**, but **66 unique track IDs** over the clip |
 | `mall_promenade_01.mp4` | HOG+SVM fallback | 950 (31.7s) | 4 people @ frame 900 (manual count) | **2/4 detected (50% recall)**, **24 unique track IDs** |
 | `test_footage1.mp4` | HOG+SVM fallback | 341 (11.4s) | none (crowd too dense to hand-count confidently) | **70 unique track IDs** in 11.4s -- exploratory only |
-| `entrance_sample.mp4` (synthetic) | HOG+SVM fallback | 300 (22.9s) | none (flat-color synthetic rectangles, not real people) | **37 unique track IDs** -- confirms this video is unsuited for detector benchmarking (see below) |
+| `entrance_sample.mp4` (real shop CCTV) | HOG+SVM fallback | 300 (22.9s) | none at the time (5 hand-counted checkpoints added 2026-09-19) | **37 unique track IDs**; a later checkpoint run shows HOG raw-detection recall of only 7-14% on this clip. Superseded by the real-YOLO run in [recorded-run-analysis.md](recorded-run-analysis.md) |
 
 Full console output (backend line, resolution, wall-clock time) is reproducible via the commands in [Reproducing](#reproducing-these-numbers).
 
 ### Reading the "unique track IDs" numbers
 
 Unique-track-ID counts here are wildly higher than plausible real occupancy
-(66 IDs for 9 real people; 24 for 4). This is **not** primarily a tracker
-defect -- `SimpleByteTracker`'s matching/confirmation logic already has
-dedicated test coverage (`tests/test_filtering.py`) for exactly this kind of
-fragmentation. It's the fallback detector: HOG+SVM produces unstable,
-flickering, sometimes spurious boxes frame-to-frame (confirmed directly --
-see below), and every detection gap longer than `max_age` forces the tracker
-to mint a new ID for what may be the same person, or a same-ID assignment to
-what is actually a false-positive blob. The count-accuracy and ID-switch-rate
-acceptance criteria for M4 are answered here, but the answer is "the fallback
-detector, not the tracker, is the dominant source of error" -- which is
-itself the useful finding this milestone was meant to produce.
+(66 IDs for 9 real people; 24 for 4). With the HOG fallback the detector is the
+dominant cause: it produces unstable, flickering, sometimes spurious boxes
+frame-to-frame, and every detection gap longer than `max_age` makes the tracker mint
+a new ID. This document originally went further and said the tracker was not a
+significant contributor. A later real-YOLO Docker run disproves that: the tracker
+itself fragments identities (a cashier got three IDs in 61s) through its `max_age`
+and stationary-suppression logic -- see
+[recorded-run-analysis.md](recorded-run-analysis.md).
 
-### Synthetic sample videos are not valid detector benchmark inputs
+### `checkout_sample.mp4` is synthetic; `entrance_sample.mp4` is not
 
-`entrance_sample.mp4`/`checkout_sample.mp4` are procedurally drawn flat-color
-rectangles (`scripts/generate_sample_video.py`), not photographic people.
-The existing unit tests (`tests/test_pipeline_core.py`,
-`tests/test_filtering.py`) correctly treat them as tracker/analytics-logic
-fixtures by constructing `Track`/detection objects directly, never running
-them through `PersonDetector.detect()`. Running the actual detector against
-`entrance_sample.mp4` here (37 unique IDs from flat rectangles that are
-obviously not people) confirms this is the right call -- these videos exist
-for pipeline plumbing and visual regression, not detection accuracy.
+`checkout_sample.mp4` (18KB) is a procedurally drawn scene
+(`scripts/generate_sample_video.py`) and is not a valid detector benchmark input.
+`entrance_sample.mp4` was previously described here as synthetic too; that was an
+assumption drawn from the generator script that I did not verify against the file,
+and it is incorrect -- it is real shop CCTV (see the correction at the top).
 
 ## Environment limitation: this run used HOG, not YOLO
 
@@ -122,6 +131,18 @@ Running this benchmark exposed two real defects, both fixed in this pass:
    unpinned install.
 
 ## Reproducing these numbers
+
+For authoritative numbers, run inside the edge container (real YOLO); rebuild first so the
+image picks up `scripts/`:
+
+```
+docker compose build edge-analyzer
+docker compose run --rm edge-analyzer python scripts/benchmark_tracking.py \
+    data/sample_videos/entrance_sample.mp4 \
+    --ground-truth scripts/benchmark_ground_truth/entrance_sample.json
+```
+
+The commands below are the local (HOG-fallback) runs behind the table above:
 
 ```
 python scripts/benchmark_tracking.py data/sample_videos/mall_entrance_topdown_01.mp4 \
