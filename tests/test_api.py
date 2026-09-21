@@ -6,7 +6,10 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 DB_PATH = "data/storage/test_cloud_metrics.db"
+CONFIG_PATH = "data/storage/test_cameras.yaml"
 os.environ["SERVER_DB_PATH"] = DB_PATH
+# The config endpoints write to disk -- never let tests touch the real configs/cameras.yaml
+os.environ["CAMERAS_CONFIG"] = CONFIG_PATH
 
 if os.path.exists(DB_PATH):
     try:
@@ -14,8 +17,11 @@ if os.path.exists(DB_PATH):
     except OSError:
         pass
 
+import yaml
 from fastapi.testclient import TestClient
-from server.app import app
+from server.app import app, init_db
+
+TEST_VIDEO = "data/sample_videos/mall_concourse_01.mp4"
 
 class TestLiveMetricsAPI(unittest.TestCase):
     """Regression coverage for M0: /api/v1/live used to hardcode queue_length/
@@ -24,15 +30,8 @@ class TestLiveMetricsAPI(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        init_db()   # tables must exist even if an earlier test module removed the file
         cls.client = TestClient(app)
-
-    @classmethod
-    def tearDownClass(cls):
-        if os.path.exists(DB_PATH):
-            try:
-                os.remove(DB_PATH)
-            except OSError:
-                pass
 
     def test_live_metrics_echoes_seeded_queue_fields(self):
         store_id = "test_store_api"
@@ -71,15 +70,8 @@ class TestCrossingEventsAPI(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        init_db()   # tables must exist even if an earlier test module removed the file
         cls.client = TestClient(app)
-
-    @classmethod
-    def tearDownClass(cls):
-        if os.path.exists(DB_PATH):
-            try:
-                os.remove(DB_PATH)
-            except OSError:
-                pass
 
     def test_events_ingested_and_individually_queryable(self):
         store_id = "test_store_events"
@@ -130,15 +122,8 @@ class TestAnalyticsAndFilteringAPI(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        init_db()   # tables must exist even if an earlier test module removed the file
         cls.client = TestClient(app)
-
-    @classmethod
-    def tearDownClass(cls):
-        if os.path.exists(DB_PATH):
-            try:
-                os.remove(DB_PATH)
-            except OSError:
-                pass
 
     def _seed_rollup(self, store_id, camera_id, in_count, received_at):
         import sqlite3
@@ -198,6 +183,114 @@ class TestAnalyticsAndFilteringAPI(unittest.TestCase):
         summary = self.client.get("/api/v1/analytics/summary", params={"store_id": "test_store_never_seen"}).json()
         self.assertIsNone(summary["peak_period"])
         self.assertEqual(summary["avg_visitors_per_hour"], 0.0)
+
+class TestCameraConfigAPI(unittest.TestCase):
+    """Front-end camera source switching and calibration must edit one camera
+    in place, never clobber the rest of cameras.yaml, and reject bad input."""
+
+    @classmethod
+    def setUpClass(cls):
+        init_db()   # tables must exist even if an earlier test module removed the file
+        cls.client = TestClient(app)
+
+    def setUp(self):
+        with open(CONFIG_PATH, "w") as f:
+            yaml.safe_dump({"cameras": [
+                {"id": "cam_a", "name": "Cam A", "source": "data/sample_videos/entrance_sample.mp4", "fps_target": 15,
+                 "tripwires": [{"id": "tw1", "line": [[0, 10], [100, 10]], "in_direction": "top_to_bottom"}]},
+                {"id": "cam_b", "name": "Cam B", "source": "rtsp://10.0.0.5/stream", "fps_target": 10},
+            ]}, f, sort_keys=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        for path in (CONFIG_PATH, CONFIG_PATH + ".tmp"):
+            if os.path.exists(path):
+                os.remove(path)
+
+    def _config(self):
+        with open(CONFIG_PATH) as f:
+            return {c["id"]: c for c in yaml.safe_load(f)["cameras"]}
+
+    def test_lists_selectable_videos(self):
+        videos = self.client.get("/api/v1/config/sources").json()["videos"]
+        self.assertIn(TEST_VIDEO, videos)
+        self.assertTrue(all(v.startswith("data/sample_videos/") for v in videos))
+
+    def test_switch_source_changes_only_that_camera_and_keeps_calibration(self):
+        resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": TEST_VIDEO, "fps_target": 12})
+        self.assertEqual(resp.status_code, 200)
+        cfg = self._config()
+        self.assertEqual(cfg["cam_a"]["source"], TEST_VIDEO)
+        self.assertEqual(cfg["cam_a"]["fps_target"], 12)
+        self.assertEqual(cfg["cam_a"]["tripwires"][0]["id"], "tw1")   # calibration preserved
+        self.assertEqual(cfg["cam_b"]["source"], "rtsp://10.0.0.5/stream")  # other camera untouched
+
+    def test_rtsp_source_accepted(self):
+        resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": "rtsp://admin:pw@192.168.1.10:554/ch1"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._config()["cam_a"]["source"], "rtsp://admin:pw@192.168.1.10:554/ch1")
+
+    def test_bad_sources_rejected_and_config_unchanged(self):
+        before = self._config()
+        bad_sources = [
+            "",                                            # empty
+            "data/sample_videos/does_not_exist.mp4",       # missing file
+            "data/sample_videos/../../etc/passwd",         # path traversal
+            "/etc/passwd",                                 # absolute path
+            "data/sample_videos/SOURCES.md",               # not a video
+            "configs/pipeline.yaml",                       # outside the video dir
+        ]
+        for source in bad_sources:
+            resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": source})
+            self.assertEqual(resp.status_code, 400, f"{source!r} should be rejected")
+        self.assertEqual(self._config(), before)
+
+    def test_unknown_camera_is_404(self):
+        resp = self.client.post("/api/v1/config/cameras/nope/source", json={"source": TEST_VIDEO})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_calibration_saves_queue_zone_and_preserves_source(self):
+        body = {
+            "tripwires": [{"id": "door", "line": [[600, 580], [1050, 580]], "in_direction": "bottom_to_top"}],
+            "zones": [{"id": "q1", "polygon": [[100, 200], [400, 200], [400, 500]], "type": "queue",
+                       "max_comfortable_queue": 3, "congestion_threshold_seconds": 90}],
+        }
+        resp = self.client.post("/api/v1/config/cameras/cam_a/calibration", json=body)
+        self.assertEqual(resp.status_code, 200)
+        cam = self._config()["cam_a"]
+        self.assertEqual(cam["source"], "data/sample_videos/entrance_sample.mp4")
+        self.assertEqual(cam["tripwires"][0]["id"], "door")
+        self.assertEqual(cam["zones"][0]["type"], "queue")
+        self.assertEqual(cam["zones"][0]["max_comfortable_queue"], 3)
+        self.assertEqual(self._config()["cam_b"]["fps_target"], 10)
+
+    def test_calibration_omitting_a_key_leaves_it_alone(self):
+        self.client.post("/api/v1/config/cameras/cam_a/calibration",
+                         json={"zones": [{"id": "z", "polygon": [[0, 0], [10, 0], [10, 10]]}]})
+        cam = self._config()["cam_a"]
+        self.assertEqual(cam["tripwires"][0]["id"], "tw1")
+        self.assertEqual(cam["zones"][0]["id"], "z")
+
+    def test_invalid_calibration_rejected(self):
+        for body in (
+            {"zones": [{"id": "z", "polygon": [[0, 0], [10, 0]]}]},                       # 2 points
+            {"zones": [{"id": "z", "polygon": [[0, 0], [10, 0], [5, 5]], "type": "x"}]},  # bad type
+            {"tripwires": [{"id": "t", "line": [[0, 0]]}]},                                # 1 point
+            {"tripwires": [{"id": "t", "line": [[0, 0], [1, 1]], "in_direction": "left"}]},
+        ):
+            resp = self.client.post("/api/v1/config/cameras/cam_a/calibration", json=body)
+            self.assertEqual(resp.status_code, 422, body)
+        self.assertEqual(self._config()["cam_a"]["tripwires"][0]["id"], "tw1")
+
+
+def tearDownModule():
+    # Removing the DB per test class broke every later class on Linux (Windows just failed to delete an open file).
+    for path in (DB_PATH, CONFIG_PATH, CONFIG_PATH + ".tmp"):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     unittest.main()

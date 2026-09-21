@@ -68,6 +68,11 @@
                     <span class="font-medium">Traffic & People Analytics</span>
                 </button>
 
+                <button onclick="switchView('view-calibration')" id="btn-calibration" class="nav-btn w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-lg text-gray-300 hover:bg-surface-hover hover:text-white transition">
+                    <i data-lucide="crosshair" class="w-4 h-4"></i>
+                    <span class="font-medium">Calibration Studio</span>
+                </button>
+
                 <button onclick="switchView('view-settings')" id="btn-settings" class="nav-btn w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-lg text-gray-300 hover:bg-surface-hover hover:text-white transition">
                     <i data-lucide="settings" class="w-4 h-4"></i>
                     <span class="font-medium">Camera & Device</span>
@@ -106,7 +111,7 @@
 
             <div class="flex items-center space-x-3">
                 <select id="camera-selector" onchange="onCameraChange()" class="bg-surface-card border border-surface-border text-gray-200 text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:border-emerald-500">
-                    <option value="cam_entrance_01">Main Store Entrance (cam_entrance_01)</option>
+                    <option value="cam_entrance_01">cam_entrance_01</option>
                 </select>
                 <button onclick="fetchLiveTelemetry()" class="bg-surface-card border border-surface-border hover:bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1 transition">
                     <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
@@ -264,8 +269,16 @@
                         </button>
                         <button onclick="setCalibMode('polygon')" id="mode-poly" class="bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5">
                             <i data-lucide="hexagon" class="w-3.5 h-3.5"></i>
-                            <span>Draw Zone Polygon</span>
+                            <span>Draw Dwell Zone</span>
                         </button>
+                        <button onclick="setCalibMode('queue')" id="mode-queue" class="bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5">
+                            <i data-lucide="users" class="w-3.5 h-3.5"></i>
+                            <span>Draw Queue Zone</span>
+                        </button>
+                        <select id="calib-direction" title="Direction of travel that counts as an ENTRY" class="bg-surface-card border border-surface-border text-gray-200 text-xs rounded-lg px-2 py-1.5">
+                            <option value="bottom_to_top">Entry = upward</option>
+                            <option value="top_to_bottom">Entry = downward</option>
+                        </select>
                         <button onclick="clearCalibrationCanvas()" class="bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-surface-border transition">
                             Clear
                         </button>
@@ -285,6 +298,12 @@
                         <span><strong>Tripwire Mode:</strong> Click Point A, then Click Point B to define line threshold.</span>
                         <span><strong>Zone Mode:</strong> Click points around perimeter. Double-click to close.</span>
                     </div>
+                </div>
+
+                <div class="bg-surface-card border border-surface-border rounded-xl p-4">
+                    <h4 class="text-sm font-bold text-white mb-1">Saved &amp; pending shapes</h4>
+                    <p class="text-xs text-gray-400 mb-3">Remove any tripwire or zone here, then press <strong>Save &amp; Hot-Apply</strong> to make it permanent.</p>
+                    <div id="calib-shapes" class="space-y-2"></div>
                 </div>
             </section>
 
@@ -311,15 +330,9 @@
                                 <input type="text" id="cfg-cam-source" value="data/sample_videos/entrance_sample.mp4" class="w-full bg-[#0E1420] border border-surface-border rounded-lg px-3 py-2 text-white text-xs font-mono">
                                 <span class="text-[11px] text-gray-500">e.g. rtsp://admin:password@192.168.1.100:554/Streaming/Channels/102</span>
                             </div>
-                            <div class="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label class="block text-xs font-semibold text-gray-400 mb-1">Target Decoder FPS</label>
-                                    <input type="number" id="cfg-cam-fps" value="15" class="w-full bg-[#0E1420] border border-surface-border rounded-lg px-3 py-2 text-white text-xs">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-semibold text-gray-400 mb-1">Rollup Interval (Seconds)</label>
-                                    <input type="number" id="cfg-rollup-sec" value="10" class="w-full bg-[#0E1420] border border-surface-border rounded-lg px-3 py-2 text-white text-xs">
-                                </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-400 mb-1">Target Decoder FPS</label>
+                                <input type="number" id="cfg-cam-fps" value="15" min="1" max="60" class="w-full bg-[#0E1420] border border-surface-border rounded-lg px-3 py-2 text-white text-xs">
                             </div>
                             <button onclick="saveCameraSettings()" class="bg-brand-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-xs font-bold transition">
                                 Update Camera Stream
@@ -337,6 +350,8 @@
         lucide.createIcons();
 
         let currentView = 'view-live';
+        let currentCameraId = 'cam_entrance_01';
+        let cameraConfigs = {};
         let calibMode = 'tripwire';
         let calibPoints = [];
         let calibLines = [];
@@ -503,10 +518,17 @@
         function initCalibrationStudio() {
             const canvas = document.getElementById('calibCanvas');
             const ctx = canvas.getContext('2d');
-            backgroundImage.src = '/api/v1/snapshot/cam_entrance_01?t=' + Date.now();
+            const existing = cameraConfigs[currentCameraId] || {};
+            calibLines = JSON.parse(JSON.stringify(existing.tripwires || []));
+            calibPolygons = JSON.parse(JSON.stringify(existing.zones || []));
+            calibPoints = [];
+            backgroundImage = new Image();
             backgroundImage.onload = () => {
+                canvas.width = backgroundImage.naturalWidth || canvas.width;
+                canvas.height = backgroundImage.naturalHeight || canvas.height;
                 redrawCalibration();
             };
+            backgroundImage.src = `/api/v1/snapshot/${currentCameraId}?t=` + Date.now();
 
             canvas.onclick = (e) => {
                 const rect = canvas.getBoundingClientRect();
@@ -518,27 +540,29 @@
                 if (calibMode === 'tripwire') {
                     calibPoints.push([x, y]);
                     if (calibPoints.length === 2) {
+                        const id = 'tripwire_' + Date.now();
                         calibLines.push({
-                            id: 'tripwire_main_door',
-                            name: 'Entrance Doorway Mat',
+                            id: id,
+                            name: id,
                             line: [calibPoints[0], calibPoints[1]],
-                            in_direction: 'bottom_to_top'
+                            in_direction: document.getElementById('calib-direction').value
                         });
                         calibPoints = [];
                     }
-                } else if (calibMode === 'polygon') {
+                } else {
                     calibPoints.push([x, y]);
                 }
                 redrawCalibration();
             };
 
             canvas.ondblclick = () => {
-                if (calibMode === 'polygon' && calibPoints.length >= 3) {
+                if ((calibMode === 'polygon' || calibMode === 'queue') && calibPoints.length >= 3) {
+                    const zoneType = calibMode === 'queue' ? 'queue' : 'dwell';
                     calibPolygons.push({
-                        id: 'zone_custom_' + Date.now(),
-                        name: 'Custom In-Store Zone',
+                        id: zoneType + '_zone_' + Date.now(),
+                        name: zoneType === 'queue' ? 'Checkout Queue' : 'In-Store Zone',
                         polygon: [...calibPoints],
-                        type: 'dwell'
+                        type: zoneType
                     });
                     calibPoints = [];
                     redrawCalibration();
@@ -551,6 +575,7 @@
             calibPoints = [];
             document.getElementById('mode-tw').className = mode === 'tripwire' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
             document.getElementById('mode-poly').className = mode === 'polygon' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
+            document.getElementById('mode-queue').className = mode === 'queue' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
         }
 
         function clearCalibrationCanvas() {
@@ -560,7 +585,40 @@
             redrawCalibration();
         }
 
+        function escapeHtml(v) {
+            return String(v).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+        }
+
+        function shapeRow(kind, name, detail, type, idx) {
+            return `<div class="flex items-center justify-between bg-[#0E1420] border border-surface-border rounded-lg px-3 py-2 text-xs">
+                <div class="flex items-center space-x-3">
+                    <span class="text-emerald-400 font-semibold">${escapeHtml(kind)}</span>
+                    <span class="text-white font-mono">${escapeHtml(name)}</span>
+                    <span class="text-gray-500">${escapeHtml(detail)}</span>
+                </div>
+                <button onclick="removeCalibShape('${type}', ${idx})" class="text-red-400 hover:text-red-300 font-semibold">Remove</button>
+            </div>`;
+        }
+
+        function renderShapeList() {
+            const el = document.getElementById('calib-shapes');
+            if (!el) return;
+            const rows = [];
+            calibLines.forEach((t, i) => rows.push(shapeRow(
+                'Tripwire', t.name || t.id, t.in_direction === 'top_to_bottom' ? 'entry = downward' : 'entry = upward', 'tripwire', i)));
+            calibPolygons.forEach((z, i) => rows.push(shapeRow(
+                z.type === 'queue' ? 'Queue zone' : 'Dwell zone', z.name || z.id, z.polygon.length + ' points', 'zone', i)));
+            el.innerHTML = rows.length ? rows.join('') : '<p class="text-xs text-gray-500">Nothing drawn yet.</p>';
+        }
+
+        function removeCalibShape(type, idx) {
+            if (type === 'tripwire') calibLines.splice(idx, 1);
+            else calibPolygons.splice(idx, 1);
+            redrawCalibration();
+        }
+
         function redrawCalibration() {
+            renderShapeList();
             const canvas = document.getElementById('calibCanvas');
             const ctx = canvas.getContext('2d');
             ctx.drawImage(backgroundImage, 0, 0, canvas.width, canvas.height);
@@ -576,12 +634,13 @@
 
                 ctx.fillStyle = '#10B981';
                 ctx.font = '16px sans-serif';
-                ctx.fillText(tw.name + ' [IN: Upward]', tw.line[0][0], tw.line[0][1] - 10);
+                ctx.fillText((tw.name || tw.id) + (tw.in_direction === 'top_to_bottom' ? ' [IN: Downward]' : ' [IN: Upward]'), tw.line[0][0], tw.line[0][1] - 10);
             });
 
             // Draw calibrated polygons
             calibPolygons.forEach(poly => {
-                ctx.strokeStyle = '#22D3EE';
+                const isQueue = poly.type === 'queue';
+                ctx.strokeStyle = isQueue ? '#22D3EE' : '#FACC15';
                 ctx.lineWidth = 3;
                 ctx.beginPath();
                 ctx.moveTo(poly.polygon[0][0], poly.polygon[0][1]);
@@ -590,7 +649,7 @@
                 }
                 ctx.closePath();
                 ctx.stroke();
-                ctx.fillStyle = 'rgba(34, 211, 238, 0.15)';
+                ctx.fillStyle = isQueue ? 'rgba(34, 211, 238, 0.15)' : 'rgba(250, 204, 21, 0.15)';
                 ctx.fill();
             });
 
@@ -612,36 +671,80 @@
         }
 
         async function saveCalibration() {
-            if (calibLines.length === 0 && calibPolygons.length === 0) {
-                alert('Please draw at least one tripwire line or polygon zone first!');
-                return;
-            }
             try {
-                const cfg = {
-                    cameras: [{
-                        id: 'cam_entrance_01',
-                        name: 'Main Store Floor & Entrance',
-                        source: document.getElementById('cfg-cam-source').value,
-                        fps_target: 15,
-                        resolution: [1270, 720],
-                        tripwires: calibLines.length > 0 ? calibLines : [
-                            { id: 'tripwire_main_door', name: 'Entrance Doorway Mat', line: [[550, 600], [1080, 580]], in_direction: 'bottom_to_top' }
-                        ],
-                        zones: calibPolygons.length > 0 ? calibPolygons : [
-                            { id: 'zone_main_aisle', name: 'Center Merchandising Aisle', polygon: [[300, 150], [900, 150], [900, 550], [300, 550]], type: 'dwell' }
-                        ]
-                    }]
-                };
-                const res = await fetch('/api/v1/config/cameras', {
+                const res = await fetch(`/api/v1/config/cameras/${currentCameraId}/calibration`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(cfg)
+                    body: JSON.stringify({ tripwires: calibLines, zones: calibPolygons })
                 });
                 if (res.ok) {
-                    alert('✅ Calibration saved successfully! The edge analyzer has hot-applied the new coordinates.');
+                    await loadCameraConfigs();
+                    alert('Calibration saved for ' + currentCameraId + '. The edge analyzer applies it within a few seconds.');
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    alert('Could not save calibration: ' + JSON.stringify(err.detail || res.status));
                 }
             } catch (e) {
                 alert('Error saving calibration: ' + e);
+            }
+        }
+
+        // Camera list / settings (replaces the previously undefined onCameraChange & saveCameraSettings)
+        async function loadCameraConfigs() {
+            try {
+                const res = await fetch('/api/v1/config/cameras');
+                if (!res.ok) return;
+                const cfg = await res.json();
+                cameraConfigs = {};
+                (cfg.cameras || []).forEach(c => { cameraConfigs[c.id] = c; });
+                const sel = document.getElementById('camera-selector');
+                const ids = Object.keys(cameraConfigs);
+                if (ids.length === 0) return;
+                sel.innerHTML = ids.map(id => `<option value="${id}">${cameraConfigs[id].name || id} (${id})</option>`).join('');
+                if (!cameraConfigs[currentCameraId]) currentCameraId = ids[0];
+                sel.value = currentCameraId;
+                fillCameraSettings();
+            } catch (e) {
+                console.error('Failed to load camera configs:', e);
+            }
+        }
+
+        function fillCameraSettings() {
+            const c = cameraConfigs[currentCameraId] || {};
+            document.getElementById('cfg-cam-id').value = currentCameraId;
+            document.getElementById('cfg-cam-name').value = c.name || '';
+            document.getElementById('cfg-cam-source').value = c.source || '';
+            document.getElementById('cfg-cam-fps').value = c.fps_target || 15;
+        }
+
+        function onCameraChange() {
+            currentCameraId = document.getElementById('camera-selector').value;
+            document.getElementById('live-stream-img').src = `/api/v1/stream/${currentCameraId}`;
+            fillCameraSettings();
+            if (currentView === 'view-calibration') initCalibrationStudio();
+        }
+
+        async function saveCameraSettings() {
+            const body = {
+                source: document.getElementById('cfg-cam-source').value,
+                name: document.getElementById('cfg-cam-name').value,
+                fps_target: parseInt(document.getElementById('cfg-cam-fps').value, 10) || 15
+            };
+            try {
+                const res = await fetch(`/api/v1/config/cameras/${currentCameraId}/source`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (res.ok) {
+                    await loadCameraConfigs();
+                    alert("Source updated. The edge analyzer switches within a few seconds and resets this camera's counters.");
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    alert('Could not update source: ' + JSON.stringify(err.detail || res.status));
+                }
+            } catch (e) {
+                alert('Error updating source: ' + e);
             }
         }
 
@@ -650,6 +753,7 @@
         }
 
         // Initial setup and interval loop
+        loadCameraConfigs();
         fetchLiveTelemetry();
         fetchDeviceHealth();
         setInterval(fetchLiveTelemetry, 3000);

@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.responses import StreamingResponse, Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger("EdgeSight-API")
 app = FastAPI(title="AD Labs EdgeSight Enterprise Platform", version="2.0.0")
@@ -24,6 +24,9 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DB_PATH = os.environ.get("SERVER_DB_PATH", "data/storage/cloud_metrics.db")
 CONFIG_PATH = os.environ.get("CAMERAS_CONFIG", "configs/cameras.yaml")
+VIDEO_DIR = os.environ.get("SAMPLE_VIDEOS_DIR", "data/sample_videos")
+VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
+STREAM_PREFIXES = ("rtsp://", "rtsps://", "http://")
 
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
@@ -261,7 +264,8 @@ def get_analytics_summary(
         conn.row_factory = sqlite3.Row
         query = """
         SELECT strftime('%Y-%m-%d %H:00:00', received_at) AS hour_bucket,
-               SUM(in_count) AS visitors
+               SUM(in_count) AS visitors,
+               SUM(out_count) AS exits
         FROM telemetry_rollups
         WHERE store_id = ?
         """
@@ -278,7 +282,10 @@ def get_analytics_summary(
         query += " GROUP BY hour_bucket ORDER BY hour_bucket ASC"
         rows = conn.execute(query, params).fetchall()
 
-        hourly = [{"hour": r["hour_bucket"], "visitors": r["visitors"] or 0} for r in rows]
+        hourly = [
+            {"hour": r["hour_bucket"], "visitors": r["visitors"] or 0, "exits": r["exits"] or 0}
+            for r in rows
+        ]
         if hourly:
             peak = max(hourly, key=lambda h: h["visitors"])
             avg_visitors_per_hour = round(sum(h["visitors"] for h in hourly) / len(hourly), 1)
@@ -293,6 +300,8 @@ def get_analytics_summary(
             "end_date": end_date,
             "peak_period": peak,
             "avg_visitors_per_hour": avg_visitors_per_hour,
+            "total_visitors": sum(h["visitors"] for h in hourly),
+            "total_exits": sum(h["exits"] for h in hourly),
             "hourly_breakdown": hourly
         }
 
@@ -364,6 +373,128 @@ def update_camera_configs(config: Dict[str, Any] = Body(...)):
         return {"status": "success", "message": "Camera configuration updated and applied successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write configuration: {e}")
+
+def _read_config() -> Dict[str, Any]:
+    if not os.path.exists(CONFIG_PATH) or yaml is None:
+        return {"cameras": []}
+    with open(CONFIG_PATH, "r") as f:
+        return yaml.safe_load(f) or {"cameras": []}
+
+def _write_config(config: Dict[str, Any]):
+    if yaml is None:
+        raise HTTPException(status_code=500, detail="PyYAML is required to edit camera configuration")
+    tmp_path = CONFIG_PATH + ".tmp"
+    with open(tmp_path, "w") as f:
+        yaml.safe_dump(config, f, sort_keys=False)
+    os.replace(tmp_path, CONFIG_PATH)  # atomic, so the edge never reads a half-written file
+
+def _find_camera(config: Dict[str, Any], camera_id: str) -> Dict[str, Any]:
+    for cam in config.get("cameras", []):
+        if cam.get("id") == camera_id:
+            return cam
+    raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' is not configured")
+
+def _validate_source(source: str) -> str:
+    source = (source or "").strip()
+    if not source:
+        raise HTTPException(status_code=400, detail="Source must not be empty")
+    if source.lower().startswith(STREAM_PREFIXES):
+        return source
+    normalized = os.path.normpath(source).replace("\\", "/")
+    video_dir = os.path.normpath(VIDEO_DIR).replace("\\", "/")
+    if not normalized.startswith(video_dir + "/"):
+        raise HTTPException(status_code=400, detail=f"Local sources must live under {VIDEO_DIR}/ (or use an rtsp:// URL)")
+    if not normalized.lower().endswith(VIDEO_EXTS):
+        raise HTTPException(status_code=400, detail=f"Unsupported video type; expected one of {', '.join(VIDEO_EXTS)}")
+    if not os.path.isfile(normalized):
+        raise HTTPException(status_code=400, detail=f"Video file not found: {normalized}")
+    return normalized
+
+class SourceUpdate(BaseModel):
+    source: str
+    name: Optional[str] = None
+    fps_target: Optional[int] = Field(default=None, ge=1, le=60)
+
+class TripwireConfig(BaseModel):
+    id: str
+    name: Optional[str] = None
+    line: List[List[float]]
+    in_direction: str = "top_to_bottom"
+
+    @field_validator("line")
+    @classmethod
+    def _two_points(cls, v):
+        if len(v) != 2 or any(len(p) != 2 for p in v):
+            raise ValueError("line must be exactly two [x, y] points")
+        return v
+
+    @field_validator("in_direction")
+    @classmethod
+    def _direction(cls, v):
+        if v not in ("top_to_bottom", "bottom_to_top"):
+            raise ValueError("in_direction must be 'top_to_bottom' or 'bottom_to_top'")
+        return v
+
+class ZoneConfig(BaseModel):
+    id: str
+    name: Optional[str] = None
+    polygon: List[List[float]]
+    type: str = "dwell"
+    max_comfortable_queue: Optional[int] = Field(default=None, ge=1)
+    congestion_threshold_seconds: Optional[float] = Field(default=None, gt=0)
+
+    @field_validator("polygon")
+    @classmethod
+    def _polygon(cls, v):
+        if len(v) < 3 or any(len(p) != 2 for p in v):
+            raise ValueError("polygon needs at least three [x, y] points")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def _type(cls, v):
+        if v not in ("dwell", "queue"):
+            raise ValueError("zone type must be 'dwell' or 'queue'")
+        return v
+
+class CalibrationUpdate(BaseModel):
+    tripwires: Optional[List[TripwireConfig]] = None
+    zones: Optional[List[ZoneConfig]] = None
+
+# Selectable video files for the camera source switcher
+@app.get("/api/v1/config/sources")
+def list_video_sources():
+    if not os.path.isdir(VIDEO_DIR):
+        return {"video_dir": VIDEO_DIR, "videos": []}
+    videos = sorted(f for f in os.listdir(VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS))
+    return {"video_dir": VIDEO_DIR, "videos": [f"{VIDEO_DIR}/{f}" for f in videos]}
+
+# Switch one camera's input source without touching its calibration or other cameras
+@app.post("/api/v1/config/cameras/{camera_id}/source")
+def update_camera_source(camera_id: str, body: SourceUpdate):
+    source = _validate_source(body.source)
+    config = _read_config()
+    cam = _find_camera(config, camera_id)
+    cam["source"] = source
+    if body.name:
+        cam["name"] = body.name
+    if body.fps_target:
+        cam["fps_target"] = body.fps_target
+    _write_config(config)
+    logger.info(f"Camera {camera_id} source set to {source}")
+    return {"status": "success", "camera": cam}
+
+# Replace one camera's tripwires/zones, leaving everything else in the file intact
+@app.post("/api/v1/config/cameras/{camera_id}/calibration")
+def update_camera_calibration(camera_id: str, body: CalibrationUpdate):
+    config = _read_config()
+    cam = _find_camera(config, camera_id)
+    if body.tripwires is not None:
+        cam["tripwires"] = [t.model_dump(exclude_none=True) for t in body.tripwires]
+    if body.zones is not None:
+        cam["zones"] = [z.model_dump(exclude_none=True) for z in body.zones]
+    _write_config(config)
+    return {"status": "success", "camera": cam}
 
 # Device Hardware Health Endpoint
 @app.get("/api/v1/device/health")

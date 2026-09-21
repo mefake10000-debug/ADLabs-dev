@@ -97,6 +97,40 @@ When deploying to a pilot retail store with live cameras:
    ```
 3. Stop the `rtsp-simulator` container (`docker compose stop rtsp-simulator`)—zero code modifications required!
 
+### 2b. Switching Sources & Calibrating from the Dashboard (no YAML editing)
+Open the Streamlit dashboard ([http://localhost:8501](http://localhost:8501)) → **⚙️ Camera Setup** tab:
+* **Video source:** pick any file in `data/sample_videos/` or paste an `rtsp://` URL and press *Apply source*. The
+  edge analyzer notices the change within ~3 seconds and restarts that camera with a fresh tracker and counters
+  (the interrupted interval is flushed first, so nothing is lost). Only the chosen camera is touched; its
+  tripwires/zones and other cameras are preserved.
+* **Tripwires & zones:** read pixel coordinates off the gridded live frame, then add an entry tripwire (drives real
+  IN/OUT counts) and a **queue** zone (drives queue length/wait/alerts). Without a tripwire, "visitors" falls back to
+  counting unique tracker IDs and exits stay 0; without a queue zone the queue columns stay 0.
+* For click-to-draw calibration use the Calibration Studio linked in the sidebar (port 8000).
+
+The sidebar also filters every metric by **camera** and **date range** (UTC); the *Historical* row shows peak hour,
+average visitors/hour and totals for that slice. The dashboard container mounts `data/sample_videos` read-only so it can
+list and validate video sources — after pulling this change, run `docker compose up -d --build` once.
+
+### 2c. Iterating Without Rebuilding Images
+`src/`, `configs/`, `scripts/`, `models/` and `data/sample_videos/` are bind-mounted into the edge container, and
+`server/` into the dashboard container, so most changes need **no image build**:
+
+| You changed | Run |
+|---|---|
+| `src/`, `configs/`, `scripts/` | `docker compose restart edge-analyzer` (Python re-imports on start) |
+| Benchmark / any one-off script | `docker compose run --rm --no-deps edge-analyzer python scripts/benchmark_tracking.py …` (`--no-deps` skips starting the other services) |
+| `server/` API code | `docker compose restart cloud-dashboard` (Streamlit hot-reloads by itself; uvicorn doesn't) |
+| `docker-compose.yml` | `docker compose up -d` (recreates only what changed) |
+| `requirements-*.txt` or `docker/Dockerfile.*` | `docker compose build <service>` — the **only** case that needs a build |
+
+Build-size notes: the edge image installs **CPU-only PyTorch** in its own cached layer (~2.8GB total instead of ~10GB;
+the default Linux wheel bundles ~4GB of CUDA libraries that Docker Desktop and the Mac mini can't use), so editing
+`requirements-edge.txt` no longer re-downloads torch. On an NVIDIA GPU host build with
+`TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 docker compose build edge-analyzer`. `.dockerignore` keeps
+`data/` and `.git` out of the build context. YOLO weights are cached in `models/` (`perception.model_name:
+models/yolo26m.pt`), so they download once rather than on every container start.
+
 ### 3. Running Natively (Without Docker)
 ```bash
 # 1. Install dependencies
