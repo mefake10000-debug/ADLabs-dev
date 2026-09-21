@@ -1,8 +1,18 @@
 cameras:
 - id: cam_entrance_01
   name: Main Store Floor & Entrance
-  source: data/sample_videos/entrance_sample.mp4 #test_footage1.mp4
+  source: data/sample_videos/entrance_sample.mp4
   fps_target: 15
   resolution:
   - 1270
   - 720
+  tripwires:
+  - id: tripwire_1789985616980
+    name: tripwire_1789985616980
+    line:
+    - - 1153.0
+      - 625.0
+    - - 1201.0
+      - 486.0
+    in_direction: bottom_to_top
+  zones: []
