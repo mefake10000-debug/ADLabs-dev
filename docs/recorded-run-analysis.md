@@ -178,3 +178,111 @@ code logs and overlays it (`Decode FPS … | Inference FPS …`), so one run of 
 2. Rebuild/restart the live stack and read the `Inference FPS` in the rollup log line (and the overlay).
 3. Then decide together: throughput (smaller model, `imgsz`, frame-skipping that keeps the newest frame) vs filters vs the
    tracker changes in sections 3–4. The order will depend on those two measurements.
+
+## 9. `main` vs branch: live test + comparative benchmark (2026-09-22)
+
+Mihir ran the same live-pipeline test against `main` (initial commit, no branch fixes) in a separate git worktree/
+Docker Compose project (`-p adlabs-main`), using the same `entrance_sample.mp4`, then a 34-minute run (`dashboard
+stats.csv`, `docker edge analyzer logs.txt`), plus the branch's benchmark harness run against `main`'s own
+`src/`/`configs/` (image `adlabs-main-edge-analyzer`, harness copied in read-only from the branch, not committed to
+`main`).
+
+### `main`'s dashboard was dead on arrival (found and fixed for the test only)
+
+`docker logs adlabs-cloud-dashboard` showed nothing but Streamlit's own noise; the browser showed "Connection
+refused" to `localhost:8000`. Root cause, confirmed by exec'ing into the container:
+```
+OSError: [Errno 30] Read-only file system: '/app/server/static'
+```
+`main`'s `docker-compose.yml` bind-mounts `./server:/app/server:ro`. `app.py` calls
+`os.makedirs(STATIC_DIR, exist_ok=True)` at import time; that's a no-op if the directory already exists, but
+`server/static/` doesn't exist in a fresh `main` checkout (git doesn't track empty directories, and `main` never
+got the `.gitkeep` placeholder that fixes this). So the container tries to *create* the directory inside a
+read-only mount, `EROFS`, uvicorn dies before binding port 8000 -- while `streamlit run` (backgrounded separately in
+the same shell `CMD`) starts fine. That's exactly the split observed: dashboard UI up, API silently dead, and the
+edge container's `Telemetry sync failed for N records` warnings piling up every rollup because there was nothing to
+sync to.
+
+Fixed for the test by creating the directory on the host (`mkdir server/static` in the `ADLabs-main` worktree,
+container restarted) -- confirmed by the log: `Telemetry sync failed` on every rollup from 11:45:26 through
+11:58:07, then `Successfully synced` from 11:58:17 onward, matching when the fix was applied. This is precisely
+what commit `2b75a4a` ("add missing static dir") already fixes on the branch; I'd previously (wrongly) dismissed
+that commit as redundant because `app.py` "creates the directory anyway" -- I hadn't accounted for the read-only
+bind mount making that creation itself fail. Not a code change requested for `main` (main is being used as a
+read-only baseline); noted here so the reasoning isn't re-litigated.
+
+### Cross-check: log / CSV agree, same as before
+
+`current_occupancy` and `in_count` in `dashboard stats.csv` match the corresponding `People Count` / `New Shoppers`
+log lines exactly once sync resumed (e.g. row 0: `in_count 7, occupancy 6` at 12:04:06-17 vs. log `People Count: 6
+live | New Shoppers: +7`). Persistence/sync itself behaves identically to the branch; only the static-dir crash was
+different.
+
+`Total Unique` climbs unbroken to 968 by the 34-minute mark (`tracked_ids_today` never resets) -- this is a
+pre-existing bug present **identically on both `main` and the branch** (untouched by M0/M1), just far more visible
+here because this run was ~17x longer than the earlier 2-minute tests. `queue_length` is 0 in every row, but `main`
+has no queue zone configured and no UI to add one, so this run can't distinguish "no zone" from the M0 bug it can't
+reach.
+
+### The tracker bug on `main` is two bugs, and it's worse than "ID switches"
+
+Read in full (`git show main:src/perception/tracker.py`):
+
+1. `Track.mark_missed()` hardcodes `if self.time_since_update > 15` -- it ignores the `max_age` the tracker was
+   actually constructed with (`pipeline.yaml`'s `track_buffer: 30`). Only the *pruning* step
+   (`self.tracks = [t for t in self.tracks if t.time_since_update <= self.max_age]`) uses the real value.
+2. `Track.update()` never resets `self.state = "active"`. So a track that flips to `"lost"` at 15 missed frames
+   (~1.1s at the observed 13.8fps) but hasn't yet hit `max_age=30` frames is still sitting in `self.tracks` -- and
+   if it keeps winning the IoU/distance match against the real person walking past (likely; they haven't gone
+   anywhere), `time_since_update` resets to 0 on every match, so it's *never* pruned either. It becomes a permanent
+   zombie: silently absorbing that person's real detections every frame, `state` stuck at `"lost"`, filtered out of
+   `active_list` (`if t.state != "active": continue`) forever. The box doesn't reappear later under that ID -- it's
+   just gone. A new track/ID only appears once the zombie finally fails to match (person moves far enough, or
+   height changes >40%), ages past `max_age=30` (~2.1-2.3s at 13.8fps), and gets pruned, freeing that detection up
+   again.
+
+This is a materially different (and worse) failure mode than "IDs expire after N seconds": it's detections being
+silently swallowed by an invisible track that will never render again, not a clean expiry. It directly explains
+both hand observations from the recording: "IDs switch only after >3s hidden" (the zombie's spatial grip typically
+lasts that long before failing) and "fewer boxes than people in frame" (some of the missing people are detected
+every frame, just absorbed by a zombie). Config (`track_buffer` in `pipeline.yaml`) can't fix this -- both are code
+bugs, not tunable thresholds. Both are already fixed on the branch (commit `e825468`, predating this session):
+`mark_missed(max_age=self.max_age)` uses the real config, and `Track.update()` explicitly resets
+`state = "active"` on re-match.
+
+### Comparative benchmark: branch's harness against `main`'s own tracker/detector
+
+Same 5 hand-counted checkpoints, same `entrance_sample.mp4`, `main`'s own `src/perception/{detector,tracker}.py`
+and `configs/pipeline.yaml` (unmodified) mounted into `main`'s own built image; only the benchmark script itself
+(read-only, not part of `main`) came from the branch, so it's a neutral measuring instrument.
+
+| | raw detection recall | tracker-output recall | unique track IDs |
+|---|---|---|---|
+| **branch** (earlier run) | 63% | **53%** | 66 |
+| **main** (this run) | 63% | **45%** | **73** |
+
+Raw recall is identical (same model, same `pipeline.yaml` perception thresholds -- expected). The gap is entirely
+in what the tracker does with those detections, and `main` loses on both axes at once: fewer people rendered *and*
+more IDs created -- exactly the zombie-track signature (detections silently absorbed, while unrelated new tracks
+still spawn around the gap). Sharpest single checkpoint:
+
+| frame | hand count | branch tracker output | main tracker output |
+|---|---|---|---|
+| 650 | 13 | 7 (54%) | **4 (31%)** |
+
+So: fixing the two tracker bugs alone (already done on the branch) is worth roughly **8 points of tracker-output
+recall and 7 fewer spurious IDs** on this clip, independent of anything else still open in sections 3-4 above
+(stationary suppression, queue zone, two-stage matching). (Wall-clock for this run was 2191s vs. ~500s for prior
+solo runs -- confounded by CPU contention from the still-running live `main` stack sharing the same 12-CPU Docker
+Desktop VM; not a meaningful throughput comparison, excluded from the table.)
+
+### New finding: `docker-compose.yml` `container_name` blocks running two stacks side by side
+
+Both `main` and the branch hardcode `container_name: adlabs-edge-analyzer` / `adlabs-cloud-dashboard` /
+`adlabs-rtsp-simulator` (not templated with the Compose project name). `docker compose -p adlabs-main up` therefore
+creates containers *literally named* `adlabs-edge-analyzer` etc. -- identical names to the branch's own stack in
+`ADLabs-dev`, just tracked under a different Compose project label internally. Compose's normal
+`<project>_<service>_<index>` naming would have avoided this automatically. Running the two side by side (as this
+comparison did) works only because one side was stopped; starting both at once would either collide on the
+container name or one Compose project would silently adopt/recreate the other's container. Worth removing the
+hardcoded `container_name` lines (or templating them) before anyone needs two environments up at once again.
