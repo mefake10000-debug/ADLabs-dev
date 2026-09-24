@@ -182,12 +182,16 @@ python scripts/run_edge.py
 
 ## 🎯 Key Retail Metrics & Algorithms
 
+High-level summary below; **[docs/metrics.md](docs/metrics.md) is the exact, code-grounded
+reference** for how each number is actually computed today (formulas, gotchas, and what resets
+to zero when) — read that before trying to validate or debug a specific number.
+
 | Metric | Computation Methodology | Business Impact |
 |---|---|---|
-| **Footfall (In / Out)** | Bidirectional vector tripwire intersection across door threshold with directional hysteresis. | Accurate customer traffic counts; staffing scheduling. |
-| **Store Occupancy** | Running differential $\max(0, \sum \text{In} - \sum \text{Out})$ calibrated with periodic decay. | Capacity safety compliance and shopper density analysis. |
-| **Queue Length & Wait Time** | Stationary person clustering inside cashier polygon $> 5\text{s}$; rolling average dwell. | Eliminates cart abandonment; triggers cashier reinforcement alerts. |
-| **Zone Dwell & Heatmaps** | Point-in-polygon containment checks logging entry and exit timestamps. | Evaluates promotional display and endcap engagement. |
+| **Footfall (In / Out)** | Bidirectional vector tripwire intersection across a drawn line, with directional hysteresis and per-track lifetime deduping (each track can only cross a given tripwire once). | Accurate customer traffic counts; staffing scheduling. |
+| **Store Occupancy** | With a tripwire configured: running total $\max(0, \sum \text{In} - \sum \text{Out})$ since the tripwire was last (re)calibrated. Without one: a raw live count of currently-active tracks. No decay of any kind. | Capacity safety compliance and shopper density analysis. |
+| **Queue Length & Wait Time** | Tracks inside a `queue`-type polygon whose continuous dwell there is $\geq 5\text{s}$; rolling average of completed queue dwells as a fallback when the queue is momentarily empty. | Eliminates cart abandonment; triggers cashier reinforcement alerts. |
+| **Zone Dwell & Heatmaps** | Point-in-polygon containment checks (foot position) logging entry/exit timestamps, with a short exit-grace period so one missed detection doesn't truncate a dwell. | Evaluates promotional display and endcap engagement. |
 | **Store Flow & Turnover** | Net shopper retention $\frac{\text{Current Occupancy}}{\text{Total Entries}}$ and hourly flow velocity. | Optimizes store floor layout, merchandise placement, and staff rostering. |
 
 ---

@@ -157,11 +157,21 @@ Three docker services (`rtsp-simulator`, `edge-analyzer`, `cloud-dashboard`) —
 
 Sequenced so each milestone is independently shippable and low-risk; later milestones depend on earlier ones only where noted.
 
-> **Status (2026-09-22):** M0-M3 done. Before starting M5/M6, five bug fixes plus dependency
-> pinning/CI/API-key/credential-redaction/healthcheck hygiene were completed -- see
-> `docs/recorded-run-analysis.md` §9-11 for the evidence and full write-up (real-CCTV `main`-vs-
-> branch comparison, tracker/zone/API fixes, before/after benchmark). M5's own throughput
-> benchmark should run against this fixed code, not the pre-fix tracker.
+> **Status (2026-09-24):** M0-M4 done. Before starting M5/M6, five bug fixes plus dependency
+> pinning/CI/API-key/credential-redaction/healthcheck hygiene were completed, followed by a live
+> tier-3 verification pass that found and fixed two more real bugs (a Streamlit calibration-save
+> race condition, and the Calibration Studio requiring a native double-click to close a zone --
+> see `docs/recorded-run-analysis.md` §9-13 for the full evidence trail, before/after benchmark,
+> and live verification write-ups). `docs/metrics.md` is now the code-grounded reference for how
+> every dashboard number is actually calculated. **M5 and M6 are both still open** -- neither has
+> been started. The two "Open decisions" below (dashboard consolidation, occupancy drift
+> correction) are also both still open; this session narrowed the dashboard-consolidation
+> question somewhat by making the Calibration Studio the single place tripwires/zones are
+> created or removed (closing the two-writer race bug class) without fully retiring either UI,
+> so the underlying "one dashboard or two" product decision is unchanged. M5's own throughput
+> benchmark should run against this fixed code, not the pre-fix tracker. There is no M7 defined
+> anywhere in this plan yet -- if one's needed (e.g. pilot rollout/go-live), it should be scoped
+> explicitly rather than assumed.
 
 ### M0 — Fix queue-metrics data loss (Critical, do first)
 - **Files:** `src/main.py` (`_generate_and_save_rollup`), `server/app.py` (`get_live_metrics`)
