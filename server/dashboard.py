@@ -1,4 +1,5 @@
-import io
+import html
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -6,12 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import requests
 import streamlit as st
-from PIL import Image, ImageDraw
 
 API_BASE = os.environ.get("API_BASE_URL", "http://localhost:8000")
 # Browser-facing address for the MJPEG stream / snapshot <img> tags (may differ from API_BASE inside Docker)
 PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE_URL", "http://localhost:8000")
 AUTO_REFRESH_DEFAULT = os.environ.get("DASHBOARD_AUTO_REFRESH", "1") == "1"
+API_KEY = os.environ.get("EDGESIGHT_API_KEY")  # only needed if the API enforces it (see server/app.py)
 
 st.set_page_config(
     page_title="AD Labs EdgeSight | Retail Operations",
@@ -30,8 +31,9 @@ def api_get(path, params=None, timeout=3.0):
 
 def api_post(path, payload, timeout=5.0):
     """Returns (ok, body_or_error_message)."""
+    headers = {"X-API-Key": API_KEY} if API_KEY else {}
     try:
-        resp = requests.post(f"{API_BASE}{path}", json=payload, timeout=timeout)
+        resp = requests.post(f"{API_BASE}{path}", json=payload, headers=headers, timeout=timeout)
         if resp.status_code == 200:
             return True, resp.json()
         try:
@@ -43,34 +45,75 @@ def api_post(path, payload, timeout=5.0):
         return False, str(e)
 
 
-def parse_polygon(text):
-    """'100,200 300,200 300,400' -> [[100.0, 200.0], ...]; raises ValueError on bad input."""
-    points = []
-    for token in text.replace(";", " ").split():
-        x, y = token.split(",")
-        points.append([float(x), float(y)])
-    if len(points) < 3:
-        raise ValueError("A zone needs at least three x,y points")
-    return points
+def render_traffic_charts(hourly, history):
+    """Dark, card-styled Chart.js footfall/occupancy charts + a recent-windows table, matching
+    the Calibration Studio's Traffic & People Analytics look -- but fed from this page's own
+    already-fetched, auto-refreshing `history`/`hourly` data instead of a separate poll, since
+    this dashboard (not the Studio) is the client with real historical telemetry filtering
+    (camera + date range) already wired up."""
+    hourly_labels = [h["hour"][11:16] for h in hourly]
+    hourly_in = [h["visitors"] for h in hourly]
+    hourly_out = [h["exits"] for h in hourly]
 
+    occ_labels = [h["timestamp_end"].split(" ")[-1] if " " in h["timestamp_end"] else h["timestamp_end"] for h in history]
+    occ_data = [h["current_occupancy"] for h in history]
 
-def snapshot_with_grid(camera_id, step=100):
-    """Latest annotated frame with a labelled pixel grid, so tripwire/zone coordinates can be read off it."""
-    try:
-        resp = requests.get(f"{API_BASE}/api/v1/snapshot/{camera_id}", timeout=3.0)
-        if resp.status_code != 200:
-            return None
-        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-    except Exception:
-        return None
-    draw = ImageDraw.Draw(img)
-    for x in range(0, img.width, step):
-        draw.line([(x, 0), (x, img.height)], fill=(255, 255, 255), width=1)
-        draw.text((x + 3, 3), str(x), fill=(255, 255, 0))
-    for y in range(0, img.height, step):
-        draw.line([(0, y), (img.width, y)], fill=(255, 255, 255), width=1)
-        draw.text((3, y + 3), str(y), fill=(255, 255, 0))
-    return img
+    table_rows = list(reversed(history[-10:]))
+
+    page_html = f"""
+    <div style="background:#0B0F17; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; padding:4px;">
+      <style>
+        .card {{ background:#131B2A; border:1px solid #23324A; border-radius:12px; padding:18px; }}
+        .grid2 {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }}
+        h4 {{ color:#9CA3AF; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; margin:0 0 12px 0; }}
+        table {{ width:100%; border-collapse:collapse; font-size:12px; color:#D1D5DB; }}
+        th {{ text-align:left; color:#6B7280; font-size:10.5px; text-transform:uppercase; padding:8px 10px; border-bottom:1px solid #23324A; }}
+        td {{ padding:7px 10px; border-bottom:1px solid rgba(35,50,74,.5); }}
+        .in {{ color:#10B981; font-weight:700; }} .out {{ color:#6366F1; font-weight:700; }} .occ {{ color:#22D3EE; font-weight:600; }}
+      </style>
+      <div class="grid2">
+        <div class="card"><h4>Hourly Footfall (In vs Out)</h4><div style="height:260px;"><canvas id="chartFootfallDash"></canvas></div></div>
+        <div class="card"><h4>Store Occupancy Over Time</h4><div style="height:260px;"><canvas id="chartOccDash"></canvas></div></div>
+      </div>
+      <div class="card" style="margin-top:18px;">
+        <h4>Recent 10-Second Telemetry Windows</h4>
+        <table>
+          <thead><tr><th>Timestamp Window</th><th>Entries (+IN)</th><th>Exits (-OUT)</th><th>Occupancy</th><th>Avg Dwell</th></tr></thead>
+          <tbody>
+            {"".join(f"<tr><td>{html.escape(str(r['timestamp_end']))}</td><td class='in'>+{r['in_count']}</td><td class='out'>-{r['out_count']}</td><td class='occ'>{r['current_occupancy']}</td><td>{r['avg_dwell_seconds']:.1f}s</td></tr>" for r in table_rows) or "<tr><td colspan='5' style='text-align:center;color:#6B7280;padding:16px;'>No rollups yet</td></tr>"}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      const axisOpts = {{ ticks: {{ color: '#6B7280' }}, grid: {{ color: '#1F2937' }} }};
+      new Chart(document.getElementById('chartFootfallDash'), {{
+        type: 'bar',
+        data: {{
+          labels: {json.dumps(hourly_labels)},
+          datasets: [
+            {{ label: 'In (Entries)', data: {json.dumps(hourly_in)}, backgroundColor: '#10B981' }},
+            {{ label: 'Out (Exits)', data: {json.dumps(hourly_out)}, backgroundColor: '#6366F1' }}
+          ]
+        }},
+        options: {{ responsive: true, maintainAspectRatio: false,
+          plugins: {{ legend: {{ labels: {{ color: '#9CA3AF' }} }} }},
+          scales: {{ x: axisOpts, y: axisOpts }} }}
+      }});
+      new Chart(document.getElementById('chartOccDash'), {{
+        type: 'line',
+        data: {{ labels: {json.dumps(occ_labels)}, datasets: [{{
+          label: 'Net In-Store Shoppers', data: {json.dumps(occ_data)},
+          borderColor: '#22D3EE', backgroundColor: 'rgba(34, 211, 238, 0.1)', fill: true, tension: 0.3
+        }}] }},
+        options: {{ responsive: true, maintainAspectRatio: false,
+          plugins: {{ legend: {{ labels: {{ color: '#9CA3AF' }} }} }},
+          scales: {{ x: axisOpts, y: axisOpts }} }}
+      }});
+    </script>
+    """
+    st.iframe(page_html, height=620)
 
 
 st.title("🏪 AD Labs EdgeSight — Store Intelligence Dashboard")
@@ -204,25 +247,18 @@ history = api_get("/api/v1/history", params={**range_scope, "limit": 500}) or []
 
 with tab_traffic:
     hourly = summary.get("hourly_breakdown", [])
-    if hourly:
-        hourly_df = pd.DataFrame(hourly).set_index("hour")
-        st.subheader("🕒 Visitors per Hour")
-        st.bar_chart(hourly_df[["visitors", "exits"]])
-    else:
+    if not hourly and not history:
         st.info("No rollups in the selected date range / camera yet.")
+    else:
+        render_traffic_charts(hourly, history)
 
-    if history:
-        df = pd.DataFrame(history)
-        left, right = st.columns(2)
-        with left:
-            st.subheader("📈 Rollup Footfall (In vs Out)")
-            st.bar_chart(df.set_index("timestamp_end")[["in_count", "out_count"]])
-        with right:
-            st.subheader("⏱️ Checkout Queue Congestion Trend")
+        st.subheader("⏱️ Checkout Queue Congestion Trend")
+        if history:
+            df = pd.DataFrame(history)
             st.line_chart(df.set_index("timestamp_end")[["queue_length", "avg_queue_wait_seconds"]])
-        with st.expander("📋 View Raw Edge Telemetry Feed"):
-            st.dataframe(df)
-            st.download_button("Download CSV", df.to_csv(index=False), file_name="edgesight_rollups.csv", mime="text/csv")
+            with st.expander("📋 View Raw Edge Telemetry Feed"):
+                st.dataframe(df)
+                st.download_button("Download CSV", df.to_csv(index=False), file_name="edgesight_rollups.csv", mime="text/csv")
 
 # ----------------------------------------------------------------------------
 # Crossing events
@@ -295,15 +331,11 @@ with tab_setup:
         st.markdown("---")
         st.subheader("📐 Tripwires & zones")
         st.caption(
-            "Tripwires drive real entry/exit counts. A **queue** zone is what populates queue length and wait time. "
-            "Read pixel coordinates off the gridded frame below (or use the click-to-draw Calibration Studio)."
+            "Read-only here. Tripwires drive real entry/exit counts; a **queue** zone is what populates queue length "
+            "and wait time. Draw and edit both with the click-to-draw **Calibration Studio** — it's the single place "
+            "these are created or removed, so this view and the Studio never disagree about what's live."
         )
-
-        grid = snapshot_with_grid(setup_cam)
-        if grid is not None:
-            st.image(grid, caption=f"Latest frame from {setup_cam} with a 100px coordinate grid")
-        else:
-            st.info("No frame available yet — is the edge analyzer running?")
+        st.link_button("🎯 Open Calibration Studio", f"{PUBLIC_API_BASE}/", use_container_width=False)
 
         tripwires = list(cam_cfg.get("tripwires", []))
         zones = list(cam_cfg.get("zones", []))
@@ -313,80 +345,8 @@ with tab_setup:
         if zones:
             st.markdown("**Zones**")
             st.dataframe(pd.DataFrame(zones))
-
-        existing_ids = [t["id"] for t in tripwires] + [z["id"] for z in zones]
-        with st.form(f"remove_form_{setup_cam}"):
-            to_remove = st.multiselect("Remove tripwires / zones", existing_ids, key=f"remove_{setup_cam}")
-            remove_submit = st.form_submit_button("Remove selected")
-        if remove_submit and to_remove:
-            ok, result = api_post(f"/api/v1/config/cameras/{setup_cam}/calibration", {
-                "tripwires": [t for t in tripwires if t["id"] not in to_remove],
-                "zones": [z for z in zones if z["id"] not in to_remove],
-            })
-            if ok:
-                st.success("Removed.")
-            else:
-                st.error(f"Could not save: {result}")
-
-        add_tw_col, add_zone_col = st.columns(2)
-        with add_tw_col:
-            with st.form(f"tripwire_form_{setup_cam}"):
-                st.markdown("**Add tripwire**")
-                tw_id = st.text_input("ID", value="tripwire_door", key=f"tw_id_{setup_cam}")
-                c1, c2 = st.columns(2)
-                x1 = c1.number_input("x1", value=0.0, key=f"tw_x1_{setup_cam}")
-                y1 = c2.number_input("y1", value=0.0, key=f"tw_y1_{setup_cam}")
-                x2 = c1.number_input("x2", value=0.0, key=f"tw_x2_{setup_cam}")
-                y2 = c2.number_input("y2", value=0.0, key=f"tw_y2_{setup_cam}")
-                direction = st.selectbox(
-                    "Entering means moving…", ["top_to_bottom", "bottom_to_top"], key=f"tw_dir_{setup_cam}",
-                    help="Direction of travel across the line that counts as an ENTRY",
-                )
-                tw_submit = st.form_submit_button("Add tripwire")
-            if tw_submit:
-                if (x1, y1) == (x2, y2):
-                    st.error("The two points must differ.")
-                elif tw_id in existing_ids:
-                    st.error(f"'{tw_id}' already exists.")
-                else:
-                    ok, result = api_post(f"/api/v1/config/cameras/{setup_cam}/calibration", {
-                        "tripwires": tripwires + [{"id": tw_id, "name": tw_id, "line": [[x1, y1], [x2, y2]], "in_direction": direction}],
-                    })
-                    if ok:
-                        st.success("Tripwire added.")
-                    else:
-                        st.error(f"Could not save: {result}")
-
-        with add_zone_col:
-            with st.form(f"zone_form_{setup_cam}"):
-                st.markdown("**Add zone**")
-                zone_id = st.text_input("ID", value="queue_counter", key=f"zone_id_{setup_cam}")
-                zone_type = st.selectbox("Type", ["queue", "dwell"], key=f"zone_type_{setup_cam}")
-                polygon_text = st.text_input("Polygon points", placeholder="100,200 400,200 400,500 100,500",
-                                             help="At least three x,y points, separated by spaces",
-                                             key=f"zone_poly_{setup_cam}")
-                q1, q2 = st.columns(2)
-                max_queue = q1.number_input("Queue alert above (people)", min_value=1, value=4)
-                max_wait = q2.number_input("…or wait above (seconds)", min_value=1.0, value=120.0)
-                zone_submit = st.form_submit_button("Add zone")
-            if zone_submit:
-                try:
-                    polygon = parse_polygon(polygon_text)
-                except ValueError as e:
-                    st.error(f"Invalid polygon: {e}")
-                else:
-                    if zone_id in existing_ids:
-                        st.error(f"'{zone_id}' already exists.")
-                    else:
-                        new_zone = {"id": zone_id, "name": zone_id, "polygon": polygon, "type": zone_type}
-                        if zone_type == "queue":
-                            new_zone["max_comfortable_queue"] = int(max_queue)
-                            new_zone["congestion_threshold_seconds"] = float(max_wait)
-                        ok, result = api_post(f"/api/v1/config/cameras/{setup_cam}/calibration", {"zones": zones + [new_zone]})
-                        if ok:
-                            st.success("Zone added.")
-                        else:
-                            st.error(f"Could not save: {result}")
+        if not tripwires and not zones:
+            st.info("No tripwires or zones configured for this camera yet — add them in the Calibration Studio.")
 
 if auto_refresh:
     time.sleep(5)

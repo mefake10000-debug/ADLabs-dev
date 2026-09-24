@@ -12,9 +12,10 @@ class QueueAnalyzer:
         name: str,
         polygon: List[List[float]],
         max_comfortable_queue: int = 4,
-        congestion_threshold_seconds: float = 120.0
+        congestion_threshold_seconds: float = 120.0,
+        exit_grace_seconds: float = 3.0
     ):
-        self.zone = Zone(zone_id, name, polygon, zone_type="queue")
+        self.zone = Zone(zone_id, name, polygon, zone_type="queue", exit_grace_seconds=exit_grace_seconds)
         self.max_comfortable_queue = max_comfortable_queue
         self.congestion_threshold_seconds = congestion_threshold_seconds
 

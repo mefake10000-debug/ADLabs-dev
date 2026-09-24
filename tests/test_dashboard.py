@@ -136,42 +136,44 @@ class TestDashboard(unittest.TestCase):
         self.assertTrue(any("Could not update source" in e.value for e in at.error))
         self.assertEqual(self.config()["cam_a"]["source"], "rtsp://admin:pw@192.168.1.9:554/ch1")
 
-    def test_adding_a_queue_zone_from_the_ui(self):
+    def test_camera_setup_has_no_calibration_write_widgets(self):
+        """Regression test: tripwires/zones must only ever be created or removed through the
+        Calibration Studio now, never through this dashboard. Two clients independently able to
+        write the same calibration file is exactly what caused the stale-snapshot bugs this
+        replaced (dashboard vs. Studio each silently reverting the other's concurrent write)."""
         at = self.run_app()
         at.selectbox(key="setup_cam").select("cam_a").run()
-        at.text_input(key="zone_id_cam_a").set_value("checkout_queue")
-        at.selectbox(key="zone_type_cam_a").select("queue")
-        at.text_input(key="zone_poly_cam_a").set_value("100,200 400,200 400,500 100,500")
-        self.button(at, "Add zone").click().run()
-
         self.assertFalse(at.exception, at.exception)
-        zone = self.config()["cam_a"]["zones"][0]
-        self.assertEqual((zone["id"], zone["type"]), ("checkout_queue", "queue"))
-        self.assertEqual(len(zone["polygon"]), 4)
-        self.assertEqual(self.config()["cam_a"]["source"], "data/sample_videos/entrance_sample.mp4")
 
-    def test_bad_polygon_is_rejected_client_side(self):
+        button_labels = {b.label for b in at.button}
+        self.assertNotIn("Add zone", button_labels)
+        self.assertNotIn("Add tripwire", button_labels)
+        self.assertNotIn("Remove selected", button_labels)
+        # The "Apply source" button is the one remaining camera-setup mutation, and it's fine to
+        # keep here: it doesn't touch tripwires/zones, so there's no second writer to race with.
+        self.assertIn("Apply source", button_labels)
+
+    def test_camera_setup_shows_existing_calibration_read_only_and_links_to_studio(self):
+        with open(self.config_path) as f:
+            cfg = yaml.safe_load(f)
+        cfg["cameras"][0]["tripwires"] = [{"id": "door", "name": "door", "line": [[0, 0], [10, 10]], "in_direction": "bottom_to_top"}]
+        cfg["cameras"][0]["zones"] = [{"id": "checkout_queue", "name": "checkout_queue",
+                                        "polygon": [[100, 200], [400, 200], [400, 500], [100, 500]], "type": "queue"}]
+        with open(self.config_path, "w") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+
         at = self.run_app()
-        at.text_input(key="zone_poly_cam_a").set_value("100,200 400,200")
-        self.button(at, "Add zone").click().run()
-        self.assertTrue(any("Invalid polygon" in e.value for e in at.error))
-        self.assertNotIn("zones", self.config()["cam_a"])
+        at.selectbox(key="setup_cam").select("cam_a").run()
+        self.assertFalse(at.exception, at.exception)
 
-    def test_adding_then_removing_a_tripwire(self):
-        at = self.run_app()
-        at.text_input(key="tw_id_cam_a").set_value("door")
-        at.number_input(key="tw_x1_cam_a").set_value(600.0)
-        at.number_input(key="tw_y1_cam_a").set_value(580.0)
-        at.number_input(key="tw_x2_cam_a").set_value(1050.0)
-        at.number_input(key="tw_y2_cam_a").set_value(580.0)
-        at.selectbox(key="tw_dir_cam_a").select("bottom_to_top")
-        self.button(at, "Add tripwire").click().run()
-        tw = self.config()["cam_a"]["tripwires"][0]
-        self.assertEqual((tw["id"], tw["in_direction"]), ("door", "bottom_to_top"))
+        # Read-only tables render the calibration that's actually on disk, with no way to edit it here.
+        dataframe_values = [df.value.to_dict("records") for df in at.dataframe]
+        self.assertTrue(any(row.get("id") == "door" for rows in dataframe_values for row in rows))
+        self.assertTrue(any(row.get("id") == "checkout_queue" for rows in dataframe_values for row in rows))
 
-        at.multiselect(key="remove_cam_a").set_value(["door"])
-        self.button(at, "Remove selected").click().run()
-        self.assertEqual(self.config()["cam_a"]["tripwires"], [])
+        # Config on disk is untouched by merely viewing it.
+        self.assertEqual(self.config()["cam_a"]["tripwires"][0]["id"], "door")
+        self.assertEqual(self.config()["cam_a"]["zones"][0]["id"], "checkout_queue")
 
 
 if __name__ == "__main__":

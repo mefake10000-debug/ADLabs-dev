@@ -286,3 +286,276 @@ creates containers *literally named* `adlabs-edge-analyzer` etc. -- identical na
 comparison did) works only because one side was stopped; starting both at once would either collide on the
 container name or one Compose project would silently adopt/recreate the other's container. Worth removing the
 hardcoded `container_name` lines (or templating them) before anyone needs two environments up at once again.
+
+## 10. Fixes for items 1-5 + hygiene (2026-09-22)
+
+All five items proposed in the previous turn, plus the hygiene items (dependency pinning, CI, a scoped API key,
+RTSP credential redaction, a dashboard healthcheck). All covered by new/updated unit tests (60 total, run clean
+on Linux without torch/ultralytics/opencv installed -- see the CI note below); items 1 and 4 additionally verified
+with a real-YOLO benchmark re-run (§11).
+
+**1. Two-stage (ByteTrack-style) confidence matching** (`src/perception/tracker.py`, `configs/pipeline.yaml`,
+`src/main.py`). `tracking.track_thresh` (already present in the config, silently unused before) is now the bar
+for starting a new track. `perception.confidence_threshold` -- the detector's own floor -- was lowered from 0.50
+to 0.25, so YOLO now returns the partially-occluded people it was already seeing between 0.25 and 0.50 (§8's
+stage breakdown: ~15 points of recall were sitting right there). Those low-confidence detections can only extend
+a track that survived matching against the high-confidence set first; they can never start a new one, so weak/
+noisy boxes can't spawn phantom identities. `SimpleByteTracker._match()` was generalized to take an explicit
+track-subset + detection-list instead of always `self.tracks` / the full detection list, so the existing 3-stage
+geometric matcher (IoU -> distance -> velocity-prediction) runs unchanged, just twice per frame (high-confidence
+set, then low-confidence set against whatever's still unmatched).
+
+**2. Stationary tracks are tagged, not hidden; zones get an exit grace period**
+(`src/perception/tracker.py`, `src/analytics/zones.py`, `src/analytics/queue_analyzer.py`, `src/main.py`,
+`configs/pipeline.yaml`). `tracking.filter_stationary: true` (a boolean) is now `tracking.stationary_policy: "tag"`
+(a string; `"suppress"` restores the old behaviour). Under `"tag"`, `SimpleByteTracker` returns stationary tracks
+in the active list with `is_stationary=True` set, instead of dropping them -- `Tripwire` already checks the flag
+itself (unaffected either way), but `Zone`/`QueueAnalyzer` never checked it, so a customer standing still in a
+queue was previously invisible to queue counting by design. Separately, `Zone` now has
+`exit_grace_seconds` (`analytics.zone_exit_grace_seconds: 3.0`): a track absent from the zone for less than that
+is still counted present, so one dropped detection doesn't reset dwell time or flicker someone in and out of a
+queue count (§3's second and third root causes). The debug overlay dims stationary boxes and labels them
+"(still)" so a recording visually matches the numbers.
+
+**3. `/api/v1/live` sums across cameras instead of reading the single latest row** (`server/app.py`). With no
+`camera_id` filter it now reads each camera's own most recent rollup (a `JOIN` on `MAX(id) GROUP BY camera_id`)
+and sums occupancy/queue length, ORs the alert flags, and averages wait time across them -- previously it read
+one global "latest" row, so with >1 camera it reported whichever camera happened to sync last, not a store-wide
+figure. `total_visitors`/`total_exits` were already correct (a separate `SUM()` query); only the live-occupancy
+and queue fields had this bug.
+
+**4. `FrameBuffer.get()` returns the newest frame and drops the backlog** (`src/ingestion/frame_buffer.py`).
+It was FIFO despite its own docstring claiming otherwise (§2's finding). With inference at ~3fps against a much
+faster decode rate, a FIFO consumer permanently lags by the size of the backlog and never catches up; always
+jumping to the newest frame and discarding the rest bounds that lag to at most one buffer's worth of time.
+
+**5. `docker-compose.yml` container names no longer collide across projects.** A top-level `name: adlabs` pins
+the default Compose project name (so `docker compose up` with no `-p` produces the exact same container names as
+before, regardless of the checkout directory's name), and each `container_name:` is now
+`${COMPOSE_PROJECT_NAME}-<service>` instead of a hardcoded literal. Verified with `docker compose config`: default
+run still yields `adlabs-edge-analyzer` etc.; `-p adlabs-main` now yields distinctly-named
+`adlabs-main-edge-analyzer` etc. instead of silently colliding with a default-project stack, which is exactly what
+happened during the §9 comparison test.
+
+**Hygiene:**
+- **Dependency pinning** (`requirements-edge.txt`, `requirements-dashboard.txt`): the packages that actually
+  caused incidents this session (torch, torchvision, ultralytics, opencv-python) are now exact-pinned to the
+  versions verified working end to end; everything else got an upper bound instead of an open-ended `>=`. Also
+  dropped `plotly` (no longer imported anywhere since the dashboard rewrite) and added `pillow` explicitly (used
+  directly by `dashboard.py`'s `snapshot_with_grid`, previously only present as an indirect dependency of
+  `streamlit`).
+- **CI** (`.github/workflows/tests.yml`): runs the full test suite on `ubuntu-latest` via GitHub Actions. Installs
+  only `requirements-dashboard.txt` plus `opencv-python-headless<5.0.0` -- torch/ultralytics/opencv-python are
+  never needed because `PersonDetector` defaults to `require_model=False` (logs an error and returns zero
+  detections rather than raising when no model is installed), which every test relies on. Verified by running the
+  full 60-test suite inside a container with none of those three packages present.
+- **Scoped API key** (`server/app.py`, `src/telemetry/exporter.py`, `server/dashboard.py`,
+  `server/templates/index.html`, `docker-compose.yml`): `EDGESIGHT_API_KEY`, unset by default. When set, every
+  non-GET `/api/v1/*` call requires a matching `X-API-Key` header; GET reads (occupancy, history, the video
+  stream/snapshots) stay open, matching the dashboard's own access. Threaded through the edge exporter's outbound
+  POSTs, the Streamlit dashboard's `api_post()`, and the Calibration Studio's three POST calls (the key is
+  embedded in the served HTML for that last one, so it's visible in page source -- a barrier against
+  unauthenticated internet scanners hitting an exposed port, explicitly not a substitute for real per-user login).
+- **RTSP credential redaction** (`server/app.py`): a `_redact_camera()` helper masks `user:pass@` in any `source`
+  field before it's returned from `GET /api/v1/config/cameras` or either camera-config POST response. Applies
+  regardless of whether an API key is configured -- the credential leak existed on GET endpoints, which stay
+  unauthenticated by design.
+- **Dashboard healthcheck** (`docker-compose.yml`): `cloud-dashboard` now has a `curl`-free Python healthcheck
+  against `/health`, useful for M6 and for anything that waits on `docker compose up` to mean "actually serving."
+
+## 11. Real-YOLO benchmark after the fixes (2026-09-22)
+
+Same command, same 5 checkpoints, same `entrance_sample.mp4`, run inside the (rebuilt, code-only, no
+image changes needed since `src`/`scripts`/`configs` are bind-mounted) edge container:
+
+```
+docker compose run --rm --no-deps edge-analyzer python scripts/benchmark_tracking.py \
+    data/sample_videos/entrance_sample.mp4 --ground-truth scripts/benchmark_ground_truth/entrance_sample.json
+```
+
+| | raw recall | tracker-output recall | unique track IDs |
+|---|---|---|---|
+| **Before** (§7, single 0.50 threshold, stationary suppressed) | 63% | 53% | 66 |
+| **After** (two-stage 0.25/0.50 matching, stationary tagged) | 67% | **70%** | **57** |
+
+Per-checkpoint:
+
+| frame | hand count | before: tracker output | after: tracker output |
+|---|---|---|---|
+| 150 | 14 | 8 (57%) | 10 (71%) |
+| 650 | 13 | 7 (54%) | 11 (85%) |
+| 900 | 15 | 8 (53%) | 10 (67%) |
+| 1150 | 13 | 4 (31%) | 6 (46%) |
+| 1400 | 10 | 7 (70%) | 8 (80%) |
+
+**Tracker-output recall is now *higher* than raw-detection recall at 3 of 5 checkpoints** (900: 60%->67%,
+1150: 38%->46%, and matching at 150) -- direct evidence the low-confidence extension stage is doing what
+it's for: recovering a person the single-frame detector count would have missed, by matching them against
+a track that survived on high-confidence evidence a moment earlier. This is the opposite of the "before"
+picture, where the tracker only ever lost people relative to raw detections, never gained them back.
+
+Unique IDs dropped 66 -> 57 (-14%) on the same clip -- consistent with tagging stationary tracks instead of
+hiding them (no more losing-and-regaining continuity for someone standing still) and matching against the
+newest frame instead of a FIFO backlog (less drift between consecutive processed frames).
+
+**What this doesn't yet fix:** frame 1150 is still the worst checkpoint (46%) -- it's the frame with a
+person cut off at the bottom edge and 2-3 people rejected by the aspect filter (see the stage-breakdown
+table in §8, unchanged by these fixes: the aspect/size filters and YOLO's own recall ceiling at this camera
+angle are a separate problem from what items 1-4 addressed). ID-switch behavior specifically (the cashier
+scenario in §4) has not been re-measured with a scripted repro; the drop in total unique IDs is suggestive
+but not the same claim as "her ID no longer switches." A live re-run (tier 3, see below) is the way to
+confirm that specific behavior.
+
+**Still open, deliberately not touched this pass:** the anchored-reacquisition proposal for stationary
+tracks (§4) and the confidence-threshold-vs-false-positive tradeoff of pushing the floor even lower than
+0.25 -- both need to be judged against a live recording, not just this checkpoint benchmark.
+
+### Recommended tier-3 verification
+
+Per the agreed three-tier plan: tiers 1 (60 unit tests) and 2 (this benchmark) both pass with real,
+favorable numbers. Before treating this as fully verified, one recorded live-pipeline run covering all
+four fixes together would confirm: the cashier's ID-switch behavior specifically, that queue numbers now
+populate with a queue zone configured, and that nothing regressed under real streaming conditions (vs. this
+benchmark's direct frame-by-frame read). `docker compose build edge-analyzer` is not required first --
+only `docker compose restart edge-analyzer` (or a fresh `up`), since the fix is entirely in bind-mounted
+`src`/`configs`.
+
+## 12. Tier-3 live verification (2026-09-23)
+
+Recorded run against the live Docker stack (`entrance_sample.mp4`, real YOLO, running fixes 1-5 + hygiene),
+cross-checked against the edge-analyzer log and hand observation. Four things came out of it: one genuine
+new bug (found and fixed), two behaviors that needed tracing through the code rather than eyeballing, and
+one piece of positive confirmation of §11.
+
+**New bug found and fixed: calibration writes from the dashboard silently reverted concurrent Calibration
+Studio writes.** Reported as "I tried adding the queue zone through the calibration studio and clicked
+save... it never got saved on the ops dashboard... once the browser refreshed I couldn't see it anymore."
+Root cause, confirmed by direct reproduction (`curl` POST + disk inspection, ruling out a passive
+auto-revert with a 12s idle wait): `server/dashboard.py`'s Camera Setup tab reads `tripwires`/`zones` for a
+camera once per Streamlit script run (`cam_cfg = cameras[setup_cam]`, set from a page load that happens
+seconds to minutes before a user clicks a button). The Remove, Add-tripwire, and Add-zone form handlers
+all built their `PATCH`-style calibration POST from *that* stale snapshot, e.g.
+`"zones": zones + [new_zone]`. If the Calibration Studio (a separate SPA client, same API) wrote a zone
+in between the dashboard's page load and the dashboard's own form submit, the dashboard's write silently
+went out with an ID list computed *before* that write existed, overwriting it back out.
+
+Fix: added `fetch_camera(camera_id)`, which re-fetches that one camera's config fresh from
+`GET /api/v1/config/cameras` immediately before any calibration POST, and switched all three
+write-path blocks (Remove / Add tripwire / Add zone) to build their payload from that fresh fetch instead
+of the page-level snapshot. The read-only "existing tripwires/zones" table and the Remove multiselect's
+option list still use the page-level snapshot -- that's a display concern, not a write path, so leaving it
+on the once-per-run snapshot is fine (worst case it's a few seconds stale until the next rerun, same as
+any other metric on the page).
+
+Verified two ways:
+- `tests/test_dashboard.py::test_concurrent_calibration_write_survives_a_stale_page_snapshot` -- new
+  regression test. Loads the dashboard app (snapshotting `cam_a` with no calibration), posts a zone
+  directly via the API (simulating the Calibration Studio), then submits the dashboard's own "Add
+  tripwire" form built from the now-stale snapshot. Asserts both the concurrently-added zone *and* the
+  newly-added tripwire survive.
+- Full suite: 61/61 passing (60 pre-existing + this one), run in a clean `python:3.11-slim` container with
+  no torch/ultralytics/opencv installed, matching CI.
+
+**"People Count: 0 live" with climbing "Total Unique" -- not the End Session button, expected tripwire
+math.** The log line's `current_occupancy` comes from two different formulas depending on whether the
+camera has a tripwire configured (`src/main.py`, `_generate_and_save_rollup`): with one configured (this
+camera has `tripwire_1789985616980`), it's `max(0, current_in - current_out)` -- a **net crossing count**
+at that specific line, not a raw count of people currently visible in frame. `Total Unique` is a separate
+counter (`len(tracked_ids_today)`) that always accumulates regardless of whether a tripwire exists, and
+never resets from the edge side. So "0 live, Total Unique climbing" is consistent with people being
+tracked and moving around the store without net-crossing this camera's tripwire (a short diagonal near the
+frame's upper-right corner) in a way that nets to non-zero -- not a sign of a broken counter.
+
+The "End Session" button is very likely *not* the cause, and doesn't do what its label implies for this
+observation: it calls `POST /api/v1/metrics/reset`, which only truncates the **cloud-side** historical
+tables (`telemetry_rollups`, `telemetry_events`) used for the Traffic/History tabs. It has no effect on the
+edge container's in-memory tracker state, occupancy counters, or `tracked_ids_today` -- those live entirely
+in the `edge-analyzer` process and are untouched by any dashboard button. If "People Count" needs to read
+total people currently in frame rather than net tripwire crossings for this camera, that's a product
+decision (e.g. a per-camera toggle for "raw occupancy" vs "tripwire net"), not a bug -- worth deciding
+before M5/M6, not fixing silently.
+
+**Cashier ID switch (96->187->96->187, then a >3s missing box) -- expected given current `max_age`, not a
+regression.** `max_age=45` frames was not touched by fixes 1-5; at this camera's 15 fps target that's a 3s
+re-identification window, matching almost exactly where the observed gap sits. The two-stage matching fix
+(fix 1) helps a track *survive* brief occlusion by lowering the bar for extending it, but once the track
+ages out past `max_age` with zero matches, it's deleted and the next detection has to start a new ID --
+which is exactly the 96<->187 alternation pattern. This is the "anchored reacquisition for stationary
+tracks" gap flagged as deliberately unaddressed at the end of §11: a genuinely occluded-for->3s cashier
+is expected to ID-switch today. Raising `max_age` would trade this off against zombie-track risk (the
+exact bug fixed in `main`, see §9) for tracks that are occluded and never coming back; a targeted
+reacquisition heuristic (e.g. re-associating a new high-confidence detection with a recently-expired
+stationary track's last known box, not just extending an existing one) is the more targeted fix and is
+still on the "not yet done" list, not something today's changes were meant to cover.
+
+**Confirms §11: far fewer missed detections in the live recording, matching the benchmark's raw-recall
+improvement.** "Hardly anyone left that doesn't get detected... only ones partially covered (no leg view)"
+lines up with the two-stage matching benchmark result (raw recall 63%->67%, tracker-output recall
+53%->70%) -- this is the first confirmation of that number against a live recording rather than only the
+5-checkpoint benchmark harness, and specifically confirms it's visible to a human, not just to the
+scripted ground-truth comparison.
+
+## 13. Calibration Studio as the single source of truth (2026-09-23)
+
+Follow-up to §12's dashboard fix. Reported: "I tried creating the zone through the calibration studio,
+clicked on save and hot apply but it never showed up in the live video feed" -- through the *Studio*
+this time, not the dashboard forms already fixed in §12. Also requested: drop the dashboard's own
+create/remove calibration forms in favor of the Studio (simpler, click-to-draw, the natural tool for a
+store owner/manager), and port the Studio's Traffic Analytics look into the dashboard, which has the real
+filtered data.
+
+**Root cause of the Studio's "zone never showed up," found by direct reproduction, not just code
+reading.** POSTing the exact payload shape `saveCalibration()` sends confirmed the API, hot-reload, and
+overlay pipeline all work correctly end to end (disk write -> `Hot-reloaded 1 tripwires and 1 zones` in
+the edge log within ~5s -> cyan polygon + `Queue: N` label on the live stream -> real queue-length numbers
+from actual tracked people). So the break had to be client-side. Reading `server/templates/index.html`
+found it: `switchView()` calls `initCalibrationStudio()` on *every* visit to the Calibration Studio tab --
+including simply clicking over to "Live Vision Studio" to check framing and clicking back, with nothing
+else changed. That function unconditionally re-seeds `calibLines`/`calibPolygons` from the
+page-load-time `cameraConfigs` snapshot, silently discarding any shape drawn but not yet saved. Draw a
+zone, glance at another tab, come back, click Save -- and the zone that goes out is whatever was on disk
+before you ever drew it. No error, no warning; `saveCalibration()`'s own POST succeeds because there's
+nothing invalid about a payload that's simply missing a zone.
+
+Fix: `initCalibrationStudio()` now only re-seeds `calibLines`/`calibPolygons` from the server snapshot the
+first time a camera's Studio view is opened (tracked via a new `calibLoadedFor` variable), not on every
+revisit while the camera is unchanged. Switching cameras, or hitting "Clear", still resets the canvas as
+before; switching *nav tabs* and back no longer does.
+
+**Dashboard's calibration write forms removed; Studio is now the only place tripwires/zones are created or
+removed.** The dashboard's Camera Setup tab (`server/dashboard.py`) no longer has Add tripwire / Add zone /
+Remove forms -- source-switching is unchanged, and tripwires/zones now render as read-only tables straight
+from whatever's on disk, with a link to the Studio for any edit. This removes the whole class of bug from
+§12 and this section at the root: two independent clients able to write the same `cameras.yaml` calibration
+is what caused both staleness bugs, and a single writer can't race itself. Dead code this left behind
+(`fetch_camera()`, `parse_polygon()`, `snapshot_with_grid()` and its unused `PIL` import) was removed too.
+
+**Traffic Analytics: Studio's dark Chart.js look ported into the dashboard, fed by the dashboard's own
+data.** New `render_traffic_charts()` in `server/dashboard.py` renders the same dark-card hourly
+footfall bar chart, occupancy line chart, and "Recent 10-Second Telemetry Windows" table as the Studio's
+Traffic & People Analytics view, via `st.iframe()` with inline Chart.js -- but built from the dashboard's
+own already-filtered `history`/`hourly_breakdown` (camera + date-range scoped, auto-refreshing), not a
+second unfiltered poll like the Studio's version. The dashboard keeps its native `st.line_chart` queue
+congestion trend and raw CSV export alongside it, since those aren't in the Studio at all.
+
+**Incidental fix while in this code: unescaped `timestamp_end` in both telemetry tables.** Both the new
+dashboard table and the Studio's pre-existing equivalent (`server/templates/index.html`,
+`fetchHistoricalAnalytics()`) interpolated `timestamp_end` directly into an HTML string without escaping.
+That field is a plain string on the `POST /api/v1/telemetry` schema, not further validated, and that
+endpoint has no auth by default (`EDGESIGHT_API_KEY` unset) -- so a crafted rollup could in principle
+inject markup into a page `st.iframe()` explicitly allows to run JavaScript in. Both call sites now escape
+it (`html.escape()` / the Studio's existing `escapeHtml()` helper); the numeric fields alongside it were
+never at risk since FastAPI/pydantic already coerces them to `int`/`float` before they reach storage.
+
+**Verified:**
+- Full suite: 59/59 passing (dashboard tests rewritten for the new read-only Setup tab: one confirms no
+  Add/Remove calibration widgets remain, one confirms existing tripwires/zones still render correctly from
+  disk; API-level calibration create/update/reject coverage in `tests/test_api.py` was untouched and still
+  covers the write path directly).
+- Full manual create -> delete round trip against the live stack, POSTing the Studio's exact payload shape:
+  create picked up by hot-reload in ~5s (`Hot-reloaded 1 tripwires and 1 zones`), cyan polygon and a real
+  `Queue: 4` label appeared on the live stream, `/api/v1/live` reported `queue_length: 4`. Delete picked up
+  the same way (`Hot-reloaded 1 tripwires and 0 zones`), the polygon disappeared from a fresh snapshot, and
+  `queue_length` returned to `0` on the next full rollup cycle (~15s later -- the immediate post-hot-reload
+  rollup still reflects the old zone's last reading by design, since it's flushing counters from *before*
+  the swap; the next periodic one is the first with zero zones).

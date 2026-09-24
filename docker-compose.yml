@@ -1,10 +1,18 @@
+# Pins the default Compose project name to "adlabs" (used below to build each container_name),
+# so `docker compose up` gives the same container names as always regardless of which directory
+# name the repo happens to be checked out under. `docker compose -p <other-name> up` (e.g. to run
+# a second environment side by side, as in docs/recorded-run-analysis.md §9) then gets distinctly
+# named containers instead of colliding with this one -- container_name used to be hardcoded,
+# which silently ignored -p entirely and made two stacks fight over the same container names.
+name: adlabs
+
 services:
   # 1. Synthetic RTSP Multi-Camera Broadcaster
   rtsp-simulator:
     build:
       context: .
       dockerfile: docker/Dockerfile.simulator
-    container_name: adlabs-rtsp-simulator
+    container_name: ${COMPOSE_PROJECT_NAME}-rtsp-simulator
     ports:
       - "8554:8554"   # RTSP stream port
     volumes:
@@ -19,7 +27,7 @@ services:
       args:
         # CPU-only torch by default; set TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 for NVIDIA GPU hosts
         TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
-    container_name: adlabs-edge-analyzer
+    container_name: ${COMPOSE_PROJECT_NAME}-edge-analyzer
     depends_on:
       - rtsp-simulator
       - cloud-dashboard
@@ -34,6 +42,9 @@ services:
       - PYTHONUNBUFFERED=1
       - PIPELINE_CONFIG=/app/configs/pipeline.yaml
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
+      # Unset by default -- state-changing API calls stay unauthenticated (today's zero-config
+      # behaviour) unless you set this to the same value on cloud-dashboard below.
+      - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
     restart: unless-stopped
 
   # 3. Cloud Telemetry Ingestion & Web Analytics Dashboard
@@ -41,7 +52,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.dashboard
-    container_name: adlabs-cloud-dashboard
+    container_name: ${COMPOSE_PROJECT_NAME}-cloud-dashboard
     ports:
       - "8000:8000"   # FastAPI Telemetry Ingestion Endpoint
       - "8501:8501"   # Streamlit Real-Time Operations UI
@@ -53,5 +64,12 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
+      - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 

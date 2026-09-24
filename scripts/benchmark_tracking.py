@@ -81,7 +81,8 @@ def build_tracker(cfg: dict) -> SimpleByteTracker:
         max_age=t.get("track_buffer", 30),
         iou_threshold=t.get("match_thresh", 0.45),
         min_hits=t.get("min_hits", 4),
-        filter_stationary=t.get("filter_stationary", True),
+        stationary_policy=t.get("stationary_policy", "tag"),
+        track_thresh=t.get("track_thresh", 0.5),
     )
 
 

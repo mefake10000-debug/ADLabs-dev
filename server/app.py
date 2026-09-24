@@ -1,4 +1,6 @@
 import os
+import re
+import secrets
 import sqlite3
 import time
 import json
@@ -11,7 +13,7 @@ except ImportError:
     yaml = None
 
 from fastapi import FastAPI, HTTPException, Request, Body
-from fastapi.responses import StreamingResponse, Response, HTMLResponse
+from fastapi.responses import StreamingResponse, Response, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
@@ -28,12 +30,41 @@ VIDEO_DIR = os.environ.get("SAMPLE_VIDEOS_DIR", "data/sample_videos")
 VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
 STREAM_PREFIXES = ("rtsp://", "rtsps://", "http://")
 
+# Optional shared-secret protection for state-changing calls (telemetry ingestion, config writes,
+# metrics reset). Unset by default -- today's zero-config workflow is unchanged unless an operator
+# explicitly sets EDGESIGHT_API_KEY. GET endpoints (occupancy reads, live stream, snapshots) stay
+# open, matching the dashboard's own read access; real per-user auth is future work, not this.
+API_KEY = os.environ.get("EDGESIGHT_API_KEY")
+
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+@app.middleware("http")
+async def require_api_key_for_writes(request: Request, call_next):
+    if API_KEY and request.method != "GET" and request.url.path.startswith("/api/v1/"):
+        provided = request.headers.get("x-api-key")
+        if not provided or not secrets.compare_digest(provided, API_KEY):
+            return JSONResponse(status_code=401, content={"detail": "Missing or invalid X-API-Key header"})
+    return await call_next(request)
+
+def _redact_source(source: Optional[str]) -> Optional[str]:
+    """Masks embedded RTSP credentials (rtsp://user:pass@host/...) before a camera config is
+    ever returned in an API response. GET endpoints have no auth (see API_KEY above), so this
+    is the only thing standing between an exposed port and a leaked camera password."""
+    if not source:
+        return source
+    return re.sub(r'(rtsps?://)[^@/\s]+@', r'\1****:****@', source)
+
+def _redact_camera(cam: Dict[str, Any]) -> Dict[str, Any]:
+    if "source" not in cam:
+        return cam
+    redacted = dict(cam)
+    redacted["source"] = _redact_source(redacted["source"])
+    return redacted
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -110,7 +141,12 @@ class EventBatchPayload(BaseModel):
 # Web App Entrypoint (Structured Production SPA)
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
+    # If EDGESIGHT_API_KEY is set, the Calibration Studio's own POST calls (save calibration,
+    # switch source, reset metrics) need to send it too. Embedding it in the page means it's
+    # visible in page source to anyone who can load this page -- acceptable as a barrier against
+    # unauthenticated internet scanners hitting an exposed port, not a substitute for real
+    # per-user login (out of scope here).
+    return templates.TemplateResponse(request=request, name="index.html", context={"api_key": API_KEY or ""})
 
 @app.get("/health")
 def health_check():
@@ -171,19 +207,32 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
 
-        # Latest rollup for active tracks count
-        latest_query = "SELECT * FROM telemetry_rollups WHERE store_id = ?"
-        latest_params: List[Any] = [store_id]
+        # One row per camera: each camera's own most recent rollup. With camera_id given this
+        # is naturally at most one row; without it, reading a single global "latest" row would
+        # report whichever camera happened to sync last, not a true store-wide figure.
         if camera_id:
-            latest_query += " AND camera_id = ?"
-            latest_params.append(camera_id)
-        latest_query += " ORDER BY id DESC LIMIT 1"
-        latest = conn.execute(latest_query, latest_params).fetchone()
+            latest_rows = conn.execute(
+                "SELECT * FROM telemetry_rollups WHERE store_id = ? AND camera_id = ? ORDER BY id DESC LIMIT 1",
+                (store_id, camera_id)
+            ).fetchall()
+        else:
+            latest_rows = conn.execute("""
+            SELECT t1.* FROM telemetry_rollups t1
+            INNER JOIN (
+                SELECT camera_id, MAX(id) AS max_id FROM telemetry_rollups WHERE store_id = ? GROUP BY camera_id
+            ) t2 ON t1.camera_id = t2.camera_id AND t1.id = t2.max_id
+            """, (store_id,)).fetchall()
 
-        # Real-time people count currently visible in the camera frame
-        live_people_count = latest["current_occupancy"] if latest else 0
+        live_people_count = sum(r["current_occupancy"] for r in latest_rows)
+        queue_length = sum(r["queue_length"] for r in latest_rows)
+        queue_alert_active = any(r["queue_alert_active"] for r in latest_rows)
+        avg_queue_wait_seconds = round(sum(r["avg_queue_wait_seconds"] for r in latest_rows) / len(latest_rows), 1) if latest_rows else 0.0
+        latest_avg_dwell_fallback = round(sum(r["avg_dwell_seconds"] for r in latest_rows) / len(latest_rows), 1) if latest_rows else 0.0
+        latest_in_count_fallback = sum(r["in_count"] for r in latest_rows)
 
-        # Aggregated totals today (filtering by current date so old test data doesn't pollute counts)
+        # Aggregated totals today (filtering by current date so old test data doesn't pollute counts).
+        # Already sums across every camera's rows for the day when camera_id is None -- unaffected by
+        # the single-row problem above.
         footfall_query = """
         SELECT SUM(in_count) as total_visitors, SUM(out_count) as total_exits, AVG(avg_dwell_seconds) as avg_dwell
         FROM telemetry_rollups
@@ -197,11 +246,11 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
 
         total_in = row_footfall["total_visitors"] if row_footfall and row_footfall["total_visitors"] is not None else 0
         total_out = row_footfall["total_exits"] if row_footfall and row_footfall["total_exits"] is not None else 0
-        avg_dwell = round(row_footfall["avg_dwell"], 1) if row_footfall and row_footfall["avg_dwell"] is not None else (round(latest["avg_dwell_seconds"], 1) if latest else 0.0)
+        avg_dwell = round(row_footfall["avg_dwell"], 1) if row_footfall and row_footfall["avg_dwell"] is not None else latest_avg_dwell_fallback
 
         # Fallback if no records today yet
-        if total_in == 0 and latest:
-            total_in = latest["in_count"]
+        if total_in == 0 and latest_rows:
+            total_in = latest_in_count_fallback
 
         return {
             "store_id": store_id,
@@ -210,9 +259,9 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
             "total_exits": total_out,
             "net_occupancy": live_people_count,
             "avg_dwell_seconds": avg_dwell,
-            "queue_length": latest["queue_length"] if latest else 0,
-            "avg_queue_wait_seconds": latest["avg_queue_wait_seconds"] if latest else 0.0,
-            "queue_alert_active": bool(latest["queue_alert_active"]) if latest else False,
+            "queue_length": queue_length,
+            "avg_queue_wait_seconds": avg_queue_wait_seconds,
+            "queue_alert_active": queue_alert_active,
             "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
         }
 
@@ -353,12 +402,12 @@ def get_stream(camera_id: str):
 # Dynamic Camera Configuration (Hot Reloadable Calibration API)
 @app.get("/api/v1/config/cameras")
 def get_camera_configs():
-    if not os.path.exists(CONFIG_PATH):
+    if not os.path.exists(CONFIG_PATH) or yaml is None:
         return {"cameras": []}
     with open(CONFIG_PATH, "r") as f:
-        if yaml:
-            return yaml.safe_load(f) or {"cameras": []}
-        return {"cameras": []}
+        config = yaml.safe_load(f) or {"cameras": []}
+    config["cameras"] = [_redact_camera(c) for c in config.get("cameras", [])]
+    return config
 
 @app.post("/api/v1/config/cameras")
 def update_camera_configs(config: Dict[str, Any] = Body(...)):
@@ -481,8 +530,8 @@ def update_camera_source(camera_id: str, body: SourceUpdate):
     if body.fps_target:
         cam["fps_target"] = body.fps_target
     _write_config(config)
-    logger.info(f"Camera {camera_id} source set to {source}")
-    return {"status": "success", "camera": cam}
+    logger.info(f"Camera {camera_id} source set to {_redact_source(source)}")
+    return {"status": "success", "camera": _redact_camera(cam)}
 
 # Replace one camera's tripwires/zones, leaving everything else in the file intact
 @app.post("/api/v1/config/cameras/{camera_id}/calibration")
@@ -494,7 +543,7 @@ def update_camera_calibration(camera_id: str, body: CalibrationUpdate):
     if body.zones is not None:
         cam["zones"] = [z.model_dump(exclude_none=True) for z in body.zones]
     _write_config(config)
-    return {"status": "success", "camera": cam}
+    return {"status": "success", "camera": _redact_camera(cam)}
 
 # Device Hardware Health Endpoint
 @app.get("/api/v1/device/health")

@@ -7,12 +7,28 @@ cameras:
   - 1270
   - 720
   tripwires:
-  - id: tripwire_1789985616980
-    name: tripwire_1789985616980
+  - id: tripwire_1790217578233
+    name: tripwire_1790217578233
     line:
-    - - 1153.0
-      - 625.0
-    - - 1201.0
-      - 486.0
+    - - 1116.0
+      - 457.0
+    - - 990.0
+      - 717.0
     in_direction: bottom_to_top
-  zones: []
+  zones:
+  - id: queue_zone_1790217226558
+    name: Checkout Queue
+    polygon:
+    - - 295.0
+      - 328.0
+    - - 433.0
+      - 277.0
+    - - 354.0
+      - 169.0
+    - - 254.0
+      - 133.0
+    - - 191.0
+      - 157.0
+    - - 295.0
+      - 325.0
+    type: queue

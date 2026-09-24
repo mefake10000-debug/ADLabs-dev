@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -19,6 +20,7 @@ if os.path.exists(DB_PATH):
 
 import yaml
 from fastapi.testclient import TestClient
+import server.app as server_app
 from server.app import app, init_db
 
 TEST_VIDEO = "data/sample_videos/mall_concourse_01.mp4"
@@ -125,7 +127,8 @@ class TestAnalyticsAndFilteringAPI(unittest.TestCase):
         init_db()   # tables must exist even if an earlier test module removed the file
         cls.client = TestClient(app)
 
-    def _seed_rollup(self, store_id, camera_id, in_count, received_at):
+    def _seed_rollup(self, store_id, camera_id, in_count, received_at, occupancy=0,
+                     queue_length=0, avg_queue_wait_seconds=0.0, queue_alert_active=0):
         import sqlite3
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
@@ -136,7 +139,7 @@ class TestAnalyticsAndFilteringAPI(unittest.TestCase):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 store_id, "test_mac_01", camera_id, received_at, received_at,
-                in_count, 0, 0, 0.0, 0, 0.0, 0, received_at
+                in_count, 0, occupancy, 0.0, queue_length, avg_queue_wait_seconds, queue_alert_active, received_at
             ))
             conn.commit()
 
@@ -166,6 +169,30 @@ class TestAnalyticsAndFilteringAPI(unittest.TestCase):
         cam_a_live = self.client.get("/api/v1/live", params={"store_id": store_id, "camera_id": "cam_a"}).json()
         self.assertEqual(cam_a_live["camera_id"], "cam_a")
         self.assertEqual(cam_a_live["total_visitors"], 10)
+
+    def test_live_metrics_aggregates_across_cameras_not_just_last_sync(self):
+        # Regression: /api/v1/live used to read only the single most recent rollup row
+        # store-wide, so with >1 camera it reported whichever camera happened to sync last,
+        # not a true store-wide figure.
+        store_id = "test_store_multicam"
+        # cam_a syncs first with occupancy 5 and a queue alert; cam_b syncs LATER (higher id)
+        # with occupancy 3 and no queue. A single-latest-row read would see only cam_b's numbers.
+        self._seed_rollup(store_id, "cam_a", 1, "2026-09-01 09:00:00", occupancy=5,
+                          queue_length=2, avg_queue_wait_seconds=40.0, queue_alert_active=1)
+        self._seed_rollup(store_id, "cam_b", 1, "2026-09-01 09:00:05", occupancy=3,
+                          queue_length=0, avg_queue_wait_seconds=0.0, queue_alert_active=0)
+
+        data = self.client.get("/api/v1/live", params={"store_id": store_id}).json()
+        self.assertEqual(data["net_occupancy"], 8)          # 5 + 3, not just cam_b's 3
+        self.assertEqual(data["queue_length"], 2)            # summed, not dropped
+        self.assertTrue(data["queue_alert_active"])          # true if ANY camera has an alert
+
+        # A later rollup from cam_a alone must update cam_a's contribution without losing cam_b's
+        self._seed_rollup(store_id, "cam_a", 1, "2026-09-01 09:00:10", occupancy=7,
+                          queue_length=0, avg_queue_wait_seconds=0.0, queue_alert_active=0)
+        data2 = self.client.get("/api/v1/live", params={"store_id": store_id}).json()
+        self.assertEqual(data2["net_occupancy"], 10)         # 7 (cam_a's newer row) + 3 (cam_b's latest)
+        self.assertFalse(data2["queue_alert_active"])        # cam_a's alert cleared, cam_b never had one
 
     def test_analytics_summary_peak_and_average(self):
         store_id = "test_store_m3_summary"
@@ -281,6 +308,71 @@ class TestCameraConfigAPI(unittest.TestCase):
             resp = self.client.post("/api/v1/config/cameras/cam_a/calibration", json=body)
             self.assertEqual(resp.status_code, 422, body)
         self.assertEqual(self._config()["cam_a"]["tripwires"][0]["id"], "tw1")
+
+    def test_rtsp_credentials_are_redacted_in_every_response(self):
+        creds_source = "rtsp://admin:sup3rSecret@192.168.1.50:554/Streaming/Channels/102"
+        self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": creds_source})
+
+        get_resp = self.client.get("/api/v1/config/cameras").json()
+        cam_a = next(c for c in get_resp["cameras"] if c["id"] == "cam_a")
+        self.assertNotIn("sup3rSecret", cam_a["source"])
+        self.assertIn("****:****@192.168.1.50", cam_a["source"])
+
+        # Never touch the actual file on disk -- only API responses are redacted
+        self.assertIn("sup3rSecret", self._config()["cam_a"]["source"])
+
+        # The POST response itself must also be redacted, not just the later GET
+        post_resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": creds_source}).json()
+        self.assertNotIn("sup3rSecret", post_resp["camera"]["source"])
+
+    def test_calibration_studio_closes_zones_without_relying_on_a_native_dblclick(self):
+        """Regression guard for a bug where a queue/dwell zone could only be finished by a native
+        browser dblclick event. That event depends on the OS/browser/input-device double-click
+        threshold, which trackpads, remote-desktop/VM input forwarding, and some mice don't hit
+        reliably -- when it silently doesn't fire, the clicked points never become a real polygon:
+        never in the shapes list, never saved, never reaches the edge. A tripwire needs only two
+        ordinary clicks (no double-click gesture at all), which is why it always worked while a
+        zone sometimes didn't for the exact same "click on the frame" interaction. There's an
+        explicit, reliable "Close Shape" button now; this only checks it's actually wired into
+        the page (a real click-driven repro of the bug lives outside this suite, via Playwright,
+        since this project intentionally keeps a browser automation dependency out of CI)."""
+        html = self.client.get("/").text
+        self.assertIn('onclick="finishPolygon()"', html)
+        self.assertIn("Close Shape", html)
+        self.assertIn("function finishPolygon()", html)
+        # The old close path (double-click) must still work for anyone whose pointer supports it.
+        self.assertIn("canvas.ondblclick = () => finishPolygon();", html)
+
+
+class TestApiKeyAuth(unittest.TestCase):
+    """State-changing endpoints only: GET reads stay open even when a key is configured."""
+
+    @classmethod
+    def setUpClass(cls):
+        init_db()
+        cls.client = TestClient(app)
+
+    def test_no_key_configured_means_no_auth_required(self):
+        # server_app.API_KEY is None in every other test in this file (env var never set) --
+        # this is just an explicit assertion that today's zero-config behaviour is unchanged.
+        resp = self.client.post("/api/v1/metrics/reset")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_post_rejected_without_or_with_wrong_key_when_configured(self):
+        with patch.object(server_app, "API_KEY", "correct-key"):
+            no_key = self.client.post("/api/v1/metrics/reset")
+            self.assertEqual(no_key.status_code, 401)
+
+            wrong_key = self.client.post("/api/v1/metrics/reset", headers={"X-API-Key": "wrong"})
+            self.assertEqual(wrong_key.status_code, 401)
+
+            right_key = self.client.post("/api/v1/metrics/reset", headers={"X-API-Key": "correct-key"})
+            self.assertEqual(right_key.status_code, 200)
+
+    def test_get_endpoints_stay_open_even_when_a_key_is_configured(self):
+        with patch.object(server_app, "API_KEY", "correct-key"):
+            resp = self.client.get("/api/v1/live", params={"store_id": "any"})
+            self.assertEqual(resp.status_code, 200)
 
 
 def tearDownModule():

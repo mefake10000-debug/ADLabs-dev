@@ -61,16 +61,29 @@ class TestEdgeSightCore(unittest.TestCase):
             except OSError:
                 pass
 
-    def test_frame_buffer_ring_drop(self):
+    def test_frame_buffer_put_drops_oldest_when_full(self):
         fb = FrameBuffer(maxsize=3)
         fb.put(1, 100.0, "frame1")
         fb.put(2, 101.0, "frame2")
         fb.put(3, 102.0, "frame3")
-        fb.put(4, 103.0, "frame4")  # Should drop frame1
+        fb.put(4, 103.0, "frame4")  # queue already at maxsize -> oldest (1) dropped
 
         self.assertEqual(fb.size(), 3)
-        idx, ts, f = fb.get()
-        self.assertEqual(idx, 2)
+
+    def test_frame_buffer_get_returns_newest_and_drains_backlog(self):
+        # Regression: get() used to be FIFO. If inference (the consumer) is slower than
+        # decode (the producer), a FIFO consumer permanently lags by the whole backlog and
+        # never catches up to real time. Returning the newest frame and dropping the rest
+        # bounds that lag to at most one buffer's worth of time.
+        fb = FrameBuffer(maxsize=5)
+        fb.put(1, 100.0, "frame1")
+        fb.put(2, 101.0, "frame2")
+        fb.put(3, 102.0, "frame3")
+
+        idx, ts, frame = fb.get()
+        self.assertEqual(idx, 3)
+        self.assertEqual(frame, "frame3")
+        self.assertEqual(fb.size(), 0)  # the stale backlog was discarded, not queued for later
 
     def test_tripwire_crossing(self):
         # Line at y=360 from x=400 to x=880
@@ -203,7 +216,9 @@ class TestEdgeSightCore(unittest.TestCase):
         self.assertTrue(point_in_polygon((200, 200), [(100, 100), (300, 100), (300, 300), (100, 300)]))
         self.assertFalse(point_in_polygon((50, 50), [(100, 100), (300, 100), (300, 300), (100, 300)]))
 
-        zone = Zone("z_01", "Promo Area", poly, "dwell")
+        # exit_grace_seconds=0 here to test polygon/dwell mechanics in isolation --
+        # see test_zone_exit_grace_period below for the grace-period behavior itself.
+        zone = Zone("z_01", "Promo Area", poly, "dwell", exit_grace_seconds=0)
         t0 = time.time()
         # Track inside polygon (foot point at 200, 200)
         track = Track(track_id=10, bbox=[180, 100, 220, 200], confidence=0.85, timestamp=t0)
@@ -221,6 +236,36 @@ class TestEdgeSightCore(unittest.TestCase):
         self.assertEqual(zone.current_occupancy, 0)
         metrics = zone.get_metrics()
         self.assertGreaterEqual(metrics["avg_dwell_seconds"], 3.0)
+
+    def test_zone_exit_grace_period_survives_a_brief_detection_gap(self):
+        # Regression coverage for the empty-queue-columns finding: a single missed detection
+        # (occlusion, one bad frame) used to immediately reset dwell/occupancy. A person who
+        # briefly drops out of detection and reappears in the same spot should read as having
+        # never left.
+        poly = [[100, 100], [300, 100], [300, 300], [100, 300]]
+        zone = Zone("z_01", "Promo Area", poly, "dwell", exit_grace_seconds=3.0)
+        t0 = time.time()
+        track = Track(track_id=10, bbox=[180, 100, 220, 200], confidence=0.85, timestamp=t0)
+
+        zone.update([track], t0)
+        self.assertEqual(zone.current_occupancy, 1)
+
+        # Detection missed for 1 second (well within the 3s grace period) -- track absent from
+        # the `tracks` list passed to update() entirely, as if the detector missed that frame
+        zone.update([], t0 + 1.0)
+        self.assertEqual(zone.current_occupancy, 1)          # still counted as present
+        self.assertIn(10, zone.active_tracks_in_zone)          # entry_time preserved, not reset
+
+        # Reappears at t0+1.5s, still inside the polygon
+        track.update([180, 100, 220, 200], 0.85, t0 + 1.5)
+        zone.update([track], t0 + 1.5)
+        self.assertEqual(zone.current_occupancy, 1)
+        self.assertEqual(zone.active_tracks_in_zone[10], t0)  # dwell clock never reset
+
+        # Now genuinely gone for longer than the grace period -> exit finalizes
+        zone.update([], t0 + 5.0)
+        self.assertEqual(zone.current_occupancy, 0)
+        self.assertGreaterEqual(zone.completed_dwells[-1], 3.9)  # ~t0+5.0 minus entry at t0
 
     def test_queue_analyzer_alert(self):
         poly = [[400, 200], [800, 200], [800, 600], [400, 600]]

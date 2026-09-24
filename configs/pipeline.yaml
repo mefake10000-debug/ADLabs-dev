@@ -7,7 +7,13 @@ edge:
 
 perception:
   model_name: "models/yolo26m.pt"   # cached in ./models (bind-mounted), so it is downloaded once, not per container
-  confidence_threshold: 0.50  # Tuned for retail edge to suppress cardboard cutouts and noise
+  confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
+                               # real person" bar is tracking.track_thresh below; detections between
+                               # this floor and track_thresh can only extend a track that already
+                               # exists (ByteTrack low-confidence recovery), never start a new one.
+                               # Benchmark evidence (docs/tracking-benchmark.md): at 0.50 as a single
+                               # threshold, ~15 points of recall were partially-occluded people YOLO
+                               # did see, just below 0.50.
   iou_threshold: 0.45         # Suppress duplicate overlapping boxes on the same person
   min_height: 95              # Suppress small shelf items and price tags
   min_width: 30
@@ -19,11 +25,21 @@ perception:
 
 tracking:
   tracker_type: "bytetrack"
-  track_thresh: 0.50
+  track_thresh: 0.50          # Bar for STARTING a new track. Detections below this (but above
+                               # perception.confidence_threshold) can only extend an existing track.
   match_thresh: 0.45          # Tuned IoU matching to prevent ID switching & track fragmentation
   track_buffer: 45            # Max frames to keep lost track alive
   min_hits: 4                 # Temporal confirmation to eliminate 1-frame detector flicker
-  filter_stationary: true     # Suppress static cardboard displays / mannequins
+  stationary_policy: "tag"    # "tag": stationary tracks (e.g. someone standing still in a queue)
+                               # are still returned, with is_stationary=True, so zones/queues can
+                               # count them -- only the tripwire ignores the flag (it already did).
+                               # "suppress": old behaviour, drop them entirely. Use "suppress" for a
+                               # camera with a known cardboard-cutout/mannequin false-positive problem.
+
+analytics:
+  zone_exit_grace_seconds: 3.0  # A track missing from a dwell/queue zone for less than this is still
+                                  # counted as present, so a single dropped detection doesn't reset
+                                  # dwell time or make someone flicker in and out of a queue count.
 
 storage:
   db_path: "data/storage/edgesight.db"

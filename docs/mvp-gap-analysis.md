@@ -157,6 +157,12 @@ Three docker services (`rtsp-simulator`, `edge-analyzer`, `cloud-dashboard`) —
 
 Sequenced so each milestone is independently shippable and low-risk; later milestones depend on earlier ones only where noted.
 
+> **Status (2026-09-22):** M0-M3 done. Before starting M5/M6, five bug fixes plus dependency
+> pinning/CI/API-key/credential-redaction/healthcheck hygiene were completed -- see
+> `docs/recorded-run-analysis.md` §9-11 for the evidence and full write-up (real-CCTV `main`-vs-
+> branch comparison, tracker/zone/API fixes, before/after benchmark). M5's own throughput
+> benchmark should run against this fixed code, not the pre-fix tracker.
+
 ### M0 — Fix queue-metrics data loss (Critical, do first)
 - **Files:** `src/main.py` (`_generate_and_save_rollup`), `server/app.py` (`get_live_metrics`)
 - **Change:** Read real `queue_length`/`avg_wait_seconds`/`alert_active` from `ctx["queues"]` (aggregate across queues on a camera, e.g. max length / max wait / any alert) instead of the hardcoded zeros; have `get_live_metrics` read those columns from `latest` instead of hardcoding.

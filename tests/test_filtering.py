@@ -47,8 +47,8 @@ class TestFalsePositiveFiltering(unittest.TestCase):
         self.assertFalse(area < detector.min_area)
         self.assertFalse(aspect < detector.min_aspect_ratio or aspect > detector.max_aspect_ratio)
 
-    def test_temporal_confirmation_and_stationary_suppression(self):
-        tracker = SimpleByteTracker(min_hits=4, filter_stationary=True)
+    def test_temporal_confirmation_and_stationary_suppress_policy(self):
+        tracker = SimpleByteTracker(min_hits=4, stationary_policy="suppress")
         t0 = time.time()
 
         # Frame 1: Detection appears
@@ -74,7 +74,7 @@ class TestFalsePositiveFiltering(unittest.TestCase):
         # After 25+ updates with 0 displacement, should be classified as static fixture
         track = tracker.tracks[0]
         self.assertTrue(track.is_stationary)
-        # Suppressed from returned active list
+        # Suppressed from returned active list under the "suppress" policy
         self.assertEqual(len(active), 0)
 
         # When a real person starts moving (displacement >= 18px gradually over frames)
@@ -85,6 +85,72 @@ class TestFalsePositiveFiltering(unittest.TestCase):
 
         self.assertFalse(tracker.tracks[0].is_stationary)
         self.assertEqual(len(active), 1)
+
+    def test_default_stationary_policy_tags_instead_of_hiding(self):
+        # Regression coverage for the "fewer boxes than people in frame" / empty queue-zone
+        # finding: hiding stationary tracks from the returned list made them invisible to
+        # zones/queues too (a queueing customer standing still IS stationary), not just to
+        # the tripwire (which already ignores the flag itself, unaffected either way).
+        tracker = SimpleByteTracker(min_hits=4)  # default stationary_policy="tag"
+        t0 = time.time()
+        dets = [{"bbox": [100, 100, 160, 260], "confidence": 0.85, "class_id": 0}]
+        for i in range(34):  # 4 to confirm (min_hits) + 30 to become stationary
+            active = tracker.update(dets, t0 + i * 0.1)
+
+        self.assertTrue(tracker.tracks[0].is_stationary)
+        self.assertEqual(len(active), 1)              # NOT hidden, unlike "suppress"
+        self.assertTrue(active[0].is_stationary)       # but the flag is there for callers to act on
+
+    def test_invalid_stationary_policy_rejected(self):
+        with self.assertRaises(ValueError):
+            SimpleByteTracker(stationary_policy="bogus")
+
+    def test_low_confidence_detection_never_starts_a_new_track(self):
+        # ByteTrack's core anti-false-positive rule: a detection below track_thresh can extend
+        # an existing track but must never spawn a new identity on its own -- otherwise every
+        # noisy low-confidence blob becomes a phantom track.
+        tracker = SimpleByteTracker(min_hits=1, track_thresh=0.5)
+        low_det = [{"bbox": [100, 100, 160, 260], "confidence": 0.3, "class_id": 0}]
+        active = tracker.update(low_det, time.time())
+        self.assertEqual(active, [])
+        self.assertEqual(len(tracker.tracks), 0)
+
+    def test_low_confidence_detection_extends_an_existing_track(self):
+        # This is the recovery this milestone is about: a partially-occluded person whose
+        # detection confidence dips below track_thresh must still keep their track alive and
+        # visible, not be dropped as an unmatched track for that frame.
+        tracker = SimpleByteTracker(min_hits=1, track_thresh=0.5)
+        t0 = time.time()
+
+        high_det = [{"bbox": [100, 100, 160, 260], "confidence": 0.9, "class_id": 0}]
+        active = tracker.update(high_det, t0)
+        self.assertEqual(len(active), 1)
+        track_id = active[0].track_id
+
+        # Next frame: only a low-confidence detection near the same spot
+        low_det = [{"bbox": [104, 104, 164, 264], "confidence": 0.3, "class_id": 0}]
+        active = tracker.update(low_det, t0 + 0.1)
+
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].track_id, track_id)   # same identity, not a miss
+        self.assertEqual(active[0].time_since_update, 0)  # box rendered this frame, not marked missed
+        self.assertEqual(len(tracker.tracks), 1)          # no phantom second track from the low-conf box
+
+    def test_high_confidence_detection_preferred_over_low_confidence_for_the_same_track(self):
+        # When both a high- and a low-confidence detection are candidates in the same frame
+        # (e.g. a real person plus a weak duplicate/ghost box), the existing 3-stage matcher
+        # already runs on the high-confidence set first, so it should win the match.
+        tracker = SimpleByteTracker(min_hits=1, track_thresh=0.5)
+        t0 = time.time()
+        tracker.update([{"bbox": [100, 100, 160, 260], "confidence": 0.9, "class_id": 0}], t0)
+
+        dets = [
+            {"bbox": [500, 500, 560, 660], "confidence": 0.3, "class_id": 0},   # far away, low-conf
+            {"bbox": [103, 103, 163, 263], "confidence": 0.9, "class_id": 0},   # near, high-conf
+        ]
+        active = tracker.update(dets, t0 + 0.1)
+        self.assertEqual(len(active), 1)
+        self.assertAlmostEqual(active[0].bbox[0], 103, delta=1)  # matched the high-conf box, not the low-conf one
 
     def test_detector_without_a_model_returns_nothing_but_says_so(self):
         # There is no lower-accuracy fallback detector any more (the HOG one recovered ~7-14% of people on

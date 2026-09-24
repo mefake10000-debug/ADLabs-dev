@@ -131,6 +131,36 @@ the default Linux wheel bundles ~4GB of CUDA libraries that Docker Desktop and t
 `data/` and `.git` out of the build context. YOLO weights are cached in `models/` (`perception.model_name:
 models/yolo26m.pt`), so they download once rather than on every container start.
 
+### 2d. Tracking & Queue Tuning (`configs/pipeline.yaml`)
+- **`perception.confidence_threshold` / `tracking.track_thresh`** -- two-stage (ByteTrack-style)
+  confidence matching. The detector is deliberately run at a *low* confidence floor
+  (`confidence_threshold`); detections between that floor and `track_thresh` can extend a track
+  that already exists (recovering partially-occluded people) but can never start a new one, so
+  noisy low-confidence boxes can't spawn phantom identities. Raise `confidence_threshold` toward
+  `track_thresh` to disable the low-confidence recovery entirely (the old single-threshold
+  behaviour).
+- **`tracking.stationary_policy`** -- `"tag"` (default) returns people standing still (e.g.
+  queueing) with `is_stationary: true` so zones/queues count them; `"suppress"` drops them from
+  every metric entirely, for a specific camera with a known cardboard-cutout/mannequin
+  false-positive problem.
+- **`analytics.zone_exit_grace_seconds`** -- how long a track can be briefly missing from a
+  dwell/queue zone (a dropped detection, momentary occlusion) before it's actually counted as
+  having left. Too low and a queue count flickers on every missed frame; too high and someone who
+  actually left stays counted for a while.
+
+See `docs/recorded-run-analysis.md` §10 for the evidence behind these defaults.
+
+### 2e. Securing the API (optional)
+Every `/api/v1/*` endpoint is open by default -- fine for a closed/trusted network, not for a port
+exposed to the internet. Set `EDGESIGHT_API_KEY` (same value on `edge-analyzer` and
+`cloud-dashboard`, e.g. in a `.env` file next to `docker-compose.yml`) to require an `X-API-Key`
+header on every **state-changing** call (telemetry ingestion, camera source/calibration writes,
+metrics reset). Read endpoints (live counts, history, the video stream/snapshots) stay open,
+matching the dashboard's own access -- this is a shared-secret barrier against unauthenticated
+internet scanners hitting an exposed port, not a substitute for real per-user login. RTSP
+credentials embedded in a camera's `source` are always masked in every API response regardless of
+whether a key is set.
+
 ### 3. Running Natively (Without Docker)
 ```bash
 # 1. Install dependencies

@@ -279,6 +279,10 @@
                             <option value="bottom_to_top">Entry = upward</option>
                             <option value="top_to_bottom">Entry = downward</option>
                         </select>
+                        <button onclick="finishPolygon()" id="btn-finish-zone" class="bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-surface-border transition flex items-center space-x-1.5">
+                            <i data-lucide="check-circle" class="w-3.5 h-3.5"></i>
+                            <span>Close Shape</span>
+                        </button>
                         <button onclick="clearCalibrationCanvas()" class="bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-surface-border transition">
                             Clear
                         </button>
@@ -296,7 +300,7 @@
                     </div>
                     <div class="mt-3 text-xs text-gray-400 flex items-center space-x-4">
                         <span><strong>Tripwire Mode:</strong> Click Point A, then Click Point B to define line threshold.</span>
-                        <span><strong>Zone Mode:</strong> Click points around perimeter. Double-click to close.</span>
+                        <span><strong>Zone Mode:</strong> Click at least 3 points around the perimeter, then press <strong>Close Shape</strong> (double-click also works if your pointer supports it reliably).</span>
                     </div>
                 </div>
 
@@ -349,6 +353,13 @@
     <script>
         lucide.createIcons();
 
+        const API_KEY = {{ api_key|tojson }};   // "" when EDGESIGHT_API_KEY is unset (no auth required)
+        function authHeaders(extra) {
+            const h = Object.assign({}, extra || {});
+            if (API_KEY) h['X-API-Key'] = API_KEY;
+            return h;
+        }
+
         let currentView = 'view-live';
         let currentCameraId = 'cam_entrance_01';
         let cameraConfigs = {};
@@ -356,6 +367,7 @@
         let calibPoints = [];
         let calibLines = [];
         let calibPolygons = [];
+        let calibLoadedFor = null;  // camera id whose shapes are currently loaded into calibLines/calibPolygons
         let backgroundImage = new Image();
         let chartFootfallInstance = null;
         let chartOccupancyInstance = null;
@@ -423,7 +435,7 @@
         async function resetMetrics() {
             if (!confirm("Reset telemetry database and start fresh session counts?")) return;
             try {
-                await fetch('/api/v1/metrics/reset', { method: 'POST' });
+                await fetch('/api/v1/metrics/reset', { method: 'POST', headers: authHeaders() });
                 fetchLiveTelemetry();
                 fetchHistoricalAnalytics();
             } catch (e) {
@@ -502,7 +514,7 @@
                 const tbody = document.getElementById('telemetry-table-body');
                 tbody.innerHTML = history.slice(-10).reverse().map(row => `
                     <tr class="hover:bg-surface-hover/50">
-                        <td class="py-2 px-3 font-mono text-gray-400">${row.timestamp_end}</td>
+                        <td class="py-2 px-3 font-mono text-gray-400">${escapeHtml(row.timestamp_end)}</td>
                         <td class="py-2 px-3 text-emerald-400 font-bold">+${row.in_count}</td>
                         <td class="py-2 px-3 text-indigo-400 font-bold">-${row.out_count}</td>
                         <td class="py-2 px-3 text-cyan-300 font-semibold">${row.current_occupancy}</td>
@@ -518,10 +530,20 @@
         function initCalibrationStudio() {
             const canvas = document.getElementById('calibCanvas');
             const ctx = canvas.getContext('2d');
-            const existing = cameraConfigs[currentCameraId] || {};
-            calibLines = JSON.parse(JSON.stringify(existing.tripwires || []));
-            calibPolygons = JSON.parse(JSON.stringify(existing.zones || []));
-            calibPoints = [];
+
+            // Only (re)seed calibLines/calibPolygons from the last-loaded server snapshot when
+            // switching to a DIFFERENT camera (or on first load). This function used to run on
+            // every visit to this tab -- including a plain nav-bar click back from "Live Vision
+            // Studio" with nothing else changed -- which silently discarded any shape drawn but
+            // not yet saved. Drawing a zone, glancing at another tab, and coming back used to
+            // wipe it before "Save & Hot-Apply" was ever clicked.
+            if (calibLoadedFor !== currentCameraId) {
+                const existing = cameraConfigs[currentCameraId] || {};
+                calibLines = JSON.parse(JSON.stringify(existing.tripwires || []));
+                calibPolygons = JSON.parse(JSON.stringify(existing.zones || []));
+                calibPoints = [];
+                calibLoadedFor = currentCameraId;
+            }
             backgroundImage = new Image();
             backgroundImage.onload = () => {
                 canvas.width = backgroundImage.naturalWidth || canvas.width;
@@ -555,19 +577,7 @@
                 redrawCalibration();
             };
 
-            canvas.ondblclick = () => {
-                if ((calibMode === 'polygon' || calibMode === 'queue') && calibPoints.length >= 3) {
-                    const zoneType = calibMode === 'queue' ? 'queue' : 'dwell';
-                    calibPolygons.push({
-                        id: zoneType + '_zone_' + Date.now(),
-                        name: zoneType === 'queue' ? 'Checkout Queue' : 'In-Store Zone',
-                        polygon: [...calibPoints],
-                        type: zoneType
-                    });
-                    calibPoints = [];
-                    redrawCalibration();
-                }
-            };
+            canvas.ondblclick = () => finishPolygon();
         }
 
         function setCalibMode(mode) {
@@ -576,6 +586,35 @@
             document.getElementById('mode-tw').className = mode === 'tripwire' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
             document.getElementById('mode-poly').className = mode === 'polygon' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
             document.getElementById('mode-queue').className = mode === 'queue' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
+        }
+
+        // Commits the points clicked so far into a finished polygon zone. Used by both the
+        // explicit "Close Shape" button and canvas double-click. The button is the reliable path:
+        // a native dblclick event depends on the browser/OS/input-device double-click threshold,
+        // which trackpads, remote-desktop/VM input forwarding, and some mice don't hit
+        // consistently -- when it doesn't fire, points just keep accumulating in calibPoints and
+        // the zone silently never becomes a real shape (never in the shapes list, never saved,
+        // never reaches the edge), while a tripwire -- needing only two ordinary clicks, no
+        // double-click gesture at all -- always works. That asymmetry is what made zones and
+        // tripwires behave differently for the exact same "click on the frame" interaction.
+        function finishPolygon() {
+            if (!(calibMode === 'polygon' || calibMode === 'queue')) {
+                alert('Switch to "Draw Dwell Zone" or "Draw Queue Zone" mode first.');
+                return;
+            }
+            if (calibPoints.length < 3) {
+                alert('Click at least 3 points around the perimeter before closing the shape.');
+                return;
+            }
+            const zoneType = calibMode === 'queue' ? 'queue' : 'dwell';
+            calibPolygons.push({
+                id: zoneType + '_zone_' + Date.now(),
+                name: zoneType === 'queue' ? 'Checkout Queue' : 'In-Store Zone',
+                polygon: [...calibPoints],
+                type: zoneType
+            });
+            calibPoints = [];
+            redrawCalibration();
         }
 
         function clearCalibrationCanvas() {
@@ -674,7 +713,7 @@
             try {
                 const res = await fetch(`/api/v1/config/cameras/${currentCameraId}/calibration`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({ tripwires: calibLines, zones: calibPolygons })
                 });
                 if (res.ok) {
@@ -733,7 +772,7 @@
             try {
                 const res = await fetch(`/api/v1/config/cameras/${currentCameraId}/source`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify(body)
                 });
                 if (res.ok) {

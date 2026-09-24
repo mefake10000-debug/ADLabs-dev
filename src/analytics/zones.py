@@ -23,14 +23,20 @@ def point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, floa
 class Zone:
     """Polygonal Region of Interest (ROI) for dwell time and occupancy tracking."""
 
-    def __init__(self, zone_id: str, name: str, polygon: List[List[float]], zone_type: str = "dwell"):
+    def __init__(self, zone_id: str, name: str, polygon: List[List[float]], zone_type: str = "dwell",
+                exit_grace_seconds: float = 3.0):
         self.zone_id = zone_id
         self.name = name
         self.polygon: List[Tuple[float, float]] = [(float(p[0]), float(p[1])) for p in polygon]
         self.zone_type = zone_type
+        # A track missing from the zone for less than this is still counted as present, so a
+        # single dropped detection (occlusion, a frame the detector missed) doesn't reset dwell
+        # time or make someone flicker in and out of a queue count.
+        self.exit_grace_seconds = exit_grace_seconds
 
         # Track management
         self.active_tracks_in_zone: Dict[int, float] = {}  # track_id -> entry_time
+        self.last_seen_in_zone: Dict[int, float] = {}       # track_id -> most recent time seen inside
         self.completed_dwells: List[float] = []             # past dwell durations in seconds
         self.current_occupancy = 0
 
@@ -43,11 +49,18 @@ class Zone:
                 current_in_zone_ids.add(track.track_id)
                 if track.track_id not in self.active_tracks_in_zone:
                     self.active_tracks_in_zone[track.track_id] = current_time
+                self.last_seen_in_zone[track.track_id] = current_time
 
-        # Detect tracks that have exited the zone
-        exited_ids = [tid for tid in self.active_tracks_in_zone if tid not in current_in_zone_ids]
+        # Only finalize an exit once a track has been missing from the zone for longer than the
+        # grace period -- not the instant it's absent for a single frame.
+        exited_ids = [
+            tid for tid in self.active_tracks_in_zone
+            if tid not in current_in_zone_ids
+            and current_time - self.last_seen_in_zone.get(tid, current_time) > self.exit_grace_seconds
+        ]
         for tid in exited_ids:
             entry_time = self.active_tracks_in_zone.pop(tid)
+            self.last_seen_in_zone.pop(tid, None)
             dwell_seconds = max(0.5, current_time - entry_time)
             self.completed_dwells.append(dwell_seconds)
             # Keep rolling window of past 100 dwell sessions

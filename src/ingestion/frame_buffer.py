@@ -24,12 +24,18 @@ class FrameBuffer:
             self._not_empty.notify()
 
     def get(self, timeout: Optional[float] = 1.0) -> Optional[Tuple[int, float, Any]]:
+        """Returns the NEWEST buffered frame and discards anything older. If inference is
+        the bottleneck (slower than decode), a consumer that took frames oldest-first would
+        permanently lag by however large the backlog gets and never catch up; always jumping
+        to the newest frame bounds that lag to at most one buffer's worth of time."""
         with self._not_empty:
             if not self._queue:
                 if not self._not_empty.wait(timeout):
                     return None
             if self._queue:
-                return self._queue.pop(0)
+                item = self._queue[-1]
+                self._queue.clear()
+                return item
             return None
 
     def clear(self):

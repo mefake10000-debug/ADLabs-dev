@@ -54,3 +54,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Ad-hoc manual-verification screen recordings -- useful for a single review pass, not worth
+# keeping in history (tens of MB each). Real benchmark/test clips in data/sample_videos/ are
+# unaffected; this only matches the default screen-recorder naming pattern.
+data/sample_videos/Screen Recording*.mp4

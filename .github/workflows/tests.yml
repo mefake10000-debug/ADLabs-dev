@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          pip install -r requirements-dashboard.txt
+          # A lightweight substitute for the full opencv-python in requirements-edge.txt: tests
+          # only need cv2.VideoCapture/imwrite etc, never a working YOLO model (PersonDetector
+          # defaults to require_model=False and degrades to zero detections + a logged error
+          # rather than raising), so installing torch/torchvision/ultralytics here would be a
+          # multi-GB, multi-minute no-op for what these tests actually exercise.
+          pip install "opencv-python-headless<5.0.0"
+
+      - name: Run tests
+        run: python -m unittest discover tests -v

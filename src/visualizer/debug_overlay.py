@@ -79,7 +79,12 @@ class DebugOverlay:
         # 4. Draw Tracks & Bounding Boxes
         for track in tracks:
             b = [int(v) for v in track.bbox]
-            cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), (0, 255, 255), 2)
+            is_stationary = getattr(track, "is_stationary", False)
+            # Dim, muted color for stationary/tagged tracks (queueing customers, etc.) so the
+            # video visually matches the numbers: these ARE counted (stationary_policy="tag"),
+            # just distinguishable from people actively walking.
+            color = (120, 160, 120) if is_stationary else (0, 255, 255)
+            cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2)
             foot = (int(track.foot_point[0]), int(track.foot_point[1]))
             cv2.circle(canvas, foot, 4, (0, 0, 255), -1)
 
@@ -89,13 +94,14 @@ class DebugOverlay:
                 pt2 = (int(track.history[i][0]), int(track.history[i][1]))
                 cv2.line(canvas, pt1, pt2, (200, 200, 200), 1)
 
+            label = f"ID:{track.track_id}" + (" (still)" if is_stationary else "")
             cv2.putText(
                 canvas,
-                f"ID:{track.track_id}",
+                label,
                 (b[0], b[1] - 5),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (0, 255, 255),
+                color,
                 2
             )
 

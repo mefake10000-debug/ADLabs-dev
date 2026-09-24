@@ -1,11 +1,16 @@
-# Note: the Docker image installs torch/torchvision from the CPU wheel index first (see docker/Dockerfile.edge);
-# they are listed here for native (non-Docker) installs.
-torch>=2.0.0
-torchvision>=0.15.0
-ultralytics>=8.0.0
-# ultralytics depends on the full opencv-python; declaring opencv-python-headless as well installs two
-# conflicting cv2 builds into the same directory.
-opencv-python>=4.8.0
-numpy>=1.24.0
-pyyaml>=6.0
-requests>=2.31.0
+# Note: the Docker image installs torch/torchvision from the CPU wheel index first (see
+# docker/Dockerfile.edge); they are listed here too for native (non-Docker) installs.
+#
+# Exact-pinned: these three caused real incidents in this repo's history -- a 10GB image from
+# torch's default CUDA-bundled wheel, and (separately) an opencv-python/opencv-python-headless
+# conflict that silently broke person detection. A floating >= constraint would happily pick up
+# whatever breaks next; these versions are the ones actually verified working end to end.
+torch==2.14.0
+torchvision==0.29.0
+ultralytics==8.4.155
+# ultralytics depends on the full opencv-python; declaring opencv-python-headless as well installs
+# two conflicting cv2 builds into the same site-packages directory. Do not add opencv-python-headless.
+opencv-python==5.0.0.93
+numpy>=1.24.0,<3.0.0
+pyyaml>=6.0,<7.0
+requests>=2.31.0,<3.0.0

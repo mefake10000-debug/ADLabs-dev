@@ -15,12 +15,14 @@ class TelemetryExporter:
         local_buffer: LocalBuffer,
         cloud_endpoint: str,
         local_endpoint: Optional[str] = None,
-        push_interval_seconds: int = 30
+        push_interval_seconds: int = 30,
+        api_key: Optional[str] = None
     ):
         self.local_buffer = local_buffer
         self.cloud_endpoint = cloud_endpoint
         self.local_endpoint = local_endpoint
         self.push_interval = push_interval_seconds
+        self.api_key = api_key
 
         self.running = False
         self.thread: Optional[threading.Thread] = None
@@ -85,7 +87,8 @@ class TelemetryExporter:
                     payload_key: records,
                     "exported_at": time.time()
                 }
-                resp = requests.post(endpoint, json=payload, timeout=5.0)
+                headers = {"X-API-Key": self.api_key} if self.api_key else {}
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=5.0)
                 if resp.status_code in (200, 201):
                     ids = [r["id"] for r in records]
                     mark_exported(ids)

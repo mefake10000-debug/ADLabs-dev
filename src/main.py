@@ -51,7 +51,8 @@ class EdgePipeline:
             local_buffer=self.local_buffer,
             cloud_endpoint=cloud_endpoint,
             local_endpoint=local_endpoint,
-            push_interval_seconds=self.pipeline_cfg.get("telemetry", {}).get("push_interval_seconds", 30)
+            push_interval_seconds=self.pipeline_cfg.get("telemetry", {}).get("push_interval_seconds", 30),
+            api_key=os.environ.get("EDGESIGHT_API_KEY")
         )
         self.health_monitor = HealthMonitor(self.device_id)
 
@@ -96,8 +97,7 @@ class EdgePipeline:
         with open(path, "r") as f:
             return yaml.safe_load(f) or {}
 
-    @staticmethod
-    def _build_analytics(cam: Dict[str, Any]):
+    def _build_analytics(self, cam: Dict[str, Any]):
         tripwires = []
         for tw in cam.get("tripwires", []):
             tripwires.append(Tripwire(
@@ -107,6 +107,7 @@ class EdgePipeline:
                 in_direction=tw.get("in_direction", "top_to_bottom")
             ))
 
+        grace = self.pipeline_cfg.get("analytics", {}).get("zone_exit_grace_seconds", 3.0)
         zones = []
         queues = []
         for z in cam.get("zones", []):
@@ -116,14 +117,16 @@ class EdgePipeline:
                     name=z.get("name", z["id"]),
                     polygon=z["polygon"],
                     max_comfortable_queue=z.get("max_comfortable_queue", 4),
-                    congestion_threshold_seconds=z.get("congestion_threshold_seconds", 120.0)
+                    congestion_threshold_seconds=z.get("congestion_threshold_seconds", 120.0),
+                    exit_grace_seconds=grace
                 ))
             else:
                 zones.append(Zone(
                     zone_id=z["id"],
                     name=z.get("name", z["id"]),
                     polygon=z["polygon"],
-                    zone_type=z.get("type", "dwell")
+                    zone_type=z.get("type", "dwell"),
+                    exit_grace_seconds=grace
                 ))
         return tripwires, zones, queues
 
@@ -148,7 +151,8 @@ class EdgePipeline:
                 max_age=t_cfg.get("track_buffer", 30),
                 iou_threshold=t_cfg.get("match_thresh", 0.45),
                 min_hits=t_cfg.get("min_hits", 4),
-                filter_stationary=t_cfg.get("filter_stationary", True)
+                stationary_policy=t_cfg.get("stationary_policy", "tag"),
+                track_thresh=t_cfg.get("track_thresh", 0.5)
             ),
             "tripwires": tripwires,
             "zones": zones,

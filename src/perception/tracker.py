@@ -85,54 +85,86 @@ class Track:
 
 class SimpleByteTracker:
     """Lightweight IoU + Spatial distance multi-object tracker with
-    temporal confirmation, stationary suppression, and velocity-predicted
-    re-matching for brief occlusions."""
+    temporal confirmation, stationary tagging, and velocity-predicted
+    re-matching for brief occlusions.
+
+    Two-stage (ByteTrack-style) confidence association: PersonDetector is configured with a
+    low confidence floor (see configs/pipeline.yaml perception.confidence_threshold), so it
+    returns weaker detections too -- typically partially-occluded people, exactly the case
+    that was previously being dropped outright. track_thresh is the bar for STARTING a new
+    track; detections below it can only extend a track that already exists, never create one.
+    This recovers occluded people without letting low-confidence noise spawn new identities."""
 
     def __init__(
         self,
         max_age: int = 45,          # CHANGED: was 15 (~1s) -> 45 (~3s at 15fps)
         iou_threshold: float = 0.35,
         min_hits: int = 4,
-        filter_stationary: bool = True
+        stationary_policy: str = "tag",   # "tag": return stationary tracks with is_stationary=True
+                                           # set (callers like Tripwire already ignore the flag
+                                           # themselves; zones/queues now see and count these
+                                           # people, which is what queueing customers are).
+                                           # "suppress": old behaviour, drop them from the
+                                           # returned list entirely (e.g. for known cardboard-
+                                           # cutout/mannequin environments).
+        track_thresh: float = 0.5
     ):
+        if stationary_policy not in ("tag", "suppress"):
+            raise ValueError("stationary_policy must be 'tag' or 'suppress'")
         self.max_age = max_age
         self.iou_threshold = iou_threshold
         self.min_hits = min_hits
-        self.filter_stationary = filter_stationary
+        self.stationary_policy = stationary_policy
+        self.track_thresh = track_thresh
         self.tracks: List[Track] = []
         self._next_id = 1
 
     def update(self, detections: List[Dict[str, Any]], timestamp: float) -> List[Track]:
+        high_dets = [d for d in detections if d["confidence"] >= self.track_thresh]
+        low_dets = [d for d in detections if d["confidence"] < self.track_thresh]
+
         if len(self.tracks) == 0:
-            for det in detections:
+            for det in high_dets:  # low-confidence detections never start a track on their own
                 new_track = Track(self._next_id, det["bbox"], det["confidence"], timestamp)
                 self._next_id += 1
                 self.tracks.append(new_track)
-            return [t for t in self.tracks if t.state == "active" and t.hits >= self.min_hits]
+            return self._active_list()
 
-        matched_tracks, matched_dets, unmatched_dets, unmatched_tracks = self._match(detections, timestamp)
-
+        # Stage set A: every track against the high-confidence detections (the existing
+        # 3-stage IoU -> distance -> velocity-predicted matcher).
+        track_indices = list(range(len(self.tracks)))
+        matched_tracks, matched_dets, unmatched_high_dets, unmatched_tracks = self._match(
+            track_indices, high_dets, timestamp
+        )
         for t_idx, d_idx in zip(matched_tracks, matched_dets):
-            det = detections[d_idx]
+            det = high_dets[d_idx]
             self.tracks[t_idx].update(det["bbox"], det["confidence"], timestamp)
 
-        for t_idx in unmatched_tracks:
-            self.tracks[t_idx].mark_missed(max_age=self.max_age)  # FIX: use the
-                                                                    # same max_age
-                                                                    # the tracker
-                                                                    # was configured
-                                                                    # with, instead
-                                                                    # of a separate
-                                                                    # hardcoded value
+        # Stage set B: tracks STILL unmatched try the low-confidence detections. This is the
+        # ByteTrack recovery step -- it can only extend a track that survived stage A, never
+        # create a new one, so noisy/weak boxes can't spawn spurious identities.
+        if low_dets and unmatched_tracks:
+            matched_tracks2, matched_dets2, _, unmatched_tracks = self._match(
+                unmatched_tracks, low_dets, timestamp
+            )
+            for t_idx, d_idx in zip(matched_tracks2, matched_dets2):
+                det = low_dets[d_idx]
+                self.tracks[t_idx].update(det["bbox"], det["confidence"], timestamp)
 
-        for d_idx in unmatched_dets:
-            det = detections[d_idx]
+        for t_idx in unmatched_tracks:
+            self.tracks[t_idx].mark_missed(max_age=self.max_age)
+
+        for d_idx in unmatched_high_dets:
+            det = high_dets[d_idx]
             new_track = Track(self._next_id, det["bbox"], det["confidence"], timestamp)
             self._next_id += 1
             self.tracks.append(new_track)
 
         self.tracks = [t for t in self.tracks if t.time_since_update <= self.max_age]
 
+        return self._active_list()
+
+    def _active_list(self) -> List[Track]:
         active_list = []
         for t in self.tracks:
             if t.state != "active":
@@ -141,25 +173,26 @@ class SimpleByteTracker:
                 continue
             if t.hits < self.min_hits:
                 continue
-            if self.filter_stationary and t.is_stationary:
+            if self.stationary_policy == "suppress" and t.is_stationary:
                 continue
             active_list.append(t)
         return active_list
 
-    def _match(self, detections: List[Dict[str, Any]], timestamp: float):
-        num_tracks = len(self.tracks)
+    def _match(self, track_indices: List[int], detections: List[Dict[str, Any]], timestamp: float):
+        """3-stage greedy matcher (IoU -> last-position distance -> velocity-predicted
+        distance) between the given subset of self.tracks (by index) and detections.
+        Returns (matched_track_idx, matched_det_idx, unmatched_det_idx, unmatched_track_idx)."""
         num_dets = len(detections)
+        if num_dets == 0 or not track_indices:
+            return [], [], list(range(num_dets)), list(track_indices)
 
-        if num_dets == 0:
-            return [], [], [], list(range(num_tracks))
-
-        iou_matrix = [[self._calculate_iou(track.bbox, det["bbox"]) for det in detections] for track in self.tracks]
+        iou_matrix = {t: [self._calculate_iou(self.tracks[t].bbox, det["bbox"]) for det in detections] for t in track_indices}
 
         matched_tracks, matched_dets = [], []
-        unmatched_tracks = list(range(num_tracks))
+        unmatched_tracks = list(track_indices)
         unmatched_dets = list(range(num_dets))
 
-        # Stage 1: IoU (unchanged)
+        # Stage 1: IoU
         while len(unmatched_tracks) > 0 and len(unmatched_dets) > 0:
             max_iou = 0.0
             best_t, best_d = -1, -1
@@ -176,8 +209,7 @@ class SimpleByteTracker:
             else:
                 break
 
-        # Stage 2: distance from LAST KNOWN position (unchanged - catches
-        # small/recent jitter)
+        # Stage 2: distance from LAST KNOWN position (catches small/recent jitter)
         while len(unmatched_tracks) > 0 and len(unmatched_dets) > 0:
             min_dist = 65.0
             best_t, best_d = -1, -1
@@ -205,13 +237,7 @@ class SimpleByteTracker:
             else:
                 break
 
-        # --- NEW Stage 3: velocity-PREDICTED position distance ---
-        # For tracks that have been missing for a while, their last
-        # known position is stale - a person walking at 5px/frame who's
-        # been gone 20 frames is now ~100px away from where stage 2
-        # would look. This stage predicts where they SHOULD be now,
-        # based on their velocity before they disappeared, and matches
-        # against that predicted point instead.
+        # Stage 3: velocity-PREDICTED position distance (see predicted_foot_point)
         while len(unmatched_tracks) > 0 and len(unmatched_dets) > 0:
             min_dist = 80.0  # slightly more forgiving - prediction has some error
             best_t, best_d = -1, -1
