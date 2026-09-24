@@ -164,14 +164,27 @@ Sequenced so each milestone is independently shippable and low-risk; later miles
 > see `docs/recorded-run-analysis.md` §9-13 for the full evidence trail, before/after benchmark,
 > and live verification write-ups). `docs/metrics.md` is now the code-grounded reference for how
 > every dashboard number is actually calculated. **M5 and M6 are both still open** -- neither has
-> been started. The two "Open decisions" below (dashboard consolidation, occupancy drift
+> been started, and both are explicitly **deferred on purpose**: the team plans to acquire real
+> CCTV clips from multiple pilot retail stores, and M5 (multi-camera performance) / M6 (health
+> monitoring) are better sequenced against that real footage/hardware rather than built
+> speculatively now. The two "Open decisions" below (dashboard consolidation, occupancy drift
 > correction) are also both still open; this session narrowed the dashboard-consolidation
 > question somewhat by making the Calibration Studio the single place tripwires/zones are
-> created or removed (closing the two-writer race bug class) without fully retiring either UI,
-> so the underlying "one dashboard or two" product decision is unchanged. M5's own throughput
-> benchmark should run against this fixed code, not the pre-fix tracker. There is no M7 defined
-> anywhere in this plan yet -- if one's needed (e.g. pilot rollout/go-live), it should be scoped
-> explicitly rather than assumed.
+> created or removed (closing the two-writer race bug class) without fully retiring either UI.
+> Full consolidation is intentionally **left out of this push** pending a team discussion, not
+> forgotten. There is no M7 defined anywhere in this plan yet -- if one's needed (e.g. pilot
+> rollout/go-live), it should be scoped explicitly rather than assumed.
+>
+> **Next priority after this push (per team direction, 2026-09-24):** before spending more effort
+> on the specific tracking gaps below, first validate that tracking/ID-assignment itself holds up
+> cleanly (no ID switches, no dropped tracks) across the *new* pilot clips once they arrive --
+> not just `entrance_sample.mp4`. The two known gaps from this branch's benchmark work --
+> ID-switch after occlusion exceeding `max_age` (~3s), and the frame-1150-class detector misses
+> at certain camera angles (§8 M4 evidence, `docs/recorded-run-analysis.md` §11) -- are being
+> deliberately left unfixed for now, since real pilot footage may show a different camera angle,
+> lighting, or occlusion pattern than this sample clip, and any tuning done against
+> `entrance_sample.mp4` specifically could turn out to be the wrong fix (or already irrelevant)
+> once that data exists.
 
 ### M0 — Fix queue-metrics data loss (Critical, do first)
 - **Files:** `src/main.py` (`_generate_and_save_rollup`), `server/app.py` (`get_live_metrics`)
