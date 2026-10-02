@@ -59,3 +59,6 @@ Thumbs.db
 # keeping in history (tens of MB each). Real benchmark/test clips in data/sample_videos/ are
 # unaffected; this only matches the default screen-recorder naming pattern.
 data/sample_videos/Screen Recording*.mp4
+
+# Local ID-switch reports (scripts/detect_id_switches.py): snapshots of real CCTV frames
+data/storage/id_switch_runs/

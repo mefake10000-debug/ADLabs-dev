@@ -38,6 +38,7 @@ class EdgePipeline:
         self.store_id = self.pipeline_cfg.get("edge", {}).get("store_id", "store_default")
         self.device_id = self.pipeline_cfg.get("edge", {}).get("device_id", "edge_01")
         self.rollup_interval = self.pipeline_cfg.get("storage", {}).get("rollup_interval_seconds", 30)
+        self.staff_min_seconds = self.pipeline_cfg.get("analytics", {}).get("staff_min_seconds_in_zone", 10.0)
 
         # Storage & Telemetry
         db_path = self.pipeline_cfg.get("storage", {}).get("db_path", "data/storage/edgesight.db")
@@ -110,8 +111,17 @@ class EdgePipeline:
         grace = self.pipeline_cfg.get("analytics", {}).get("zone_exit_grace_seconds", 3.0)
         zones = []
         queues = []
+        staff_zones = []
         for z in cam.get("zones", []):
-            if z.get("type") == "queue":
+            if z.get("type") == "staff":
+                staff_zones.append(Zone(
+                    zone_id=z["id"],
+                    name=z.get("name", z["id"]),
+                    polygon=z["polygon"],
+                    zone_type="staff",
+                    exit_grace_seconds=grace
+                ))
+            elif z.get("type") == "queue":
                 queues.append(QueueAnalyzer(
                     zone_id=z["id"],
                     name=z.get("name", z["id"]),
@@ -128,7 +138,7 @@ class EdgePipeline:
                     zone_type=z.get("type", "dwell"),
                     exit_grace_seconds=grace
                 ))
-        return tripwires, zones, queues
+        return tripwires, zones, queues, staff_zones
 
     @staticmethod
     def _calibration_signature(cam: Dict[str, Any]) -> str:
@@ -140,7 +150,7 @@ class EdgePipeline:
         source = cam.get("source", "")
         fps_target = cam.get("fps_target", 15)
 
-        tripwires, zones, queues = self._build_analytics(cam)
+        tripwires, zones, queues, staff_zones = self._build_analytics(cam)
         return {
             "name": cam.get("name", cam_id),
             "source": source,
@@ -157,6 +167,9 @@ class EdgePipeline:
             "tripwires": tripwires,
             "zones": zones,
             "queues": queues,
+            "staff_zones": staff_zones,
+            "staff_ids": set(),
+            "staff_visible": 0,
             "tracked_ids_today": set(),
             "last_unique_count": 0,
             "current_active_tracks": [],
@@ -209,21 +222,9 @@ class EdgePipeline:
 
                     # 2. Tracking
                     active_tracks = ctx["tracker"].update(detections, frame_time)
-                    ctx["current_active_tracks"] = active_tracks
-                    ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
 
-                    # 3. Spatial Analytics
-                    crossing_events: List[Dict[str, Any]] = []
-                    for tw in ctx["tripwires"]:
-                        crossing_events.extend(tw.update(active_tracks, frame_time))
-                    if crossing_events:
-                        self._persist_crossing_events(cam_id, crossing_events)
-
-                    for zone in ctx["zones"]:
-                        zone.update(active_tracks, frame_time)
-
-                    for q in ctx["queues"]:
-                        q.update(active_tracks, frame_time)
+                    # 3. Staff tagging + spatial analytics
+                    self._update_analytics(cam_id, ctx, active_tracks, frame_time)
 
                     # 4. Render and Save Live Vision Feed with Model Outputs (~8-10 FPS)
                     if cv2 is not None and ctx["frames_processed"] % 2 == 0:
@@ -234,6 +235,8 @@ class EdgePipeline:
                                 tripwires=ctx["tripwires"],
                                 zones=ctx["zones"],
                                 queues=ctx["queues"],
+                                staff_zones=ctx["staff_zones"],
+                                staff_ids=ctx["staff_ids"],
                                 camera_name=ctx["name"],
                                 fps=ctx["reader"].fps_actual,
                                 infer_fps=ctx["processed_fps"]
@@ -316,14 +319,50 @@ class EdgePipeline:
                 # Tripwire objects start at zero, so a stale last_in_count would make the
                 # next rollup's delta negative.
                 self._generate_and_save_rollup(cam_id, ctx, time.time())
-                ctx["tripwires"], ctx["zones"], ctx["queues"] = self._build_analytics(cam)
+                ctx["tripwires"], ctx["zones"], ctx["queues"], ctx["staff_zones"] = self._build_analytics(cam)
                 ctx["calibration_sig"] = self._calibration_signature(cam)
                 ctx["last_in_count"] = 0
                 ctx["last_out_count"] = 0
+                # Recalibration is a fresh start for analytics, staff tags included: anyone still in
+                # a staff zone is re-tagged after staff_min_seconds_in_zone, and removing a staff
+                # zone actually stops excluding people instead of leaving stale tags behind.
+                ctx["staff_ids"] = set()
                 logger.info(
                     f"Hot-reloaded {len(ctx['tripwires'])} tripwires and "
-                    f"{len(ctx['zones']) + len(ctx['queues'])} zones for {cam_id}"
+                    f"{len(ctx['zones']) + len(ctx['queues']) + len(ctx['staff_zones'])} zones for {cam_id}"
                 )
+
+    def _update_analytics(self, cam_id: str, ctx: Dict[str, Any], active_tracks: List[Any], frame_time: float):
+        """Tags staff, then runs every customer-facing analytic on customers only.
+
+        A track that has spent staff_min_seconds_in_zone inside any staff zone is tagged staff for
+        the rest of that track's life, so a cashier who walks out to restock a shelf stays excluded
+        while their track survives. The tag is per track ID: if the tracker loses them and assigns
+        a new ID, they count as a customer again until they're back in a staff zone long enough."""
+        for staff_zone in ctx["staff_zones"]:
+            staff_zone.update(active_tracks, frame_time)
+            for tid, entered in staff_zone.active_tracks_in_zone.items():
+                if frame_time - entered >= self.staff_min_seconds:
+                    ctx["staff_ids"].add(tid)
+
+        customers = [t for t in active_tracks if t.track_id not in ctx["staff_ids"]]
+        ctx["current_active_tracks"] = customers
+        ctx["staff_visible"] = len(active_tracks) - len(customers)
+        # Everyone goes in; tagged staff are subtracted when counting (they're usually seen before
+        # they've been in a staff zone long enough to be tagged).
+        ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
+
+        crossing_events: List[Dict[str, Any]] = []
+        for tw in ctx["tripwires"]:
+            crossing_events.extend(tw.update(customers, frame_time))
+        if crossing_events:
+            self._persist_crossing_events(cam_id, crossing_events)
+
+        for zone in ctx["zones"]:
+            zone.update(customers, frame_time)
+
+        for q in ctx["queues"]:
+            q.update(customers, frame_time)
 
     def _persist_crossing_events(self, cam_id: str, events: List[Dict[str, Any]]):
         """Persists individual tripwire crossings as durable events, independent of
@@ -341,6 +380,7 @@ class EdgePipeline:
             })
 
     def _generate_and_save_rollup(self, cam_id: str, ctx: Dict[str, Any], current_time: float):
+        unique_customers = len(ctx["tracked_ids_today"] - ctx.get("staff_ids", set()))
         if ctx["tripwires"]:
             current_in = sum(tw.in_count for tw in ctx["tripwires"])
             current_out = sum(tw.out_count for tw in ctx["tripwires"])
@@ -351,8 +391,10 @@ class EdgePipeline:
             current_occupancy = max(0, current_in - current_out)
         else:
             # Pure Computer Vision People Tracking and Counting
-            total_unique = len(ctx["tracked_ids_today"])
-            delta_in = total_unique - ctx["last_unique_count"]
+            total_unique = unique_customers
+            # Can shrink when someone already counted gets tagged staff; never report a negative
+            # entry count for that, just stop counting them from here on.
+            delta_in = max(0, total_unique - ctx["last_unique_count"])
             ctx["last_unique_count"] = total_unique
             delta_out = 0
             current_occupancy = len(ctx.get("current_active_tracks", []))
@@ -397,7 +439,8 @@ class EdgePipeline:
 
         logger.info(
             f"[{cam_id}] People Count: {current_occupancy} live | "
-            f"New Shoppers: +{delta_in} | Total Unique: {len(ctx['tracked_ids_today'])} | "
+            f"New Shoppers: +{delta_in} | Total Unique: {unique_customers} | "
+            f"Staff: {ctx.get('staff_visible', 0)} visible, {len(ctx.get('staff_ids', ()))} tagged | "
             f"Decode FPS: {getattr(ctx.get('reader'), 'fps_actual', 0.0)} | Inference FPS: {ctx.get('processed_fps', 0.0)}"
         )
 

@@ -337,5 +337,81 @@ class TestEdgeSightCore(unittest.TestCase):
             except OSError:
                 pass
 
+
+class TestStaffZones(unittest.TestCase):
+    """Staff zone -> sticky staff tag -> excluded from every customer metric."""
+
+    STAFF_AREA = [[0, 0], [200, 0], [200, 400], [0, 400]]      # behind the counter
+    QUEUE_AREA = [[300, 0], [600, 0], [600, 400], [300, 400]]  # customer side of the till
+
+    def setUp(self):
+        self.db_path = "data/storage/test_staff_zones.db"
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+        self.pipeline = EdgePipeline.__new__(EdgePipeline)
+        self.pipeline.pipeline_cfg = {}
+        self.pipeline.staff_min_seconds = 10.0
+        self.pipeline.store_id = "test_store"
+        self.pipeline.device_id = "test_edge"
+        self.pipeline.local_buffer = LocalBuffer(db_path=self.db_path)
+        tripwires, zones, queues, staff_zones = self.pipeline._build_analytics({
+            "tripwires": [{"id": "door", "line": [[800, 0], [800, 700]], "in_direction": "top_to_bottom"}],
+            "zones": [{"id": "counter", "polygon": self.STAFF_AREA, "type": "staff"},
+                      {"id": "till", "polygon": self.QUEUE_AREA, "type": "queue"}],
+        })
+        self.ctx = {"tripwires": tripwires, "zones": zones, "queues": queues, "staff_zones": staff_zones,
+                    "staff_ids": set(), "staff_visible": 0, "tracked_ids_today": set(),
+                    "last_unique_count": 0, "current_active_tracks": [], "rollup_start_time": 0.0,
+                    "last_in_count": 0, "last_out_count": 0}
+
+    def step(self, t, *people):
+        """people: (track, x_foot) -- moves each track so its feet are at (x_foot, 300), then runs analytics."""
+        for track, x in people:
+            track.update([x - 25, 200, x + 25, 300], 0.9, t)
+        self.pipeline._update_analytics("cam", self.ctx, [p[0] for p in people], t)
+
+    def test_cashier_is_tagged_and_stays_excluded_after_leaving_the_staff_zone(self):
+        cashier = Track(1, [75, 200, 125, 300], 0.9, 0.0)
+        customer = Track(2, [425, 200, 475, 300], 0.9, 0.0)
+        for t in range(0, 11):  # cashier 10s behind the counter, customer waiting at the till
+            self.step(float(t), (cashier, 100), (customer, 450))
+        self.assertEqual(self.ctx["staff_ids"], {1})
+
+        for t in range(11, 20):  # cashier comes round to the till (e.g. to help) -- still staff
+            self.step(float(t), (cashier, 350), (customer, 450))
+        queue = self.ctx["queues"][0]
+        self.assertEqual(queue.queue_length, 1)  # only the customer, not the cashier standing there
+        self.assertEqual([t.track_id for t in self.ctx["current_active_tracks"]], [2])
+        self.assertEqual(self.ctx["staff_visible"], 1)
+
+        # Cashier and a shopper both walk out through the door tripwire: only the shopper counts.
+        shopper = Track(4, [765, 200, 815, 300], 0.9, 20.0)
+        self.step(20.0, (cashier, 790), (customer, 450), (shopper, 790))
+        self.step(21.0, (cashier, 810), (customer, 450), (shopper, 810))
+        door = self.ctx["tripwires"][0]
+        self.assertEqual(door.in_count + door.out_count, 1)
+        self.assertNotIn(1, door._crossed_track_ids)
+
+    def test_customer_passing_briefly_through_the_staff_zone_is_not_tagged(self):
+        customer = Track(3, [75, 200, 125, 300], 0.9, 0.0)
+        for t in range(0, 5):  # 4s behind the counter, under the 10s threshold
+            self.step(float(t), (customer, 100))
+        for t in range(5, 20):
+            self.step(float(t), (customer, 450))
+        self.assertEqual(self.ctx["staff_ids"], set())
+        self.assertEqual(self.ctx["queues"][0].queue_length, 1)
+
+    def test_rollup_unique_count_excludes_staff(self):
+        self.ctx["tripwires"] = []  # no tripwire -> visitors fall back to unique track IDs
+        cashier = Track(1, [75, 200, 125, 300], 0.9, 0.0)
+        customer = Track(2, [425, 200, 475, 300], 0.9, 0.0)
+        for t in range(0, 12):
+            self.step(float(t), (cashier, 100), (customer, 450))
+        self.pipeline._generate_and_save_rollup("cam", self.ctx, 12.0)
+        rollup = self.pipeline.local_buffer.get_unexported_rollups(limit=10)[0]
+        self.assertEqual(rollup["in_count"], 1)
+        self.assertEqual(rollup["current_occupancy"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

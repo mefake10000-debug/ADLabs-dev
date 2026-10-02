@@ -33,6 +33,9 @@ below, including queue length. **`stationary_policy: "suppress"` will make queue
 permanently read low**, since queueing is exactly what makes someone stationary — this is not a
 recommended setting for a camera with a queue zone.
 
+**Staff are removed before any metric below sees the tracks** — see §9. Everything in §2-§6
+("customers") means active tracks minus tagged staff.
+
 ## 2. Footfall / entries & exits — requires a tripwire
 
 **Dashboard:** "Visitors Today" (top KPI), "Visitors in Range" / "Exits in Range" (historical),
@@ -94,7 +97,9 @@ re-identification in this codebase).
 as a fallback when a camera has no tripwire.
 **Source:** `src/main.py` — `ctx["tracked_ids_today"]`, a `set()` that
 `ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)` adds to every single frame,
-for every camera, regardless of tripwires. It never resets except when a camera is hot-reloaded
+for every camera, regardless of tripwires. Tagged staff are subtracted when it's counted
+(`len(tracked_ids_today - staff_ids)`), so a cashier doesn't count as a visitor even though their
+ID was added before they'd been in a staff zone long enough to be tagged. It never resets except when a camera is hot-reloaded
 with a source/FPS change (a fresh tracker context is built) — it is **not** a daily counter
 despite the name; it accumulates for the lifetime of that camera context.
 
@@ -185,6 +190,38 @@ running: up to ~3s (poll interval) for hot-reload, plus up to ~10s (rollup inter
 ops dashboard — worth remembering before concluding "it didn't save" when a number hasn't updated
 after only a couple of seconds.
 
+## 9. Staff exclusion (staff zones)
+
+**Calibration Studio:** "Draw Staff Zone" (magenta). **Source:** `src/main.py` →
+`EdgePipeline._update_analytics()`; zone type `staff` in `configs/cameras.yaml`.
+
+A staff zone is a polygon only staff stand in — behind the counter, a stockroom door. Each frame,
+every active track's foot point is checked against each staff zone (the same `Zone` point-in-polygon
+and exit-grace logic as §5). Once a track has been inside a staff zone continuously for
+`analytics.staff_min_seconds_in_zone` (default 10s, `configs/pipeline.yaml`), its ID goes into
+`ctx["staff_ids"]` and is **excluded from every customer metric**: tripwire crossings (§2),
+occupancy (§3), unique visitors (§4), dwell zones and the dwell fallback (§5), and queue length/wait
+(§6). The live overlay draws tagged staff in magenta with a `STAFF` label, and the HUD shows
+`People: N + M staff`; the edge log line adds `Staff: N visible, M tagged`.
+
+**The tag is sticky per track ID:** a cashier who walks out to restock a shelf, or stands at the
+till on the customer side, stays excluded for as long as the tracker keeps the same ID for them.
+
+**Gotchas:**
+- The first `staff_min_seconds_in_zone` a staff member is visible, they're still a customer. If
+  they cross the entrance tripwire before reaching a staff zone (arriving for a shift), that
+  crossing counts as a visitor entry, and their later exit (as tagged staff) doesn't count as an
+  exit — so tripwire-based occupancy drifts up by one per such arrival.
+- If the tracker loses a staff member and gives them a new ID (occlusion > `max_age`, or an ID
+  switch — see `docs/id-switch-detector.md`), the new ID is a customer until it spends another
+  `staff_min_seconds_in_zone` in a staff zone. Staff who work away from any staff zone for their
+  whole shift are never tagged.
+- A customer who stands inside a staff zone for that long is tagged too. Only draw staff zones
+  where customers genuinely never go.
+- Any calibration change (tripwire or zone added/edited/removed) clears all staff tags, same as it
+  resets tripwire counters (§8); people still inside a staff zone are re-tagged after the
+  threshold.
+
 ## Quick reference
 
 | Dashboard label | API field | Needs calibration? | Resets to 0 when... |
@@ -195,3 +232,6 @@ after only a couple of seconds.
 | Avg Store Dwell | `avg_dwell_seconds` | No (falls back to raw track time-in-frame) | N/A |
 | Checkout Queue Congestion (chart) | `queue_length`, `avg_queue_wait_seconds` history | Yes — a `queue`-type zone | Same as above |
 | Peak Traffic Hour / Avg Visitors per Hour | `hourly_breakdown` | Tripwire | Never (historical aggregate) |
+
+Every row above counts customers only: tracks tagged staff via a staff zone (§9) are excluded
+from all of them.

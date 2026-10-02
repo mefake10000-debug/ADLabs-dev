@@ -32,3 +32,17 @@ cameras:
     - - 295.0
       - 325.0
     type: queue
+  - id: staff_zone_1790733394769
+    name: Staff Area
+    polygon:
+    - - 126.0
+      - 600.0
+    - - 277.0
+      - 539.0
+    - - 110.0
+      - 179.0
+    - - 3.0
+      - 222.0
+    - - 124.0
+      - 597.0
+    type: staff

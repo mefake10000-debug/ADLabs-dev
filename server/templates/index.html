@@ -275,6 +275,10 @@
                             <i data-lucide="users" class="w-3.5 h-3.5"></i>
                             <span>Draw Queue Zone</span>
                         </button>
+                        <button onclick="setCalibMode('staff')" id="mode-staff" title="Area only staff use, e.g. behind the counter. People who spend a while here are tagged staff and left out of customer counts, even after they leave it." class="bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5">
+                            <i data-lucide="badge-check" class="w-3.5 h-3.5"></i>
+                            <span>Draw Staff Zone</span>
+                        </button>
                         <select id="calib-direction" title="Direction of travel that counts as an ENTRY" class="bg-surface-card border border-surface-border text-gray-200 text-xs rounded-lg px-2 py-1.5">
                             <option value="bottom_to_top">Entry = upward</option>
                             <option value="top_to_bottom">Entry = downward</option>
@@ -368,6 +372,17 @@
         let calibLines = [];
         let calibPolygons = [];
         let calibLoadedFor = null;  // camera id whose shapes are currently loaded into calibLines/calibPolygons
+        // Drawing mode -> the zone it creates, and how each zone type is drawn and listed.
+        const ZONE_TYPES = {
+            polygon: { type: 'dwell', name: 'In-Store Zone' },
+            queue: { type: 'queue', name: 'Checkout Queue' },
+            staff: { type: 'staff', name: 'Staff Area' },
+        };
+        const ZONE_STYLE = {
+            dwell: { label: 'Dwell zone', stroke: '#FACC15', fill: 'rgba(250, 204, 21, 0.15)' },
+            queue: { label: 'Queue zone', stroke: '#22D3EE', fill: 'rgba(34, 211, 238, 0.15)' },
+            staff: { label: 'Staff zone', stroke: '#E879F9', fill: 'rgba(232, 121, 249, 0.15)' },
+        };
         let backgroundImage = new Image();
         let chartFootfallInstance = null;
         let chartOccupancyInstance = null;
@@ -586,6 +601,7 @@
             document.getElementById('mode-tw').className = mode === 'tripwire' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
             document.getElementById('mode-poly').className = mode === 'polygon' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
             document.getElementById('mode-queue').className = mode === 'queue' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
+            document.getElementById('mode-staff').className = mode === 'staff' ? 'bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5' : 'bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5';
         }
 
         // Commits the points clicked so far into a finished polygon zone. Used by both the
@@ -598,18 +614,18 @@
         // double-click gesture at all -- always works. That asymmetry is what made zones and
         // tripwires behave differently for the exact same "click on the frame" interaction.
         function finishPolygon() {
-            if (!(calibMode === 'polygon' || calibMode === 'queue')) {
-                alert('Switch to "Draw Dwell Zone" or "Draw Queue Zone" mode first.');
+            if (!ZONE_TYPES[calibMode]) {
+                alert('Switch to "Draw Dwell Zone", "Draw Queue Zone" or "Draw Staff Zone" mode first.');
                 return;
             }
             if (calibPoints.length < 3) {
                 alert('Click at least 3 points around the perimeter before closing the shape.');
                 return;
             }
-            const zoneType = calibMode === 'queue' ? 'queue' : 'dwell';
+            const zoneType = ZONE_TYPES[calibMode].type;
             calibPolygons.push({
                 id: zoneType + '_zone_' + Date.now(),
-                name: zoneType === 'queue' ? 'Checkout Queue' : 'In-Store Zone',
+                name: ZONE_TYPES[calibMode].name,
                 polygon: [...calibPoints],
                 type: zoneType
             });
@@ -646,7 +662,7 @@
             calibLines.forEach((t, i) => rows.push(shapeRow(
                 'Tripwire', t.name || t.id, t.in_direction === 'top_to_bottom' ? 'entry = downward' : 'entry = upward', 'tripwire', i)));
             calibPolygons.forEach((z, i) => rows.push(shapeRow(
-                z.type === 'queue' ? 'Queue zone' : 'Dwell zone', z.name || z.id, z.polygon.length + ' points', 'zone', i)));
+                (ZONE_STYLE[z.type] || ZONE_STYLE.dwell).label, z.name || z.id, z.polygon.length + ' points', 'zone', i)));
             el.innerHTML = rows.length ? rows.join('') : '<p class="text-xs text-gray-500">Nothing drawn yet.</p>';
         }
 
@@ -678,8 +694,8 @@
 
             // Draw calibrated polygons
             calibPolygons.forEach(poly => {
-                const isQueue = poly.type === 'queue';
-                ctx.strokeStyle = isQueue ? '#22D3EE' : '#FACC15';
+                const style = ZONE_STYLE[poly.type] || ZONE_STYLE.dwell;
+                ctx.strokeStyle = style.stroke;
                 ctx.lineWidth = 3;
                 ctx.beginPath();
                 ctx.moveTo(poly.polygon[0][0], poly.polygon[0][1]);
@@ -688,7 +704,7 @@
                 }
                 ctx.closePath();
                 ctx.stroke();
-                ctx.fillStyle = isQueue ? 'rgba(34, 211, 238, 0.15)' : 'rgba(250, 204, 21, 0.15)';
+                ctx.fillStyle = style.fill;
                 ctx.fill();
             });
 

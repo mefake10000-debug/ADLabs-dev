@@ -291,6 +291,12 @@ class TestCameraConfigAPI(unittest.TestCase):
         self.assertEqual(cam["zones"][0]["max_comfortable_queue"], 3)
         self.assertEqual(self._config()["cam_b"]["fps_target"], 10)
 
+    def test_calibration_accepts_a_staff_zone(self):
+        resp = self.client.post("/api/v1/config/cameras/cam_a/calibration", json={
+            "zones": [{"id": "counter", "polygon": [[0, 0], [200, 0], [200, 400]], "type": "staff"}]})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._config()["cam_a"]["zones"][0]["type"], "staff")
+
     def test_calibration_omitting_a_key_leaves_it_alone(self):
         self.client.post("/api/v1/config/cameras/cam_a/calibration",
                          json={"zones": [{"id": "z", "polygon": [[0, 0], [10, 0], [10, 10]]}]})

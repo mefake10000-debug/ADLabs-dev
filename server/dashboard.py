@@ -237,6 +237,7 @@ with tab_live:
         * 🔴 **Red Contact Point:** Ground Foot Coordinate
         * 🟨 **Yellow Polygon:** Merchandising Dwell Zone
         * 🟦 **Cyan Polygon:** Cashier Queue Staging Area
+        * 🟪 **Magenta Polygon / Box:** Staff area / tagged staff (excluded from customer counts)
         """)
         st.info("Frames are decoded, inferred, and rendered entirely on the on-premise edge node.")
 

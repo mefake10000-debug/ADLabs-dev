@@ -40,6 +40,13 @@ analytics:
   zone_exit_grace_seconds: 3.0  # A track missing from a dwell/queue zone for less than this is still
                                   # counted as present, so a single dropped detection doesn't reset
                                   # dwell time or make someone flicker in and out of a queue count.
+  staff_min_seconds_in_zone: 10.0  # Time inside a "staff" zone (drawn in the Calibration Studio) before
+                                   # a track is tagged staff and excluded from every customer metric --
+                                   # visitors, occupancy, dwell, queue, tripwire crossings. The tag sticks
+                                   # to that track ID after it leaves the zone (a cashier restocking a
+                                   # shelf stays staff). Only draw staff zones where customers never
+                                   # stand, e.g. behind the counter: a customer lingering this long
+                                   # inside one gets tagged too.
 
 storage:
   db_path: "data/storage/edgesight.db"

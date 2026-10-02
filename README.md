@@ -147,8 +147,13 @@ models/yolo26m.pt`), so they download once rather than on every container start.
   dwell/queue zone (a dropped detection, momentary occlusion) before it's actually counted as
   having left. Too low and a queue count flickers on every missed frame; too high and someone who
   actually left stays counted for a while.
+- **`analytics.staff_min_seconds_in_zone`** -- how long someone must stand inside a **staff zone**
+  (drawn with "Draw Staff Zone" in the Calibration Studio, e.g. behind the counter) before they're
+  tagged staff and excluded from all customer metrics. The tag sticks to that track after they
+  leave the zone. See `docs/metrics.md` §9 for exactly what's excluded and the limitations.
 
-See `docs/recorded-run-analysis.md` §10 for the evidence behind these defaults.
+See `docs/recorded-run-analysis.md` §10 for the evidence behind these defaults, and
+`docs/id-switch-detector.md` for measuring tracking quality (suspected ID switches) on any clip.
 
 ### 2e. Securing the API (optional)
 Every `/api/v1/*` endpoint is open by default -- fine for a closed/trusted network, not for a port

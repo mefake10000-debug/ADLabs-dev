@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 
 try:
     import cv2
@@ -12,6 +12,9 @@ from src.analytics.tripwire import Tripwire
 from src.analytics.zones import Zone
 from src.analytics.queue_analyzer import QueueAnalyzer
 
+STAFF_COLOR = (255, 0, 255)  # BGR magenta
+
+
 class DebugOverlay:
     """Renders visual overlays for debugging, calibration, and local display."""
 
@@ -22,6 +25,8 @@ class DebugOverlay:
         tripwires: List[Tripwire],
         zones: List[Zone],
         queues: List[QueueAnalyzer],
+        staff_zones: Optional[List[Zone]] = None,
+        staff_ids: Optional[Set[int]] = None,
         camera_name: str = "Camera",
         fps: float = 0.0,
         infer_fps: Optional[float] = None
@@ -43,6 +48,13 @@ class DebugOverlay:
                 (255, 200, 0),
                 2
             )
+
+        staff_ids = staff_ids or set()
+        for sz in staff_zones or []:
+            pts = np.array(sz.polygon, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(canvas, [pts], isClosed=True, color=STAFF_COLOR, thickness=2)
+            cv2.putText(canvas, f"{sz.name} (staff)", (int(sz.polygon[0][0]), int(sz.polygon[0][1]) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, STAFF_COLOR, 2)
 
         # 2. Draw Queues
         for q in queues:
@@ -83,7 +95,11 @@ class DebugOverlay:
             # Dim, muted color for stationary/tagged tracks (queueing customers, etc.) so the
             # video visually matches the numbers: these ARE counted (stationary_policy="tag"),
             # just distinguishable from people actively walking.
-            color = (120, 160, 120) if is_stationary else (0, 255, 255)
+            is_staff = track.track_id in staff_ids
+            if is_staff:
+                color = STAFF_COLOR
+            else:
+                color = (120, 160, 120) if is_stationary else (0, 255, 255)
             cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2)
             foot = (int(track.foot_point[0]), int(track.foot_point[1]))
             cv2.circle(canvas, foot, 4, (0, 0, 255), -1)
@@ -94,7 +110,7 @@ class DebugOverlay:
                 pt2 = (int(track.history[i][0]), int(track.history[i][1]))
                 cv2.line(canvas, pt1, pt2, (200, 200, 200), 1)
 
-            label = f"ID:{track.track_id}" + (" (still)" if is_stationary else "")
+            label = f"ID:{track.track_id}" + (" STAFF" if is_staff else " (still)" if is_stationary else "")
             cv2.putText(
                 canvas,
                 label,
@@ -108,7 +124,9 @@ class DebugOverlay:
         # 5. Draw HUD Bar at top
         cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 40), (20, 20, 20), -1)
         fps_text = f"FPS: {fps:.1f}" if infer_fps is None else f"Decode {fps:.1f} | Infer {infer_fps:.1f} FPS"
-        hud_text = f"AD Labs EdgeSight | {camera_name} | {fps_text} | People Count: {len(tracks)}"
+        n_staff = sum(t.track_id in staff_ids for t in tracks)
+        people = f"People: {len(tracks) - n_staff}" + (f" + {n_staff} staff" if n_staff else "")
+        hud_text = f"AD Labs EdgeSight | {camera_name} | {fps_text} | {people}"
         cv2.putText(canvas, hud_text, (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         return canvas
