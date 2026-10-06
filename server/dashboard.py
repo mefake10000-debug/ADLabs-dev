@@ -206,8 +206,8 @@ with h4:
 
 st.markdown("---")
 
-tab_live, tab_traffic, tab_events, tab_setup = st.tabs(
-    ["🎥 Live Vision", "📊 Traffic Analytics", "🧾 Crossing Events", "⚙️ Camera Setup"]
+tab_live, tab_traffic, tab_heatmap, tab_events, tab_setup = st.tabs(
+    ["🎥 Live Vision", "📊 Traffic Analytics", "🔥 Heatmap", "🧾 Crossing Events", "⚙️ Camera Setup"]
 )
 
 # ----------------------------------------------------------------------------
@@ -260,6 +260,26 @@ with tab_traffic:
             with st.expander("📋 View Raw Edge Telemetry Feed"):
                 st.dataframe(df)
                 st.download_button("Download CSV", df.to_csv(index=False), file_name="edgesight_rollups.csv", mime="text/csv")
+
+# ----------------------------------------------------------------------------
+# Heatmap
+# ----------------------------------------------------------------------------
+with tab_heatmap:
+    st.caption(
+        "Where customers have spent time on the floor since this camera's pipeline last started, from where "
+        "each person is standing (their feet). Blue = little time, red = the most. Tagged staff are excluded. "
+        "Refreshed by the edge every ~10s."
+    )
+    for cam_id in ([camera_filter] if camera_filter else list(cameras)):
+        try:
+            resp = requests.get(f"{API_BASE}/api/v1/heatmap/{cam_id}", timeout=3.0)
+            image = resp.content if resp.status_code == 200 else None
+        except Exception:
+            image = None
+        if image:
+            st.image(image, caption=cameras.get(cam_id, {}).get("name", cam_id), width="stretch")
+        else:
+            st.info(f"No heatmap yet for {cam_id} -- is the edge analyzer running? The first one appears ~10s after it starts.")
 
 # ----------------------------------------------------------------------------
 # Crossing events

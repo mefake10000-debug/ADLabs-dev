@@ -13,6 +13,7 @@ from src.perception.tracker import SimpleByteTracker
 from src.analytics.tripwire import Tripwire
 from src.analytics.zones import Zone
 from src.analytics.queue_analyzer import QueueAnalyzer
+from src.analytics.heatmap import Heatmap
 from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
@@ -45,6 +46,10 @@ class EdgePipeline:
         self.local_buffer = LocalBuffer(db_path=db_path)
         self.frames_dir = os.path.join(os.path.dirname(db_path), "frames")
         os.makedirs(self.frames_dir, exist_ok=True)
+        # Kept apart from frames/: the API treats every frames/*.jpg as a camera.
+        self.heatmaps_dir = os.path.join(os.path.dirname(db_path), "heatmaps")
+        os.makedirs(self.heatmaps_dir, exist_ok=True)
+        self.heatmap_write_seconds = self.pipeline_cfg.get("analytics", {}).get("heatmap_write_seconds", 10.0)
 
         cloud_endpoint = self.pipeline_cfg.get("telemetry", {}).get("cloud_endpoint", "http://localhost:8000/api/v1/telemetry")
         local_endpoint = self.pipeline_cfg.get("telemetry", {}).get("local_endpoint", "http://localhost:8000/api/v1/telemetry")
@@ -174,6 +179,8 @@ class EdgePipeline:
             "last_unique_count": 0,
             "current_active_tracks": [],
             "last_rollup_time": time.time(),
+            "heatmap": None,  # built on the first frame, once the resolution is known
+            "last_heatmap_write": 0.0,
             "rollup_start_time": time.time(),
             "frames_processed": 0,
             "processed_fps": 0.0,
@@ -225,6 +232,13 @@ class EdgePipeline:
 
                     # 3. Staff tagging + spatial analytics
                     self._update_analytics(cam_id, ctx, active_tracks, frame_time)
+
+                    # Heatmap: customers only (_update_analytics has already removed tagged staff)
+                    if ctx["heatmap"] is None:
+                        ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
+                    ctx["heatmap"].add(ctx["current_active_tracks"], frame_time)
+                    if cv2 is not None and frame_time - ctx["last_heatmap_write"] >= self.heatmap_write_seconds:
+                        self._write_heatmap(cam_id, ctx, frame, frame_time)
 
                     # 4. Render and Save Live Vision Feed with Model Outputs (~8-10 FPS)
                     if cv2 is not None and ctx["frames_processed"] % 2 == 0:
@@ -363,6 +377,18 @@ class EdgePipeline:
 
         for q in ctx["queues"]:
             q.update(customers, frame_time)
+
+    def _write_heatmap(self, cam_id: str, ctx: Dict[str, Any], frame: Any, frame_time: float):
+        """Renders the camera's heatmap over the current clean (un-annotated) frame and writes it
+        atomically, for GET /api/v1/heatmap/{camera_id}."""
+        ctx["last_heatmap_write"] = frame_time
+        try:
+            path = os.path.join(self.heatmaps_dir, f"{cam_id}.jpg")
+            tmp = os.path.join(self.heatmaps_dir, f"{cam_id}.tmp.jpg")
+            cv2.imwrite(tmp, ctx["heatmap"].render(frame), [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.debug(f"Heatmap export error for {cam_id}: {e}")
 
     def _persist_crossing_events(self, cam_id: str, events: List[Dict[str, Any]]):
         """Persists individual tripwire crossings as durable events, independent of

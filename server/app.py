@@ -379,6 +379,17 @@ def get_snapshot(camera_id: str):
         data = f.read()
     return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
+# Floor heatmap: where customers have spent time since the camera's pipeline started
+# (written by the edge every analytics.heatmap_write_seconds)
+@app.get("/api/v1/heatmap/{camera_id}")
+def get_heatmap(camera_id: str):
+    path = os.path.join(os.path.dirname(DB_PATH), "heatmaps", f"{camera_id}.jpg")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"No heatmap yet for camera {camera_id}")
+    with open(path, "rb") as f:
+        data = f.read()
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
 # Live Fluid Video Stream (MJPEG)
 @app.get("/api/v1/stream/{camera_id}")
 def get_stream(camera_id: str):

@@ -222,6 +222,43 @@ till on the customer side, stays excluded for as long as the tracker keeps the s
   resets tripwire counters (§8); people still inside a staff zone are re-tagged after the
   threshold.
 
+## 10. Floor heatmap
+
+**Dashboard:** "🔥 Heatmap" tab, image from `GET /api/v1/heatmap/{camera_id}`. **Source:**
+[`src/analytics/heatmap.py`](../src/analytics/heatmap.py), fed from `src/main.py`'s frame loop.
+
+Where customers spend time, in **person-seconds per 16×16px floor cell**. Every processed frame,
+each customer's foot point (bottom-centre of their box, i.e. where they're standing) adds the time
+since the previous processed frame to its cell. It's time-weighted, so the picture is the same
+whether the edge manages 3 or 13 frames a second; one gap is capped at 1s so a processing stall
+doesn't dump a long stretch onto whoever happens to be visible. Staff are excluded (§9), so the
+spot behind the till doesn't light up just because a cashier stands there all day.
+
+Rendering: lightly blurred, square-root scaled (so one very busy spot, usually the till queue,
+doesn't wash everything else out), JET colours (blue = little time, red = the most *in this
+heatmap*), faded in with intensity so quiet floor stays close to the plain camera image. The
+banner shows total person-minutes and how long the heatmap has been accumulating. Re-rendered over
+the current clean camera frame every `analytics.heatmap_write_seconds` (10s) and written to
+`data/storage/heatmaps/<camera>.jpg` (gitignored).
+
+**Gotchas:**
+- **Colours are relative.** Red means "the busiest spot in this heatmap", not a fixed number of
+  seconds: two heatmaps' colours can't be compared, only their shapes. The printed person-seconds
+  can.
+- **Accumulates since the camera's pipeline started**, not per day: it resets when the edge
+  restarts or the camera's source/FPS changes. A calibration change does *not* reset it.
+- **Hidden feet:** someone standing behind a display shows up on top of the display, because the
+  bottom of their visible box is the display's edge, not the floor.
+- Heat is on the camera image, not a store floor plan, so the far end of the shop is compressed by
+  perspective -- a metre at the back covers fewer pixels than a metre at the front.
+
+**Whole-clip heatmap offline:** `scripts/render_heatmap.py` builds one for an entire video from a
+`detect_id_switches.py` run's `tracks.jsonl` (seconds, no YOLO), drawn over the median of frames
+sampled across the clip -- an empty-shop background. It has no staff zones, so cashiers *do* show
+up there. On `entrance_sample.mp4`: 17.9 person-minutes over 1.8 min (about 10 people in view on
+average, matching the 10-15 hand counts in `docs/recorded-run-analysis.md`); hottest areas the
+till queue, the cashier spots behind the counter, and the back aisle.
+
 ## Quick reference
 
 | Dashboard label | API field | Needs calibration? | Resets to 0 when... |
@@ -232,6 +269,7 @@ till on the customer side, stays excluded for as long as the tracker keeps the s
 | Avg Store Dwell | `avg_dwell_seconds` | No (falls back to raw track time-in-frame) | N/A |
 | Checkout Queue Congestion (chart) | `queue_length`, `avg_queue_wait_seconds` history | Yes — a `queue`-type zone | Same as above |
 | Peak Traffic Hour / Avg Visitors per Hour | `hourly_breakdown` | Tripwire | Never (historical aggregate) |
+| Heatmap (tab) | `/api/v1/heatmap/{camera_id}` image | No | Edge restart or camera source/FPS change |
 
 Every row above counts customers only: tracks tagged staff via a staff zone (§9) are excluded
 from all of them.

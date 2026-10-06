@@ -151,6 +151,9 @@ models/yolo26m.pt`), so they download once rather than on every container start.
   (drawn with "Draw Staff Zone" in the Calibration Studio, e.g. behind the counter) before they're
   tagged staff and excluded from all customer metrics. The tag sticks to that track after they
   leave the zone. See `docs/metrics.md` §9 for exactly what's excluded and the limitations.
+- **`analytics.heatmap_write_seconds`** -- how often the edge re-renders each camera's floor heatmap
+  (where customers spend time; dashboard **Heatmap** tab). `scripts/render_heatmap.py` renders a
+  whole-clip heatmap offline. See `docs/metrics.md` §10.
 
 See `docs/recorded-run-analysis.md` §10 for the evidence behind these defaults, and
 `docs/id-switch-detector.md` for measuring tracking quality (suspected ID switches) on any clip.

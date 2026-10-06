@@ -315,6 +315,19 @@ class TestCameraConfigAPI(unittest.TestCase):
             self.assertEqual(resp.status_code, 422, body)
         self.assertEqual(self._config()["cam_a"]["tripwires"][0]["id"], "tw1")
 
+    def test_heatmap_endpoint_serves_the_edge_written_image(self):
+        path = os.path.join(os.path.dirname(DB_PATH), "heatmaps", "test_heatmap_cam.jpg")
+        self.assertEqual(self.client.get("/api/v1/heatmap/test_heatmap_cam").status_code, 404)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8fake-jpeg")
+        try:
+            resp = self.client.get("/api/v1/heatmap/test_heatmap_cam")
+            self.assertEqual((resp.status_code, resp.headers["content-type"], resp.content),
+                             (200, "image/jpeg", b"\xff\xd8fake-jpeg"))
+        finally:
+            os.remove(path)
+
     def test_rtsp_credentials_are_redacted_in_every_response(self):
         creds_source = "rtsp://admin:sup3rSecret@192.168.1.50:554/Streaming/Channels/102"
         self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": creds_source})

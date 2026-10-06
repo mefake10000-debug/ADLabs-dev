@@ -13,6 +13,7 @@ os.environ.setdefault("CAMERAS_CONFIG", CONFIG_PATH)
 os.environ["DASHBOARD_AUTO_REFRESH"] = "0"   # the app's sleep+rerun loop would never let AppTest return
 
 import yaml
+from PIL import Image
 from fastapi.testclient import TestClient
 from streamlit.testing.v1 import AppTest
 
@@ -112,6 +113,17 @@ class TestDashboard(unittest.TestCase):
         self.assertFalse(at.exception, at.exception)
         self.assertEqual(self.metric(at, "Peak Traffic Hour"), "—")
         self.assertEqual(self.metric(at, "Visitors in Range"), "0")
+
+    def test_heatmap_tab_shows_each_cameras_heatmap_or_says_why_not(self):
+        path = os.path.join(os.path.dirname(DB_PATH), "heatmaps", "cam_a.jpg")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        Image.new("RGB", (64, 36), (200, 40, 40)).save(path, "JPEG")  # cam_a has a heatmap, cam_b doesn't
+        self.addCleanup(os.remove, path)
+        at = self.run_app()
+        self.assertFalse(at.exception, at.exception)
+        messages = [i.value for i in at.info]
+        self.assertTrue(any("No heatmap yet for cam_b" in m for m in messages), messages)
+        self.assertFalse(any("No heatmap yet for cam_a" in m for m in messages), messages)
 
     def test_switching_source_from_the_ui_updates_only_that_camera(self):
         at = self.run_app()

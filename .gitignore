@@ -62,3 +62,6 @@ data/sample_videos/Screen Recording*.mp4
 
 # Local ID-switch reports (scripts/detect_id_switches.py): snapshots of real CCTV frames
 data/storage/id_switch_runs/
+
+# Rendered floor heatmaps (real CCTV frames), written by the edge
+data/storage/heatmaps/
