@@ -1,7 +1,6 @@
 import html
 import json
 import os
-import time
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -150,225 +149,239 @@ with st.sidebar:
     st.markdown(f"[🎯 Open Calibration Studio (click-to-draw)]({PUBLIC_API_BASE}/)")
     st.info("Pure Vision-Based Analytics — No POS or external sensor integration required.")
 
-scope = {"store_id": store_id}
-if camera_filter:
-    scope["camera_id"] = camera_filter
-range_scope = {**scope, "start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+# Everything below the sidebar refreshes as a fragment. The old `time.sleep(5); st.rerun()` loop never
+# let a script run finish, and Streamlit only clears the previous run's leftover elements when one does:
+# any change in the page's layout (the API briefly unreachable after a restart, a warning appearing) left
+# duplicated, faded copies -- two live streams, two tab bars -- until a hard refresh. A fragment refresh
+# is an ordinary run that finishes. Sidebar changes still rerun the whole page.
+@st.fragment(run_every=5 if auto_refresh else None)
+def page_body():
+    scope = {"store_id": store_id}
+    if camera_filter:
+        scope["camera_id"] = camera_filter
+    range_scope = {**scope, "start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
 
-data = api_get("/api/v1/live", params=scope)
-if data is None:
-    data = {}
-    st.warning(f"Connecting to Edge API at {API_BASE}...")
+    data = api_get("/api/v1/live", params=scope)
+    if data is None:
+        data = {}
+        st.warning(f"Connecting to Edge API at {API_BASE}...")
 
-summary = api_get("/api/v1/analytics/summary", params=range_scope) or {}
+    summary = api_get("/api/v1/analytics/summary", params=range_scope) or {}
 
-# ----------------------------------------------------------------------------
-# Live metrics
-# ----------------------------------------------------------------------------
-if data.get("queue_alert_active"):
-    st.error(
-        f"🚨 **CHECKOUT CONGESTION ALERT**: Register queue exceeds comfortable SLA! "
-        f"Queue: {data.get('queue_length')} people waiting (~{int(data.get('avg_queue_wait_seconds', 0))}s wait time). "
-        f"Please dispatch an additional cashier."
-    )
-
-st.subheader("🔴 Live — right now" + (f" · {camera_filter}" if camera_filter else " · all cameras"))
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("🚶 Visitors Today", data.get("total_visitors", 0),
-              help="Tripwire entries if a tripwire is configured; otherwise unique tracker IDs (over-counts when IDs churn)")
-with col2:
-    st.metric("🏬 People In View", data.get("net_occupancy", 0),
-              help="Live tracked people (tripwire entries minus exits when a tripwire is configured)")
-with col3:
-    queue_len = data.get("queue_length", 0)
-    avg_wait = int(data.get("avg_queue_wait_seconds", 0))
-    st.metric("⏳ Cashier Queue Length", f"{queue_len} people", delta=f"{avg_wait}s avg wait",
-              delta_color="inverse" if queue_len > 4 else "normal",
-              help="Requires a 'queue' zone to be drawn for the camera (Camera Setup tab)")
-with col4:
-    st.metric("⏱️ Avg Store Dwell", f"{data.get('avg_dwell_seconds', 0.0)}s",
-              delta=f"{data.get('total_exits', 0)} total exits recorded")
-
-st.subheader(f"📅 Historical — {start_date} → {end_date} (UTC)")
-h1, h2, h3, h4 = st.columns(4)
-peak = summary.get("peak_period")
-with h1:
-    st.metric("📈 Peak Traffic Hour", peak["hour"][11:16] if peak else "—",
-              delta=f"{peak['visitors']} visitors" if peak else None, delta_color="off",
-              help=peak["hour"] if peak else "No traffic in this range")
-with h2:
-    st.metric("📊 Avg Visitors / Hour", summary.get("avg_visitors_per_hour", 0.0))
-with h3:
-    st.metric("🚶 Visitors in Range", summary.get("total_visitors", 0))
-with h4:
-    st.metric("🚪 Exits in Range", summary.get("total_exits", 0))
-
-st.markdown("---")
-
-tab_live, tab_traffic, tab_heatmap, tab_events, tab_setup = st.tabs(
-    ["🎥 Live Vision", "📊 Traffic Analytics", "🔥 Heatmap", "🧾 Crossing Events", "⚙️ Camera Setup"]
-)
-
-# ----------------------------------------------------------------------------
-# Live vision
-# ----------------------------------------------------------------------------
-with tab_live:
-    stream_cam = camera_filter or (next(iter(cameras)) if cameras else "cam_entrance_01")
-    live_col, legend_col = st.columns([3, 1])
-    with live_col:
-        st.caption(f"Live inference stream for **{stream_cam}** — YOLO detections, tracker IDs, tripwires and zones.")
-        st.markdown(
-            f"""
-            <div style="background-color: #121212; padding: 6px; border-radius: 10px; text-align: center; border: 1px solid #2a2a2a;">
-                <img src="{PUBLIC_API_BASE}/api/v1/stream/{stream_cam}" style="width: 100%; border-radius: 8px; display: block;" alt="Live Model Inference Stream"/>
-            </div>
-            """,
-            unsafe_allow_html=True
+    # ----------------------------------------------------------------------------
+    # Live metrics
+    # ----------------------------------------------------------------------------
+    if data.get("queue_alert_active"):
+        st.error(
+            f"🚨 **CHECKOUT CONGESTION ALERT**: Register queue exceeds comfortable SLA! "
+            f"Queue: {data.get('queue_length')} people waiting (~{int(data.get('avg_queue_wait_seconds', 0))}s wait time). "
+            f"Please dispatch an additional cashier."
         )
-    with legend_col:
-        current = cameras.get(stream_cam, {})
-        st.markdown("#### 📷 Current source")
-        st.code(current.get("source", "unknown"), language=None)
-        st.markdown("#### 🔍 Visual Legend")
-        st.markdown("""
-        * 🟩 **Green Line:** Entrance Tripwire (Counts In / Out)
-        * 🟨 **Yellow Box:** Detected Person + Track ID
-        * 🔴 **Red Contact Point:** Ground Foot Coordinate
-        * 🟨 **Yellow Polygon:** Merchandising Dwell Zone
-        * 🟦 **Cyan Polygon:** Cashier Queue Staging Area
-        * 🟪 **Magenta Polygon / Box:** Staff area / tagged staff (excluded from customer counts)
-        """)
-        st.info("Frames are decoded, inferred, and rendered entirely on the on-premise edge node.")
 
-# ----------------------------------------------------------------------------
-# Traffic analytics
-# ----------------------------------------------------------------------------
-history = api_get("/api/v1/history", params={**range_scope, "limit": 500}) or []
+    st.subheader("🔴 Live — right now" + (f" · {camera_filter}" if camera_filter else " · all cameras"))
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("🚶 Visitors Today", data.get("total_visitors", 0),
+                  help="Tripwire entries if a tripwire is configured; otherwise unique tracker IDs (over-counts when IDs churn)")
+    with col2:
+        st.metric("🏬 People In View", data.get("net_occupancy", 0),
+                  help="Live tracked people (tripwire entries minus exits when a tripwire is configured)")
+    with col3:
+        queue_len = data.get("queue_length", 0)
+        avg_wait = int(data.get("avg_queue_wait_seconds", 0))
+        st.metric("⏳ Cashier Queue Length", f"{queue_len} people", delta=f"{avg_wait}s avg wait",
+                  delta_color="inverse" if queue_len > 4 else "normal",
+                  help="Requires a 'queue' zone to be drawn for the camera (Camera Setup tab)")
+    with col4:
+        st.metric("⏱️ Avg Store Dwell", f"{data.get('avg_dwell_seconds', 0.0)}s",
+                  delta=f"{data.get('total_exits', 0)} total exits recorded")
 
-with tab_traffic:
-    hourly = summary.get("hourly_breakdown", [])
-    if not hourly and not history:
-        st.info("No rollups in the selected date range / camera yet.")
-    else:
-        render_traffic_charts(hourly, history)
+    st.subheader(f"📅 Historical — {start_date} → {end_date} (UTC)")
+    h1, h2, h3, h4 = st.columns(4)
+    peak = summary.get("peak_period")
+    with h1:
+        st.metric("📈 Peak Traffic Hour", peak["hour"][11:16] if peak else "—",
+                  delta=f"{peak['visitors']} visitors" if peak else None, delta_color="off",
+                  help=peak["hour"] if peak else "No traffic in this range")
+    with h2:
+        st.metric("📊 Avg Visitors / Hour", summary.get("avg_visitors_per_hour", 0.0))
+    with h3:
+        st.metric("🚶 Visitors in Range", summary.get("total_visitors", 0))
+    with h4:
+        st.metric("🚪 Exits in Range", summary.get("total_exits", 0))
 
-        st.subheader("⏱️ Checkout Queue Congestion Trend")
-        if history:
-            df = pd.DataFrame(history)
-            st.line_chart(df.set_index("timestamp_end")[["queue_length", "avg_queue_wait_seconds"]])
-            with st.expander("📋 View Raw Edge Telemetry Feed"):
-                st.dataframe(df)
-                st.download_button("Download CSV", df.to_csv(index=False), file_name="edgesight_rollups.csv", mime="text/csv")
+    st.markdown("---")
 
-# ----------------------------------------------------------------------------
-# Heatmap
-# ----------------------------------------------------------------------------
-with tab_heatmap:
-    st.caption(
-        "Where customers have spent time on the floor since this camera's pipeline last started, from where "
-        "each person is standing (their feet). Blue = little time, red = the most. Tagged staff are excluded. "
-        "Refreshed by the edge every ~10s."
+    tab_live, tab_traffic, tab_heatmap, tab_events, tab_setup = st.tabs(
+        ["🎥 Live Vision", "📊 Traffic Analytics", "🔥 Heatmap", "🧾 Crossing Events", "⚙️ Camera Setup"]
     )
-    for cam_id in ([camera_filter] if camera_filter else list(cameras)):
-        try:
-            resp = requests.get(f"{API_BASE}/api/v1/heatmap/{cam_id}", timeout=3.0)
-            image = resp.content if resp.status_code == 200 else None
-        except Exception:
-            image = None
-        if image:
-            st.image(image, caption=cameras.get(cam_id, {}).get("name", cam_id), width="stretch")
-        else:
-            st.info(f"No heatmap yet for {cam_id} -- is the edge analyzer running? The first one appears ~10s after it starts.")
 
-# ----------------------------------------------------------------------------
-# Crossing events
-# ----------------------------------------------------------------------------
-with tab_events:
-    events = (api_get("/api/v1/events", params={**scope, "limit": 200}) or {}).get("events", [])
-    if events:
-        st.caption("Every individual tripwire crossing, independent of the 10s rollups.")
-        st.dataframe(pd.DataFrame(events).iloc[::-1])
-    else:
-        has_tripwire = any(c.get("tripwires") for c in cameras.values())
-        if has_tripwire:
-            st.info("No crossings recorded yet.")
-        else:
-            st.warning(
-                "No tripwire is configured, so no crossing events exist and 'visitors' falls back to counting unique "
-                "tracker IDs. Draw one in the **Camera Setup** tab."
+    # ----------------------------------------------------------------------------
+    # Live vision
+    # ----------------------------------------------------------------------------
+    with tab_live:
+        stream_cam = camera_filter or (next(iter(cameras)) if cameras else "cam_entrance_01")
+        live_col, legend_col = st.columns([3, 1])
+        with live_col:
+            st.caption(f"Live inference stream for **{stream_cam}** — YOLO detections, tracker IDs, tripwires and zones.")
+            st.markdown(
+                f"""
+                <div style="background-color: #121212; padding: 6px; border-radius: 10px; text-align: center; border: 1px solid #2a2a2a;">
+                    <img src="{PUBLIC_API_BASE}/api/v1/stream/{stream_cam}" style="width: 100%; border-radius: 8px; display: block;" alt="Live Model Inference Stream"/>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
+        with legend_col:
+            current = cameras.get(stream_cam, {})
+            st.markdown("#### 📷 Current source")
+            st.code(current.get("source", "unknown"), language=None)
+            st.markdown("#### 🔍 Visual Legend")
+            st.markdown("""
+            * 🟩 **Green Line:** Entrance Tripwire (Counts In / Out)
+            * 🟨 **Yellow Box:** Detected Person + Track ID
+            * 🔴 **Red Contact Point:** Ground Foot Coordinate
+            * 🟨 **Yellow Polygon:** Merchandising Dwell Zone
+            * 🟦 **Cyan Polygon:** Cashier Queue Staging Area
+            * 🟪 **Magenta Polygon / Box:** Staff area / tagged staff (excluded from customer counts)
+            """)
+            st.info("Frames are decoded, inferred, and rendered entirely on the on-premise edge node.")
 
-# ----------------------------------------------------------------------------
-# Camera setup: source switching + calibration
-# ----------------------------------------------------------------------------
-with tab_setup:
-    if not cameras:
-        st.warning("No cameras found in configs/cameras.yaml (or the API is unreachable).")
-    else:
-        setup_cam = st.selectbox("Camera to configure", list(cameras), key="setup_cam")
-        cam_cfg = cameras[setup_cam]
+    # ----------------------------------------------------------------------------
+    # Traffic analytics
+    # ----------------------------------------------------------------------------
+    history = api_get("/api/v1/history", params={**range_scope, "limit": 500}) or []
 
-        st.subheader("📼 Video source")
+    with tab_traffic:
+        hourly = summary.get("hourly_breakdown", [])
+        if not hourly and not history:
+            st.info("No rollups in the selected date range / camera yet.")
+        else:
+            render_traffic_charts(hourly, history)
+
+            st.subheader("⏱️ Checkout Queue Congestion Trend")
+            if history:
+                df = pd.DataFrame(history)
+                st.line_chart(df.set_index("timestamp_end")[["queue_length", "avg_queue_wait_seconds"]])
+                with st.expander("📋 View Raw Edge Telemetry Feed"):
+                    st.dataframe(df)
+                    st.download_button("Download CSV", df.to_csv(index=False), file_name="edgesight_rollups.csv", mime="text/csv")
+
+    # ----------------------------------------------------------------------------
+    # Heatmap
+    # ----------------------------------------------------------------------------
+    with tab_heatmap:
         st.caption(
-            "Switch this camera between sample videos and a live RTSP stream. The edge analyzer picks the change up "
-            "within a few seconds and starts this camera with a fresh tracker and counters."
+            "Where customers have spent time on the floor since this camera's pipeline last started, from where "
+            "each person is standing (their feet). Blue = little time, red = the most. Tagged staff are excluded. "
+            "Refreshed by the edge every ~10s."
         )
-        sources = api_get("/api/v1/config/sources") or {"videos": []}
-        videos = sources.get("videos", [])
-        current_source = cam_cfg.get("source", "")
-
-        with st.form(f"source_form_{setup_cam}"):
-            mode = st.radio("Source type", ["Video file", "RTSP / stream URL"],
-                            index=0 if current_source in videos else 1, horizontal=True, key=f"src_mode_{setup_cam}")
-            file_choice = st.selectbox(
-                "Video file", videos,
-                index=videos.index(current_source) if current_source in videos else 0,
-                disabled=not videos,
-                key=f"src_file_{setup_cam}",
-            )
-            url_choice = st.text_input(
-                "RTSP / stream URL",
-                value="" if current_source in videos else current_source,
-                placeholder="rtsp://user:password@192.168.1.100:554/Streaming/Channels/102",
-                key=f"src_url_{setup_cam}",
-            )
-            fps_choice = st.number_input("Target FPS", min_value=1, max_value=60, value=int(cam_cfg.get("fps_target", 15)),
-                                         key=f"src_fps_{setup_cam}")
-            apply_source = st.form_submit_button("Apply source")
-
-        if apply_source:
-            new_source = file_choice if mode == "Video file" else url_choice.strip()
-            ok, result = api_post(
-                f"/api/v1/config/cameras/{setup_cam}/source",
-                {"source": new_source, "fps_target": int(fps_choice)},
-            )
-            if ok:
-                st.toast(f"{setup_cam} → {new_source}", icon="✅")
-                st.success(f"Source updated to `{new_source}`. The edge will switch within ~3 seconds.")
+        for cam_id in ([camera_filter] if camera_filter else list(cameras)):
+            try:
+                resp = requests.get(f"{API_BASE}/api/v1/heatmap/{cam_id}", timeout=3.0)
+                image = resp.content if resp.status_code == 200 else None
+            except Exception:
+                image = None
+            if image:
+                st.image(image, caption=cameras.get(cam_id, {}).get("name", cam_id), width="stretch")
             else:
-                st.error(f"Could not update source: {result}")
+                st.info(f"No heatmap yet for {cam_id} -- is the edge analyzer running? The first one appears ~10s after it starts.")
 
-        st.markdown("---")
-        st.subheader("📐 Tripwires & zones")
-        st.caption(
-            "Read-only here. Tripwires drive real entry/exit counts; a **queue** zone is what populates queue length "
-            "and wait time. Draw and edit both with the click-to-draw **Calibration Studio** — it's the single place "
-            "these are created or removed, so this view and the Studio never disagree about what's live."
-        )
-        st.link_button("🎯 Open Calibration Studio", f"{PUBLIC_API_BASE}/", use_container_width=False)
+    # ----------------------------------------------------------------------------
+    # Crossing events
+    # ----------------------------------------------------------------------------
+    with tab_events:
+        events = (api_get("/api/v1/events", params={**scope, "limit": 200}) or {}).get("events", [])
+        if events:
+            st.caption("Every individual tripwire crossing, independent of the 10s rollups.")
+            st.dataframe(pd.DataFrame(events).iloc[::-1])
+        else:
+            has_tripwire = any(c.get("tripwires") for c in cameras.values())
+            if has_tripwire:
+                st.info("No crossings recorded yet.")
+            else:
+                st.warning(
+                    "No tripwire is configured, so no crossing events exist and 'visitors' falls back to counting unique "
+                    "tracker IDs. Draw one in the **Camera Setup** tab."
+                )
 
-        tripwires = list(cam_cfg.get("tripwires", []))
-        zones = list(cam_cfg.get("zones", []))
-        if tripwires:
-            st.markdown("**Tripwires**")
-            st.dataframe(pd.DataFrame(tripwires))
-        if zones:
-            st.markdown("**Zones**")
-            st.dataframe(pd.DataFrame(zones))
-        if not tripwires and not zones:
-            st.info("No tripwires or zones configured for this camera yet — add them in the Calibration Studio.")
+    # ----------------------------------------------------------------------------
+    # Camera setup: source switching + calibration
+    # ----------------------------------------------------------------------------
+    with tab_setup:
+        if not cameras:
+            st.warning("No cameras found in configs/cameras.yaml (or the API is unreachable).")
+        else:
+            setup_cam = st.selectbox("Camera to configure", list(cameras), key="setup_cam")
+            cam_cfg = cameras[setup_cam]
 
-if auto_refresh:
-    time.sleep(5)
-    st.rerun()
+            st.subheader("📼 Video source")
+            st.caption(
+                "Switch this camera between sample videos and a live RTSP stream. The edge analyzer picks the change up "
+                "within a few seconds and starts this camera with a fresh tracker and counters."
+            )
+            sources = api_get("/api/v1/config/sources") or {"videos": []}
+            videos = sources.get("videos", [])
+            current_source = cam_cfg.get("source", "")
+            # Decide the mode from what the source *is*, not from whether it's in the list: a local
+            # file that has since been deleted or renamed used to flip the form into URL mode with
+            # the missing path pre-filled, so picking a file from the list and pressing Apply still
+            # re-submitted the missing path ("Video file not found").
+            is_stream = current_source.lower().startswith(("rtsp://", "rtsps://", "http://"))
+            if current_source and not is_stream and current_source not in videos:
+                st.warning(f"This camera's current video `{current_source}` no longer exists, so it has no "
+                           f"feed. Pick a file below and press **Apply source**.")
+
+            with st.form(f"source_form_{setup_cam}"):
+                mode = st.radio("Source type", ["Video file", "RTSP / stream URL"],
+                                index=1 if is_stream else 0, horizontal=True, key=f"src_mode_{setup_cam}")
+                file_choice = st.selectbox(
+                    "Video file", videos,
+                    index=videos.index(current_source) if current_source in videos else 0,
+                    disabled=not videos,
+                    key=f"src_file_{setup_cam}",
+                )
+                url_choice = st.text_input(
+                    "RTSP / stream URL",
+                    value=current_source if is_stream else "",
+                    placeholder="rtsp://user:password@192.168.1.100:554/Streaming/Channels/102",
+                    key=f"src_url_{setup_cam}",
+                )
+                fps_choice = st.number_input("Target FPS", min_value=1, max_value=60, value=int(cam_cfg.get("fps_target", 15)),
+                                             key=f"src_fps_{setup_cam}")
+                apply_source = st.form_submit_button("Apply source")
+
+            if apply_source:
+                new_source = file_choice if mode == "Video file" else url_choice.strip()
+                ok, result = api_post(
+                    f"/api/v1/config/cameras/{setup_cam}/source",
+                    {"source": new_source, "fps_target": int(fps_choice)},
+                )
+                if ok:
+                    st.toast(f"{setup_cam} → {new_source}", icon="✅")
+                    st.success(f"Source updated to `{new_source}`. The edge will switch within ~3 seconds.")
+                else:
+                    st.error(f"Could not update source: {result}")
+
+            st.markdown("---")
+            st.subheader("📐 Tripwires & zones")
+            st.caption(
+                "Read-only here. Tripwires drive real entry/exit counts; a **queue** zone is what populates queue length "
+                "and wait time. Draw and edit both with the click-to-draw **Calibration Studio** — it's the single place "
+                "these are created or removed, so this view and the Studio never disagree about what's live."
+            )
+            st.link_button("🎯 Open Calibration Studio", f"{PUBLIC_API_BASE}/", use_container_width=False)
+
+            tripwires = list(cam_cfg.get("tripwires", []))
+            zones = list(cam_cfg.get("zones", []))
+            if tripwires:
+                st.markdown("**Tripwires**")
+                st.dataframe(pd.DataFrame(tripwires))
+            if zones:
+                st.markdown("**Zones**")
+                st.dataframe(pd.DataFrame(zones))
+            if not tripwires and not zones:
+                st.info("No tripwires or zones configured for this camera yet — add them in the Calibration Studio.")
+
+
+page_body()

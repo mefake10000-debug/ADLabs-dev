@@ -156,7 +156,7 @@ def replayed_tracks(cap, replay_path):
 
 
 def run(video_path, process_fps=None, max_gap=5.0, max_distance=1.0, out_dir=None,
-        clips=True, config_path=DEFAULT_CONFIG, replay=None):
+        clips=True, config_path=DEFAULT_CONFIG, replay=None, model=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"ERROR: could not open {video_path}")
@@ -174,7 +174,7 @@ def run(video_path, process_fps=None, max_gap=5.0, max_distance=1.0, out_dir=Non
     if replay:
         frames = replayed_tracks(cap, replay)
     else:
-        detector = build_detector(cfg)
+        detector = build_detector(cfg, model=model)
         if detector.model is None:
             print("ERROR: YOLO did not load, so the tracks (and any switch report) would be meaningless. "
                   "Run this inside the edge container (docker compose run --rm --no-deps edge-analyzer ...).")
@@ -272,9 +272,10 @@ def main():
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--replay", metavar="TRACKS_JSONL", default=None,
                         help="Re-score a previous run's tracks.jsonl instead of running YOLO")
+    parser.add_argument("--model", default=None, help="Override perception.model_name, e.g. models/yolo26n.pt")
     args = parser.parse_args()
     result = run(args.video, args.process_fps, args.max_gap, args.max_distance, args.out_dir,
-                 not args.no_clips, args.config, args.replay)
+                 not args.no_clips, args.config, args.replay, args.model)
     sys.exit(0 if result else 1)
 
 

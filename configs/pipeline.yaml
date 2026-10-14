@@ -6,7 +6,7 @@ edge:
   hardware_backend: "auto" # "auto", "coreml", "cuda", or "cpu"
 
 perception:
-  model_name: "models/yolo26m.pt"   # cached in ./models (bind-mounted), so it is downloaded once, not per container
+  model_name: "models/yolo26s.pt"   # small: as accurate as medium on our footage, 2.3x faster (docs/model-benchmark.md). Cached in ./models (bind-mounted)
   confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
                                # real person" bar is tracking.track_thresh below; detections between
                                # this floor and track_thresh can only extend a track that already

@@ -65,3 +65,16 @@ data/storage/id_switch_runs/
 
 # Rendered floor heatmaps (real CCTV frames), written by the edge
 data/storage/heatmaps/
+
+# Model benchmark output (scripts/benchmark_models.sh) and exported model formats
+data/storage/model_bench/
+models/*_openvino_model/
+
+# Externally sourced real CCTV (identifiable people) -- local testing only, never committed
+data/sample_videos/garage/
+
+# Garage footage evaluation output (real CCTV frames)
+data/storage/garage_eval/
+
+# Local backup of the camera config while testing other footage
+configs/*.bak

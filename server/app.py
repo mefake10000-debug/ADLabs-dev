@@ -99,6 +99,16 @@ def init_db():
             received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
+        # The dashboard re-runs these queries every 5s. Without indexes each one scanned the whole
+        # table (~0.7-0.9s at 31k rows on a Docker bind mount), making a refresh slower than the
+        # refresh interval -- the page then stayed permanently mid-refresh and faded.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rollups_store_camera ON telemetry_rollups (store_id, camera_id, id)")
+        # Covering: today's totals and the hourly summary are answered from the index alone.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rollups_store_received_cover ON telemetry_rollups "
+                     "(store_id, received_at, camera_id, in_count, out_count, avg_dwell_seconds)")
+        # Newest-first history for the whole store (with a camera filter, idx_rollups_store_camera serves).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rollups_store_id ON telemetry_rollups (store_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_store_camera ON telemetry_events (store_id, camera_id, id)")
         conn.commit()
 
 init_db()
@@ -236,7 +246,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         footfall_query = """
         SELECT SUM(in_count) as total_visitors, SUM(out_count) as total_exits, AVG(avg_dwell_seconds) as avg_dwell
         FROM telemetry_rollups
-        WHERE store_id = ? AND date(received_at) = date('now')
+        WHERE store_id = ? AND received_at >= date('now') AND received_at < date('now', '+1 day')
         """
         footfall_params: List[Any] = [store_id]
         if camera_id:
@@ -290,11 +300,13 @@ def get_history(
         if camera_id:
             query += " AND camera_id = ?"
             params.append(camera_id)
+        # "+received_at" stops SQLite planning around the date range: it's ~150x faster to walk the
+        # store's newest rows (idx_rollups_store_id / _store_camera) and stop at the limit.
         if start_date:
-            query += " AND date(received_at) >= date(?)"
+            query += " AND +received_at >= date(?)"
             params.append(start_date)
         if end_date:
-            query += " AND date(received_at) <= date(?)"
+            query += " AND +received_at < date(?, '+1 day')"
             params.append(end_date)
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
@@ -323,10 +335,10 @@ def get_analytics_summary(
             query += " AND camera_id = ?"
             params.append(camera_id)
         if start_date:
-            query += " AND date(received_at) >= date(?)"
+            query += " AND received_at >= date(?)"
             params.append(start_date)
         if end_date:
-            query += " AND date(received_at) <= date(?)"
+            query += " AND received_at < date(?, '+1 day')"
             params.append(end_date)
         query += " GROUP BY hour_bucket ORDER BY hour_bucket ASC"
         rows = conn.execute(query, params).fetchall()
@@ -526,7 +538,11 @@ class CalibrationUpdate(BaseModel):
 def list_video_sources():
     if not os.path.isdir(VIDEO_DIR):
         return {"video_dir": VIDEO_DIR, "videos": []}
-    videos = sorted(f for f in os.listdir(VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS))
+    # Subfolders included, so footage can be kept per source (e.g. sample_videos/garage/).
+    videos = sorted(
+        os.path.relpath(os.path.join(root, f), VIDEO_DIR).replace("\\", "/")
+        for root, _, files in os.walk(VIDEO_DIR) for f in files if f.lower().endswith(VIDEO_EXTS)
+    )
     return {"video_dir": VIDEO_DIR, "videos": [f"{VIDEO_DIR}/{f}" for f in videos]}
 
 # Switch one camera's input source without touching its calibration or other cameras

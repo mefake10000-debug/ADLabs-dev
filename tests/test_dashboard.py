@@ -136,6 +136,25 @@ class TestDashboard(unittest.TestCase):
         self.assertEqual(self.config()["cam_a"]["source"], TEST_VIDEO)
         self.assertEqual(self.config()["cam_b"]["source"], "rtsp://10.0.0.5/stream")
 
+    def test_camera_whose_video_was_deleted_can_be_switched_to_another_file(self):
+        # Regression: a deleted/renamed local file used to flip the form into URL mode with the
+        # missing path pre-filled, so choosing a file and pressing Apply re-submitted the missing path.
+        with open(self.config_path) as f:
+            cfg = yaml.safe_load(f)
+        cfg["cameras"][0]["source"] = "data/sample_videos/clip_that_was_deleted.mp4"
+        with open(self.config_path, "w") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+
+        at = self.run_app()
+        at.selectbox(key="setup_cam").select("cam_a").run()
+        self.assertEqual(at.radio(key="src_mode_cam_a").value, "Video file")
+        self.assertTrue(any("no longer exists" in w.value for w in at.warning))
+
+        at.selectbox(key="src_file_cam_a").select(TEST_VIDEO)
+        self.button(at, "Apply source").click().run()
+        self.assertFalse(at.exception, at.exception)
+        self.assertEqual(self.config()["cam_a"]["source"], TEST_VIDEO)
+
     def test_switching_to_rtsp_and_rejecting_a_bad_url(self):
         at = self.run_app()
         at.radio(key="src_mode_cam_a").set_value("RTSP / stream URL")

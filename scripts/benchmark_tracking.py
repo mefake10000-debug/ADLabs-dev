@@ -61,10 +61,10 @@ def load_pipeline_config(path: str) -> dict:
     return {}
 
 
-def build_detector(cfg: dict, conf_thresh=None) -> PersonDetector:
+def build_detector(cfg: dict, conf_thresh=None, model=None) -> PersonDetector:
     p = cfg.get("perception", {})
     return PersonDetector(
-        model_name=p.get("model_name", "yolov8n.pt"),
+        model_name=model or p.get("model_name", "yolov8n.pt"),
         conf_thresh=conf_thresh if conf_thresh is not None else p.get("confidence_threshold", 0.50),
         iou_thresh=p.get("iou_threshold", 0.45),
         min_height=p.get("min_height", 85.0),
@@ -128,7 +128,7 @@ def checkpoints_from(ground_truth: dict) -> dict:
 
 
 def run_benchmark(video_path: str, ground_truth: dict = None, max_frames: int = 100000,
-                  conf_thresh=None, config_path: str = DEFAULT_CONFIG):
+                  conf_thresh=None, config_path: str = DEFAULT_CONFIG, model=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"ERROR: could not open {video_path}")
@@ -140,7 +140,7 @@ def run_benchmark(video_path: str, ground_truth: dict = None, max_frames: int = 
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     cfg = load_pipeline_config(config_path)
-    detector = build_detector(cfg, conf_thresh)
+    detector = build_detector(cfg, conf_thresh, model)
     if detector.model is None:
         print("ERROR: YOLO did not load, so any accuracy number would be meaningless. "
               "Run this inside the edge container (docker compose run --rm --no-deps edge-analyzer ...).")
@@ -288,6 +288,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", help="Pipeline config (default: configs/pipeline.yaml)", default=DEFAULT_CONFIG)
     parser.add_argument("--max-frames", type=int, default=100000)
     parser.add_argument("--conf-thresh", type=float, default=None, help="Override perception.confidence_threshold")
+    parser.add_argument("--model", default=None,
+                        help="Override perception.model_name, e.g. models/yolo26n.pt (downloaded on first use)")
     args = parser.parse_args()
 
     # Windows shells hand over backslash paths; inside the Linux container they aren't separators
@@ -302,7 +304,7 @@ if __name__ == "__main__":
             gt = json.load(f)
 
     result = run_benchmark(args.video, ground_truth=gt, max_frames=args.max_frames,
-                           conf_thresh=args.conf_thresh, config_path=args.config)
+                           conf_thresh=args.conf_thresh, config_path=args.config, model=args.model)
     if result is None:
         sys.exit(2)
     print_result(result)
