@@ -123,12 +123,33 @@ def checkpoints_from(ground_truth: dict) -> dict:
     if not ground_truth or ground_truth.get("method") != "point-in-time headcount":
         return {}
     if "checkpoints" in ground_truth:
-        return {c["frame_index"]: c["expected_visible_people"] for c in ground_truth["checkpoints"]}
+        # Unfilled entries (null) from a make_count_sheet.py template are skipped, so a partly
+        # counted clip can already be scored.
+        return {c["frame_index"]: c["expected_visible_people"] for c in ground_truth["checkpoints"]
+                if c.get("expected_visible_people") is not None}
     return {ground_truth["frame_index"]: ground_truth["expected_visible_people"]}
 
 
+def draw_checkpoint(frame, dets, tracks, expected, out_path):
+    """The checkpoint frame as the tracker saw it: green = tracked person (what the dashboard
+    counts), thin yellow = detected but not (yet) a confirmed track. People with no box were missed."""
+    img = frame.copy()
+    for d in dets:
+        x1, y1, x2, y2 = (int(v) for v in d["bbox"])
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 220, 220), 1)
+    for t in tracks:
+        x1, y1, x2, y2 = (int(v) for v in t.bbox)
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 200, 0), 2)
+        cv2.putText(img, f"ID:{t.track_id}", (x1, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 2)
+    cv2.rectangle(img, (0, 0), (img.shape[1], 34), (20, 20, 20), -1)
+    cv2.putText(img, f"hand count {expected}  |  tracked {len(tracks)} (green)  |  detected {len(dets)} (yellow)",
+                (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    cv2.imwrite(out_path, img)
+
+
 def run_benchmark(video_path: str, ground_truth: dict = None, max_frames: int = 100000,
-                  conf_thresh=None, config_path: str = DEFAULT_CONFIG, model=None):
+                  conf_thresh=None, config_path: str = DEFAULT_CONFIG, model=None,
+                  process_fps=None, save_checkpoints=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"ERROR: could not open {video_path}")
@@ -166,13 +187,27 @@ def run_benchmark(video_path: str, ground_truth: dict = None, max_frames: int = 
     observed = {}   # frame_index -> (raw detections, tracker output)
     stages = {}     # frame_index -> stage_breakdown(...)
     effective_conf = conf_thresh if conf_thresh is not None else cfg.get("perception", {}).get("confidence_threshold", 0.5)
+    if save_checkpoints:
+        os.makedirs(save_checkpoints, exist_ok=True)
     t0 = time.time()
+    processed, next_t = 0, 0.0
 
     while frame_idx < limit:
+        # With --process-fps, frames between the live rate's ticks are skipped without decoding
+        # them (as the live analyzer drops them) -- except checkpoints, which are always processed.
+        video_t = frame_idx / fps
+        if process_fps and video_t < next_t and frame_idx not in checkpoints:
+            if not cap.grab():
+                break
+            frame_idx += 1
+            continue
         ret, frame = cap.read()
         if not ret:
             break
-        current_time = t0 + (frame_idx / fps)
+        if process_fps and video_t >= next_t:
+            next_t = video_t + 1.0 / process_fps
+        processed += 1
+        current_time = t0 + video_t
 
         dets = detector.detect(frame)
         tracks = tracker.update(dets, current_time)
@@ -182,6 +217,9 @@ def run_benchmark(video_path: str, ground_truth: dict = None, max_frames: int = 
             tripwire.update(tracks, current_time)
         if frame_idx in checkpoints:
             observed[frame_idx] = (len(dets), len(tracks))
+            if save_checkpoints:
+                draw_checkpoint(frame, dets, tracks, checkpoints[frame_idx],
+                                os.path.join(save_checkpoints, f"checkpoint_f{frame_idx:06d}.jpg"))
             breakdown = stage_breakdown(detector, frame, effective_conf)
             if breakdown:
                 stages[frame_idx] = breakdown
@@ -195,7 +233,8 @@ def run_benchmark(video_path: str, ground_truth: dict = None, max_frames: int = 
         "backend": backend,
         "config": os.path.relpath(config_path) if config_path and os.path.exists(config_path) else "built-in defaults",
         "resolution": f"{width}x{height}",
-        "frames_processed": frame_idx,
+        "frames_processed": processed,
+        "process_fps": process_fps or "every frame",
         "duration_s": round(frame_idx / fps, 1),
         "wall_clock_s": round(time.time() - t0, 1),
         "unique_track_ids": len(unique_track_ids),
@@ -236,8 +275,10 @@ def run_benchmark(video_path: str, ground_truth: dict = None, max_frames: int = 
             })
         if rows:
             result["checkpoints"] = rows
-            result["mean_raw_recall"] = round(sum(r["raw_recall"] for r in rows) / len(rows), 3)
-            result["mean_tracker_recall"] = round(sum(r["tracker_recall"] for r in rows) / len(rows), 3)
+            scored = [r for r in rows if r["expected"]]  # a checkpoint with nobody in view has no recall
+            if scored:
+                result["mean_raw_recall"] = round(sum(r["raw_recall"] for r in scored) / len(scored), 3)
+                result["mean_tracker_recall"] = round(sum(r["tracker_recall"] for r in scored) / len(scored), 3)
 
     return result
 
@@ -248,7 +289,8 @@ def print_result(result: dict):
     print(f"Detector backend:   {result['backend']}")
     print(f"Pipeline config:    {result['config']}")
     print(f"Resolution:         {result['resolution']}")
-    print(f"Frames processed:   {result['frames_processed']} ({result['duration_s']}s of footage)")
+    print(f"Frames processed:   {result['frames_processed']} ({result['duration_s']}s of footage, "
+          f"{result['process_fps']} fps)")
     print(f"Wall-clock time:    {result['wall_clock_s']}s")
     print(f"Unique track IDs:   {result['unique_track_ids']}")
 
@@ -263,8 +305,9 @@ def print_result(result: dict):
     if "checkpoints" in result:
         print("\n  frame | hand count | raw detections | tracker output | raw recall | tracker recall")
         for r in result["checkpoints"]:
+            pct = lambda v: f"{v * 100:.0f}%" if v is not None else "-"
             print(f"  {r['frame_index']:5d} | {r['expected']:10d} | {r['raw_detections']:14d} | {r['tracker_output']:14d} | "
-                  f"{r['raw_recall'] * 100:9.0f}% | {r['tracker_recall'] * 100:13.0f}%")
+                  f"{pct(r['raw_recall']):>10} | {pct(r['tracker_recall']):>14}")
         if any("stages" in r for r in result["checkpoints"]):
             print("\n  where people are lost before the tracker (YOLO person boxes):")
             print("  frame | hand count | yolo conf>=0.25 | yolo at config conf | size-rejected | aspect-rejected | kept")
@@ -273,8 +316,9 @@ def print_result(result: dict):
                 if st:
                     print(f"  {r['frame_index']:5d} | {r['expected']:10d} | {st['yolo_low_conf']:15d} | {st['yolo_at_conf']:19d} | "
                           f"{st['rejected_size']:13d} | {st['rejected_aspect']:15d} | {r['raw_detections']:4d}")
-        print(f"\n  mean raw-detection recall: {result['mean_raw_recall'] * 100:.0f}%   "
-              f"mean tracker-output recall: {result['mean_tracker_recall'] * 100:.0f}%")
+        if "mean_tracker_recall" in result:
+            print(f"\n  mean raw-detection recall: {result['mean_raw_recall'] * 100:.0f}%   "
+                  f"mean tracker-output recall: {result['mean_tracker_recall'] * 100:.0f}%")
 
     if result.get("ground_truth_notes"):
         print(f"\nGround truth notes: {result['ground_truth_notes']}")
@@ -290,6 +334,11 @@ if __name__ == "__main__":
     parser.add_argument("--conf-thresh", type=float, default=None, help="Override perception.confidence_threshold")
     parser.add_argument("--model", default=None,
                         help="Override perception.model_name, e.g. models/yolo26n.pt (downloaded on first use)")
+    parser.add_argument("--process-fps", type=float, default=None,
+                        help="Process at this rate, like the live analyzer (default: every frame). Checkpoints "
+                             "are always processed.")
+    parser.add_argument("--save-checkpoints", default=None, metavar="DIR",
+                        help="Save each checkpoint frame with the tracker's boxes drawn, to see who was missed")
     args = parser.parse_args()
 
     # Windows shells hand over backslash paths; inside the Linux container they aren't separators
@@ -304,7 +353,8 @@ if __name__ == "__main__":
             gt = json.load(f)
 
     result = run_benchmark(args.video, ground_truth=gt, max_frames=args.max_frames,
-                           conf_thresh=args.conf_thresh, config_path=args.config, model=args.model)
+                           conf_thresh=args.conf_thresh, config_path=args.config, model=args.model,
+                           process_fps=args.process_fps, save_checkpoints=args.save_checkpoints)
     if result is None:
         sys.exit(2)
     print_result(result)

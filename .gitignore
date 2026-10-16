@@ -70,11 +70,17 @@ data/storage/heatmaps/
 data/storage/model_bench/
 models/*_openvino_model/
 
-# Externally sourced real CCTV (identifiable people) -- local testing only, never committed
-data/sample_videos/garage/
+# Externally sourced real CCTV (identifiable people) -- local testing only, never committed.
+# Each source lives in its own subfolder (scripts/prepare_footage.py); committed samples are top-level files.
+data/sample_videos/*/
 
 # Garage footage evaluation output (real CCTV frames)
 data/storage/garage_eval/
 
 # Local backup of the camera config while testing other footage
 configs/*.bak
+
+# Hand-count sheets for checking detection (real CCTV frames)
+data/storage/count_checks/
+# Working files of scripts/prepare_footage.py
+data/storage/footage_work/
