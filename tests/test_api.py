@@ -243,14 +243,22 @@ class TestCameraConfigAPI(unittest.TestCase):
         self.assertIn(TEST_VIDEO, videos)
         self.assertTrue(all(v.startswith("data/sample_videos/") for v in videos))
 
-    def test_switch_source_changes_only_that_camera_and_keeps_calibration(self):
+    def test_switch_source_changes_only_that_camera_and_keeps_calibration_per_video(self):
         resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": TEST_VIDEO, "fps_target": 12})
         self.assertEqual(resp.status_code, 200)
         cfg = self._config()
         self.assertEqual(cfg["cam_a"]["source"], TEST_VIDEO)
         self.assertEqual(cfg["cam_a"]["fps_target"], 12)
-        self.assertEqual(cfg["cam_a"]["tripwires"][0]["id"], "tw1")   # calibration preserved
         self.assertEqual(cfg["cam_b"]["source"], "rtsp://10.0.0.5/stream")  # other camera untouched
+        # Shapes drawn on one video must not appear on another...
+        self.assertEqual((cfg["cam_a"]["tripwires"], cfg["cam_a"]["zones"]), ([], []))
+        cam_a = next(c for c in self.client.get("/api/v1/config/cameras").json()["cameras"] if c["id"] == "cam_a")
+        self.assertNotIn("calibrations", cam_a)  # keyed by source, which may hold RTSP passwords
+        # ...and come back when switching back to that video
+        self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": "data/sample_videos/entrance_sample.mp4"})
+        cfg = self._config()
+        self.assertEqual(cfg["cam_a"]["tripwires"][0]["id"], "tw1")
+        self.assertNotIn("calibrations", cfg["cam_a"])  # nothing left parked
 
     def test_rtsp_source_accepted(self):
         resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": "rtsp://admin:pw@192.168.1.10:554/ch1"})

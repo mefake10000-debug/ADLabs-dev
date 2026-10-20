@@ -371,7 +371,7 @@
         let calibPoints = [];
         let calibLines = [];
         let calibPolygons = [];
-        let calibLoadedFor = null;  // camera id whose shapes are currently loaded into calibLines/calibPolygons
+        let calibLoadedFor = null;  // 'camera|source' whose shapes are currently loaded into calibLines/calibPolygons
         // Drawing mode -> the zone it creates, and how each zone type is drawn and listed.
         const ZONE_TYPES = {
             polygon: { type: 'dwell', name: 'In-Store Zone' },
@@ -542,7 +542,9 @@
         }
 
         // Calibration Studio Logic (HTML5 Canvas Drawing)
-        function initCalibrationStudio() {
+        async function initCalibrationStudio() {
+            // The source may have been switched (e.g. from the dashboard) since this page loaded.
+            await loadCameraConfigs();
             const canvas = document.getElementById('calibCanvas');
             const ctx = canvas.getContext('2d');
 
@@ -552,12 +554,14 @@
             // Studio" with nothing else changed -- which silently discarded any shape drawn but
             // not yet saved. Drawing a zone, glancing at another tab, and coming back used to
             // wipe it before "Save & Hot-Apply" was ever clicked.
-            if (calibLoadedFor !== currentCameraId) {
-                const existing = cameraConfigs[currentCameraId] || {};
+            // Keyed by source too: each video has its own shapes, so a source switch must reseed.
+            const existing = cameraConfigs[currentCameraId] || {};
+            const loadKey = currentCameraId + '|' + (existing.source || '');
+            if (calibLoadedFor !== loadKey) {
                 calibLines = JSON.parse(JSON.stringify(existing.tripwires || []));
                 calibPolygons = JSON.parse(JSON.stringify(existing.zones || []));
                 calibPoints = [];
-                calibLoadedFor = currentCameraId;
+                calibLoadedFor = loadKey;
             }
             backgroundImage = new Image();
             backgroundImage.onload = () => {

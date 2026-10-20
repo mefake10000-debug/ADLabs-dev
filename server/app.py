@@ -60,10 +60,13 @@ def _redact_source(source: Optional[str]) -> Optional[str]:
     return re.sub(r'(rtsps?://)[^@/\s]+@', r'\1****:****@', source)
 
 def _redact_camera(cam: Dict[str, Any]) -> Dict[str, Any]:
-    if "source" not in cam:
+    if "source" not in cam and "calibrations" not in cam:
         return cam
     redacted = dict(cam)
-    redacted["source"] = _redact_source(redacted["source"])
+    if "source" in redacted:
+        redacted["source"] = _redact_source(redacted["source"])
+    # Keyed by source, so an RTSP URL's password would leak through the keys; clients don't need it.
+    redacted.pop("calibrations", None)
     return redacted
 
 def init_db():
@@ -545,12 +548,31 @@ def list_video_sources():
     )
     return {"video_dir": VIDEO_DIR, "videos": [f"{VIDEO_DIR}/{f}" for f in videos]}
 
-# Switch one camera's input source without touching its calibration or other cameras
+def _swap_calibration(cam: Dict[str, Any], new_source: str):
+    """Tripwires/zones are drawn on one video, so each source keeps its own: park the current
+    source's shapes under `calibrations` and bring back the new source's (none if never drawn)."""
+    old_source = cam.get("source", "")
+    if old_source == new_source:
+        return
+    saved = cam.setdefault("calibrations", {})
+    current = {k: cam[k] for k in ("tripwires", "zones") if cam.get(k)}
+    if current:
+        saved[old_source] = current
+    else:
+        saved.pop(old_source, None)
+    restored = saved.pop(new_source, {})
+    cam["tripwires"] = restored.get("tripwires", [])
+    cam["zones"] = restored.get("zones", [])
+    if not saved:
+        del cam["calibrations"]
+
+# Switch one camera's input source, swapping in that source's own calibration; other cameras untouched
 @app.post("/api/v1/config/cameras/{camera_id}/source")
 def update_camera_source(camera_id: str, body: SourceUpdate):
     source = _validate_source(body.source)
     config = _read_config()
     cam = _find_camera(config, camera_id)
+    _swap_calibration(cam, source)
     cam["source"] = source
     if body.name:
         cam["name"] = body.name

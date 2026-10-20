@@ -39,14 +39,14 @@ Small and nano exported to OpenVINO format load and run in our pipeline **withou
 with the same accuracy (small: 74% vs 76%). But on this CPU they ran slightly *slower* (small 6.1
 vs 7.9 fps). Published OpenVINO speedups come from Intel's **integrated GPU or NPU**, which Docker
 on Windows can't reach -- so the gain has to be measured on the actual pilot box
-(`docs/pilot-hardware.md`).
+(`docs/edge-hardware.md`).
 
 ## What this means
 
-- **Recommendation:** set `perception.model_name: "models/yolo26s.pt"` in `configs/pipeline.yaml`
-  (not changed yet -- your call).
+- **Done:** the pipeline now uses the small model (`perception.model_name: "models/yolo26s.pt"` in
+  `configs/pipeline.yaml`, switched 2026-10-14).
 - **Compute target for the pilot:** small at **~8 fps per camera** -- the rate where its switch
   count stops improving (17 at 7.9 fps vs 16 at every frame). This i5 CPU manages that for **one**
-  camera; two cameras need roughly double. That number drives `docs/pilot-hardware.md`.
+  camera; two cameras need roughly double. That number drives `docs/edge-hardware.md`.
 - One clip, one camera angle. Re-run `scripts/benchmark_models.sh` on the pilot clips before
   locking the choice in.

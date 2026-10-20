@@ -129,7 +129,8 @@ the default Linux wheel bundles ~4GB of CUDA libraries that Docker Desktop and t
 `requirements-edge.txt` no longer re-downloads torch. On an NVIDIA GPU host build with
 `TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 docker compose build edge-analyzer`. `.dockerignore` keeps
 `data/` and `.git` out of the build context. YOLO weights are cached in `models/` (`perception.model_name:
-models/yolo26m.pt`), so they download once rather than on every container start.
+models/yolo26s.pt`, the small model: as accurate as medium on our footage and 2.3x faster, see
+`docs/model-benchmark.md`), so they download once rather than on every container start.
 
 ### 2d. Tracking & Queue Tuning (`configs/pipeline.yaml`)
 - **`perception.confidence_threshold` / `tracking.track_thresh`** -- two-stage (ByteTrack-style)
