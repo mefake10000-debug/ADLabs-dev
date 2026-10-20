@@ -121,8 +121,11 @@ st.caption("On-Premise Computer Vision Telemetry & In-Store Operational Analytic
 # ----------------------------------------------------------------------------
 # Sidebar: store, camera and date filters
 # ----------------------------------------------------------------------------
-config = api_get("/api/v1/config/cameras") or {"cameras": []}
-cameras = {c["id"]: c for c in config.get("cameras", []) if c.get("id")}
+def load_cameras():
+    config = api_get("/api/v1/config/cameras") or {"cameras": []}
+    return {c["id"]: c for c in config.get("cameras", []) if c.get("id")}
+
+cameras = load_cameras()
 
 with st.sidebar:
     st.header("⚙️ Store Controls")
@@ -156,6 +159,9 @@ with st.sidebar:
 # is an ordinary run that finishes. Sidebar changes still rerun the whole page.
 @st.fragment(run_every=5 if auto_refresh else None)
 def page_body():
+    # Re-read on every refresh: a camera's source (and with it, its tripwires and zones) can change while
+    # the page is open. Reading it only on a full page load left "Current source" stale until a hard refresh.
+    cameras = load_cameras()
     scope = {"store_id": store_id}
     if camera_filter:
         scope["camera_id"] = camera_filter
@@ -316,6 +322,9 @@ def page_body():
             cam_cfg = cameras[setup_cam]
 
             st.subheader("📼 Video source")
+            source_msg = st.session_state.pop(f"source_msg_{setup_cam}", None)
+            if source_msg:
+                st.success(source_msg)
             st.caption(
                 "Switch this camera between sample videos and a live RTSP stream. The edge analyzer picks the change up "
                 "within a few seconds and starts this camera with a fresh tracker and counters."
@@ -358,8 +367,9 @@ def page_body():
                     {"source": new_source, "fps_target": int(fps_choice)},
                 )
                 if ok:
-                    st.toast(f"{setup_cam} → {new_source}", icon="✅")
-                    st.success(f"Source updated to `{new_source}`. The edge will switch within ~3 seconds.")
+                    st.session_state[f"source_msg_{setup_cam}"] = (
+                        f"Source updated to `{new_source}`. The edge will switch within ~3 seconds.")
+                    st.rerun()  # the Live Vision tab rendered above this form still shows the old source
                 else:
                     st.error(f"Could not update source: {result}")
 

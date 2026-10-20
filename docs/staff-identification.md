@@ -23,5 +23,5 @@ a dashboard snapshot each morning.
 **Privacy:** avoid faces (biometric data under India's DPDP Act needs consent). Appearance features
 kept only for the day are the safer design.
 
-**Test footage:** `data/sample_videos/restaurant_ch17/` has staff behind a bar counter, useful for
+**Test footage:** `data/sample_videos/restaurant_ch17/` (from the team shared drive, not in git) has staff behind a bar counter, useful for
 trying any of these.

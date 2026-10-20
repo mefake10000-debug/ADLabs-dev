@@ -135,6 +135,9 @@ class TestDashboard(unittest.TestCase):
         self.assertFalse(at.exception, at.exception)
         self.assertEqual(self.config()["cam_a"]["source"], TEST_VIDEO)
         self.assertEqual(self.config()["cam_b"]["source"], "rtsp://10.0.0.5/stream")
+        # Live Vision's "Current source" must show the new video at once, not after a hard refresh
+        self.assertIn(TEST_VIDEO, [c.value for c in at.code])
+        self.assertTrue(any("Source updated" in m.value for m in at.success))
 
     def test_camera_whose_video_was_deleted_can_be_switched_to_another_file(self):
         # Regression: a deleted/renamed local file used to flip the form into URL mode with the

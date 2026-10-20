@@ -70,7 +70,7 @@ data/storage/heatmaps/
 data/storage/model_bench/
 models/*_openvino_model/
 
-# Externally sourced real CCTV (identifiable people) -- local testing only, never committed.
+# Privately sourced real CCTV (identifiable people) -- shared via the team drive, never committed.
 # Each source lives in its own subfolder (scripts/prepare_footage.py); committed samples are top-level files.
 data/sample_videos/*/
 

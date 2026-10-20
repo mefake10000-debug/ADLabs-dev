@@ -6,10 +6,9 @@ Two tools for every new batch of footage (e.g. from a pilot store):
 2. **`scripts/make_count_sheet.py`** + **`scripts/benchmark_tracking.py`** check *"do the people the
    tracker sees match what a person sees?"* and give a number for it.
 
-Everything runs inside the edge container, which has ffmpeg, OpenCV and YOLO. Prepared clips in
-`data/sample_videos/<name>/` are committed so the whole team can test on them (the repo is private;
-the footage shows real, identifiable people, so keep it that way). GitHub rejects files over 100 MB:
-use `--clip-minutes 5` for high-bitrate footage. Count sheets and working files stay local and gitignored.
+Everything runs inside the edge container, which has ffmpeg, OpenCV and YOLO. All output stays local
+and is gitignored: the footage shows real, identifiable people. Share prepared clips through the team's
+shared drive, never through git; teammates put them in `data/sample_videos/<name>/`.
 
 ## Before you start
 
