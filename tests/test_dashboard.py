@@ -8,8 +8,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 DB_PATH = "data/storage/test_cloud_metrics.db"
 CONFIG_PATH = "data/storage/test_cameras.yaml"
-os.environ.setdefault("SERVER_DB_PATH", DB_PATH)
-os.environ.setdefault("CAMERAS_CONFIG", CONFIG_PATH)
+# Always override, never setdefault: the dashboard container sets CAMERAS_CONFIG to the real
+# configs/cameras.yaml, which these tests would otherwise overwrite and then delete.
+os.environ["SERVER_DB_PATH"] = DB_PATH
+os.environ["CAMERAS_CONFIG"] = CONFIG_PATH
 os.environ["DASHBOARD_AUTO_REFRESH"] = "0"   # the app's sleep+rerun loop would never let AppTest return
 
 import yaml
