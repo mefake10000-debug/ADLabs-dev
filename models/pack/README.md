@@ -2,7 +2,7 @@
 
 | | |
 |--|--|
-| **Branch** | `integration` / `mefake/integration` on mefake fork (from `id-switch-detector-staff-zones`) |
+| **Branch** | **`mefake/integration`** on mefake fork (from `id-switch-detector-staff-zones`) |
 | **Purpose** | On-disk weights for next EdgeSight integrates — **not** mixed into production `models/*.pt` until wired |
 | **Download** | `python scripts/download_pack_models.py` or `bash models/pack/download.sh` |
 | **Docker** | `docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d` → `/app/models/pack/` |

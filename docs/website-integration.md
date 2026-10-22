@@ -1,11 +1,15 @@
 # Website live-dashboard integration
 
-**Friend review branches (mefake fork only — never push `rajendrac3` main):**
+> **Canonical review pair (only):** `mefake/integration` on both forks.  
+> Sibling feature branches were absorbed into this tip — do not review them as current.  
+> Never push `rajendrac3/ADLabs-dev` `main` or `NuclearQuince/adlabs` `main`.
 
-| Repo | Branch names (same tip) | Base |
-|------|-------------------------|------|
-| ADLabs-dev | **`integration`** · **`mefake/integration`** | `id-switch-detector-staff-zones` |
-| Website (adlabs) | **`mefake/integration`** | live EdgeSight + models + calib blend |
+| Repo | Canonical branch | Base | Tip |
+|------|------------------|------|-----|
+| ADLabs-dev (`mefake10000-debug`) | **`mefake/integration`** | `id-switch-detector-staff-zones` | see GitHub |
+| Website adlabs (`mefake10000-debug`) | **`mefake/integration`** | website-final + full-models + calib/ops blend | see GitHub |
+
+(`refs/heads/integration` on the ADLabs-dev fork may mirror the same tip as an alias — prefer **`mefake/integration`**.)
 
 ## What this enables
 
@@ -44,7 +48,7 @@ Folder layout: `01-detection/` · `02-tracking/` · `03-reid/` · `04-attributes
 ```bash
 # Terminal A — EdgeSight (this repo)
 cd ~/Desktop/ad-labs-project/repos/ADLabs-dev
-git checkout integration   # or mefake/integration
+git checkout mefake/integration
 docker compose up -d
 # optional: docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d
 
@@ -54,9 +58,16 @@ git checkout mefake/integration
 npm install && npm run dev   # http://localhost:3000
 ```
 
-Open `/dashboard` → chip **EdgeSight live** when Docker is healthy. Sidebar: **EdgeSight live** (calib/ops iframes) · **Models & EdgeSight** (pack + honesty).
+Open `/dashboard` → chip **EdgeSight live** when Docker is healthy. Sidebar is **segregated** (same DashboardPage chrome — extend, don’t redesign):
+
+1. **Calibration / Live ops** → EdgeSight live (calib + Streamlit embeds)  
+2. **Model-backed intel** → Models & EdgeSight (best models from plans + pack weights)  
+3. Existing Live now / Intelligence / Performance screens — layout unchanged  
+
+Best-model names come from Desktop `models/` pack + Project store `docs/models-to-integrate-*` (Top 5 + existing 7). Pack downloads: yolo26n + OSNet-x0.25; production stack already under `models/` + `models/onnx/`.
 
 ## Git rules
 
-- Review on **`mefake10000-debug/ADLabs-dev`** only (`integration` / `mefake/integration`).
-- Do **not** push or merge to `rajendrac3/ADLabs-dev` `main`.
+- Review **`mefake/integration`** on **`mefake10000-debug/ADLabs-dev`** only (base: `id-switch-detector-staff-zones`).
+- Do **not** push or merge to `rajendrac3/ADLabs-dev` `main` or `NuclearQuince/adlabs` `main`.
+- Pushes: **`mefake10000-debug` only**.
