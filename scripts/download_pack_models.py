@@ -30,6 +30,21 @@ PACK_MODELS = [
         "https://huggingface.co/paulosantiago/osnet_x0_25_msmt17/resolve/main/osnet_x0_25_msmt17.pt",
         2_000_000,
     ),
+    (
+        "03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth",
+        "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_5_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth",
+        8_000_000,
+    ),
+    (
+        "05-seg/yolo26m-seg/yolo26m-seg.pt",
+        "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m-seg.pt",
+        40_000_000,
+    ),
+    (
+        "07-openvocab/yolov8s-worldv2.pt",
+        "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt",
+        20_000_000,
+    ),
 ]
 
 

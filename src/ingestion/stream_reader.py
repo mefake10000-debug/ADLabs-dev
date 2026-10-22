@@ -10,7 +10,7 @@ try:
     import numpy as np
 except ImportError:
     np = None
-from src.ingestion.frame_buffer import FrameBuffer
+from src.ingestion.frame_buffer import FrameBuffer, FrameStamp, FrameStamp
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +105,13 @@ class StreamReader:
                     continue
 
             frame_time = time.time()
+            stamp = FrameStamp(utc=frame_time, mono=time.monotonic())
             last_frame_time = frame_time
             frame_idx += 1
             fps_counter += 1
 
-            # Put frame in thread-safe buffer
-            self.buffer.put(frame_idx, frame_time, frame)
+            # Put frame in thread-safe buffer (utc + mono for future multi-cam windows)
+            self.buffer.put(frame_idx, stamp, frame)
 
             # Update FPS calculations every second
             if frame_time - fps_timer >= 1.0:
@@ -118,6 +119,6 @@ class StreamReader:
                 fps_counter = 0
                 fps_timer = frame_time
 
-    def get_latest_frame(self, timeout: float = 0.5) -> Optional[Tuple[int, float, Any]]:
+    def get_latest_frame(self, timeout: float = 0.5) -> Optional[Tuple[int, FrameStamp, Any]]:
         return self.buffer.get(timeout=timeout)
 

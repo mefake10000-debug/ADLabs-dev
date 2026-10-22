@@ -305,7 +305,7 @@
                 <div class="bg-surface-card border border-surface-border rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
                     <div>
                         <h3 class="text-base font-bold text-white">Interactive Video Calibration Studio</h3>
-                        <p class="text-xs text-gray-400">Draw tripwire · dwell · queue · staff. Saves via POST /api/v1/config/cameras/{id}/calibration. Multi-cam: header selector — each cam keeps its own shapes.</p>
+                        <p class="text-xs text-gray-400">Customize tripwires (entries) and staff / queue / dwell polygons per camera. Names are editable. Save hot-applies to the edge in ~3s. Cross-cam identity stays Future.</p>
                     </div>
 
                     <div class="flex items-center space-x-2">
@@ -348,9 +348,11 @@
                     <div class="relative inline-block border border-surface-border rounded-lg overflow-hidden">
                         <canvas id="calibCanvas" width="1270" height="720" class="max-w-full h-auto block"></canvas>
                     </div>
-                    <div class="mt-3 text-xs text-gray-400 flex items-center space-x-4">
-                        <span><strong>Tripwire Mode:</strong> Click Point A, then Click Point B to define line threshold.</span>
-                        <span><strong>Zone Mode:</strong> Click at least 3 points around the perimeter, then press <strong>Close Shape</strong> (double-click also works if your pointer supports it reliably).</span>
+                    <div class="mt-3 text-xs text-gray-400 space-y-1.5 max-w-4xl">
+                        <p><strong class="text-emerald-400">Tripwire</strong> — click A then B across the doorway/path. Set <em>Entry =</em> direction so walk-ins increment entries. Rename in the shapes list before Save.</p>
+                        <p><strong class="text-amber-300">Dwell / Queue</strong> — polygon ≥3 points, then <strong>Close Shape</strong>. Queue drives wait KPIs; dwell drives zone time.</p>
+                        <p><strong class="text-fuchsia-300">Staff zone</strong> — behind counter / stock only. People who linger here are tagged staff and excluded from customer counts (sticky). Not facial recognition.</p>
+                        <p class="text-gray-500">Multi-cam: use the header camera selector — each camera keeps its own tripwires &amp; zones. Cross-cam ReID / unique store IDs = Future.</p>
                     </div>
                 </div>
 
@@ -688,9 +690,11 @@
                     calibPoints.push([x, y]);
                     if (calibPoints.length === 2) {
                         const id = 'tripwire_' + Date.now();
+                        const suggested = 'Entrance / Exit';
+                        const named = (window.prompt('Tripwire name (e.g. Main door, Side exit)', suggested) || suggested).trim() || suggested;
                         calibLines.push({
                             id: id,
-                            name: id,
+                            name: named,
                             line: [calibPoints[0], calibPoints[1]],
                             in_direction: document.getElementById('calib-direction').value
                         });
@@ -733,9 +737,14 @@
                 return;
             }
             const zoneType = ZONE_TYPES[calibMode].type;
+            const defaultName = ZONE_TYPES[calibMode].name;
+            const hint = zoneType === 'staff'
+                ? 'Staff zone name (e.g. Behind counter)'
+                : (zoneType === 'queue' ? 'Queue zone name (e.g. Checkout lane 1)' : 'Dwell zone name (e.g. Hero display)');
+            const named = (window.prompt(hint, defaultName) || defaultName).trim() || defaultName;
             calibPolygons.push({
                 id: zoneType + '_zone_' + Date.now(),
-                name: ZONE_TYPES[calibMode].name,
+                name: named,
                 polygon: [...calibPoints],
                 type: zoneType
             });
@@ -755,14 +764,31 @@
         }
 
         function shapeRow(kind, name, detail, type, idx) {
-            return `<div class="flex items-center justify-between bg-[#0E1420] border border-surface-border rounded-lg px-3 py-2 text-xs">
-                <div class="flex items-center space-x-3">
+            return `<div class="flex items-center justify-between gap-2 bg-[#0E1420] border border-surface-border rounded-lg px-3 py-2 text-xs">
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0">
                     <span class="text-emerald-400 font-semibold">${escapeHtml(kind)}</span>
-                    <span class="text-white font-mono">${escapeHtml(name)}</span>
+                    <span class="text-white font-mono truncate">${escapeHtml(name)}</span>
                     <span class="text-gray-500">${escapeHtml(detail)}</span>
                 </div>
-                <button onclick="removeCalibShape('${type}', ${idx})" class="text-red-400 hover:text-red-300 font-semibold">Remove</button>
+                <div class="flex items-center gap-2 shrink-0">
+                    <button onclick="renameCalibShape('${type}', ${idx})" class="text-sky-400 hover:text-sky-300 font-semibold">Rename</button>
+                    <button onclick="removeCalibShape('${type}', ${idx})" class="text-red-400 hover:text-red-300 font-semibold">Remove</button>
+                </div>
             </div>`;
+        }
+
+        function renameCalibShape(type, idx) {
+            if (type === 'tripwire') {
+                const cur = calibLines[idx];
+                if (!cur) return;
+                const named = window.prompt('Tripwire name', cur.name || cur.id);
+                if (named && named.trim()) { cur.name = named.trim(); redrawCalibration(); }
+            } else {
+                const cur = calibPolygons[idx];
+                if (!cur) return;
+                const named = window.prompt('Zone name', cur.name || cur.id);
+                if (named && named.trim()) { cur.name = named.trim(); redrawCalibration(); }
+            }
         }
 
         function renderShapeList() {

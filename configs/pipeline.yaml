@@ -125,16 +125,37 @@ models:
       - shopping cart
       - umbrella
 
+
+  # Soft body ReID (OSNet). Default OFF — DPDP / no face ReID / no multi-day gallery.
+  # Pack weights: models/pack/03-reid/osnet-x0_25/ or osnet-x0_5/.
+  # Cross-cam global_person_id still requires NTP + overlap + fusion (not shipped).
+  reid:
+    enabled: false
+    weights: "models/pack/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt"
+    # Prefer x0.5 when present by pointing weights at:
+    #   models/pack/03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth
+    device: "cpu"
+    interval_frames: 16       # sample embeddings slower than pose/face enrichment
+    max_crops_per_tick: 4
+    gallery_ttl_seconds: 3600
+
+multicam:
+  # Association window for *future* handoff fusion (not active until ReID+overlap wired).
+  association_window_seconds: 1.5
+  occupancy_mode: "sum"      # "sum" today · "consensus" only after fusion ships
+
 storage:
   db_path: "data/storage/edgesight.db"
   rollup_interval_seconds: 10
 
 telemetry:
-  # Production cloud: the Vercel-hosted EdgeSight ingest API. It writes to
-  # Neon Postgres and the Live Demo reads it back out.
+  # Cloud ingest (optional). Local Docker demos should rely on local_endpoint —
+  # Vercel marketing site does not accept edge rollups, so this will fail closed.
   cloud_endpoint: "https://adlabs-site.vercel.app/api/v1/telemetry"
-  # Local mirror: the FastAPI service on this machine, same schema.
+  # Local FastAPI ingest. Host-native runs use localhost; Docker Compose overrides
+  # via TELEMETRY_LOCAL_ENDPOINT=http://cloud-dashboard:8000/api/v1/telemetry
+  # (edge container localhost ≠ the cloud-dashboard service).
   local_endpoint: "http://localhost:8000/api/v1/telemetry"
-  push_interval_seconds: 10
+  push_interval_seconds: 5
   retry_backoff_seconds: 3
 

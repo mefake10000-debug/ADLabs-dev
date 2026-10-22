@@ -29,6 +29,7 @@ from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
 from src.visualizer.debug_overlay import DebugOverlay
+from src.perception.reid import SoftReIdExtractor, SoftReIdGallery
 
 try:
     import cv2
@@ -57,8 +58,14 @@ class EdgePipeline:
         self.frames_dir = os.path.join(os.path.dirname(db_path), "frames")
         os.makedirs(self.frames_dir, exist_ok=True)
 
-        cloud_endpoint = self.pipeline_cfg.get("telemetry", {}).get("cloud_endpoint", "http://localhost:8000/api/v1/telemetry")
-        local_endpoint = self.pipeline_cfg.get("telemetry", {}).get("local_endpoint", "http://localhost:8000/api/v1/telemetry")
+        cloud_endpoint = (
+            os.environ.get("TELEMETRY_CLOUD_ENDPOINT")
+            or self.pipeline_cfg.get("telemetry", {}).get("cloud_endpoint", "http://localhost:8000/api/v1/telemetry")
+        )
+        local_endpoint = (
+            os.environ.get("TELEMETRY_LOCAL_ENDPOINT")
+            or self.pipeline_cfg.get("telemetry", {}).get("local_endpoint", "http://localhost:8000/api/v1/telemetry")
+        )
         self.exporter = TelemetryExporter(
             local_buffer=self.local_buffer,
             cloud_endpoint=cloud_endpoint,
@@ -71,6 +78,9 @@ class EdgePipeline:
         self.heatmaps_dir = os.path.join(os.path.dirname(db_path), "heatmaps")
         os.makedirs(self.heatmaps_dir, exist_ok=True)
         self.heatmap_write_seconds = self.pipeline_cfg.get("analytics", {}).get("heatmap_write_seconds", 10.0)
+        # Frame-synced live JSON for the portal (same cadence as annotated JPEG export).
+        self.live_dir = os.path.join(os.path.dirname(db_path), "live")
+        os.makedirs(self.live_dir, exist_ok=True)
 
         # Perception model (shared across cameras to optimize memory)
         p_cfg = self.pipeline_cfg.get("perception", {})
@@ -129,6 +139,17 @@ class EdgePipeline:
 
         if self.models_enabled:
             self._init_enrichment_models()
+
+        reid_cfg = (self.models_cfg.get("reid") or {}) if getattr(self, "models_cfg", None) is not None else {}
+        self.reid_extractor = SoftReIdExtractor(
+            weights=reid_cfg.get("weights"),
+            device=str(reid_cfg.get("device", "cpu")),
+            enabled=bool(reid_cfg.get("enabled", False)),
+            base_dir=os.getcwd(),
+        )
+        self.reid_gallery = SoftReIdGallery(
+            max_age_seconds=float(reid_cfg.get("gallery_ttl_seconds", 3600)),
+        )
 
         # Camera context pipelines
         self.camera_contexts: Dict[str, Dict[str, Any]] = {}
@@ -428,8 +449,12 @@ class EdgePipeline:
                     if item is None:
                         continue
 
-                    frame_idx, frame_time, frame = item
+                    frame_idx, stamp, frame = item
+                    # stamp.utc = wall clock (tripwire/zones); stamp.mono = interval-safe
+                    frame_time = stamp.utc if hasattr(stamp, "utc") else float(stamp)
                     ctx["frames_processed"] += 1
+                    ctx["last_capture_ts_utc"] = frame_time
+                    ctx["last_capture_ts_mono"] = getattr(stamp, "mono", frame_time)
 
                     # Publish the frame for the enrichment tier. The slow worker runs
                     # in its own thread, so it gets its own copy: the debug overlay
@@ -510,6 +535,13 @@ class EdgePipeline:
                             os.replace(tmp_path, frame_path)
                         except Exception as e:
                             logger.debug(f"Frame export error for {cam_id}: {e}")
+
+                    # 4b. Frame-synced live JSON (portal KPIs tick with the YOLO overlay)
+                    if ctx["frames_processed"] % 2 == 0:
+                        try:
+                            self._write_live_snapshot(cam_id, ctx, frame_time)
+                        except Exception as e:
+                            logger.debug(f"Live snapshot error for {cam_id}: {e}")
 
                     # 5. Check for Periodic Rollup Export
                     if frame_time - ctx["last_rollup_time"] >= self.rollup_interval:
@@ -805,6 +837,180 @@ class EdgePipeline:
         except Exception as e:
             logger.debug(f"Heatmap export error for {cam_id}: {e}")
 
+
+    def _write_live_snapshot(self, cam_id: str, ctx: Dict[str, Any], frame_time: float):
+        """Writes the current in-memory analytics to disk for /api/v1/live.
+
+        Occupancy here is active customer tracks (matches the YOLO HUD), not tripwire
+        IN−OUT net — looping sample footage makes net occupancy misleading.
+        """
+        customers = list(ctx.get("current_active_tracks", []))
+        tripwire_in = sum(tw.in_count for tw in ctx.get("tripwires", []))
+        tripwire_out = sum(tw.out_count for tw in ctx.get("tripwires", []))
+
+        queue_len = 0
+        avg_wait = 0.0
+        alert_active = False
+        queues_out = []
+        for q in ctx.get("queues", []):
+            m = q.get_metrics()
+            queues_out.append({
+                "id": getattr(q, "zone_id", None) or getattr(q, "id", "queue"),
+                "name": getattr(q, "name", "queue"),
+                "queue_length": m.get("queue_length", 0),
+                "avg_wait_seconds": m.get("avg_wait_seconds", 0.0),
+                "alert_active": bool(m.get("alert_active")),
+            })
+            queue_len = max(queue_len, m.get("queue_length", 0))
+            avg_wait = max(avg_wait, m.get("avg_wait_seconds", 0.0))
+            alert_active = alert_active or bool(m.get("alert_active"))
+
+        zones_out = []
+        dwells = []
+        for z in ctx.get("zones", []):
+            m = z.get_metrics() if hasattr(z, "get_metrics") else {}
+            dwell = float(m.get("avg_dwell_seconds", 0.0) or 0.0)
+            if dwell > 0:
+                dwells.append(dwell)
+            zones_out.append({
+                "id": getattr(z, "zone_id", None) or getattr(z, "id", "zone"),
+                "name": getattr(z, "name", "zone"),
+                "type": getattr(z, "zone_type", None) or getattr(z, "type", "dwell"),
+                "occupancy": m.get("current_occupancy", m.get("occupancy", 0)),
+                "avg_dwell_seconds": dwell,
+            })
+
+        staff_zones = []
+        for z in ctx.get("staff_zones", []):
+            staff_zones.append({
+                "id": getattr(z, "zone_id", None) or getattr(z, "id", "staff"),
+                "name": getattr(z, "name", "staff"),
+                "type": "staff",
+                "tagged_ids": len(getattr(z, "active_tracks_in_zone", {}) or {}),
+            })
+
+        attention = ctx["attention"].snapshot() if ctx.get("attention") else {}
+        groups = ctx["groups"].snapshot() if ctx.get("groups") else {}
+
+        payload = {
+            "store_id": self.store_id,
+            "device_id": self.device_id,
+            "camera_id": cam_id,
+            "camera_name": ctx.get("name", cam_id),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "frame_time": frame_time,
+            "people_now": len(customers),
+            "staff_now": int(ctx.get("staff_visible", 0) or 0),
+            "unique_tracks_today": len(ctx.get("tracked_ids_today", set())),
+            "total_visitors": tripwire_in,
+            "total_exits": tripwire_out,
+            "net_occupancy": len(customers),
+            "avg_dwell_seconds": round(sum(dwells) / len(dwells), 1) if dwells else (
+                round(
+                    sum(t.last_seen - t.first_seen for t in customers) / len(customers),
+                    1,
+                )
+                if customers
+                else 0.0
+            ),
+            "queue_length": queue_len,
+            "avg_queue_wait_seconds": round(avg_wait, 1),
+            "queue_alert_active": alert_active,
+            "decode_fps": round(float(getattr(ctx.get("reader"), "fps_actual", 0.0) or 0.0), 1),
+            "infer_fps": round(float(ctx.get("processed_fps", 0.0) or 0.0), 1),
+            "tripwires": [
+                {
+                    "id": getattr(tw, "wire_id", None) or getattr(tw, "id", "tw"),
+                    "name": getattr(tw, "name", "tripwire"),
+                    "in_count": tw.in_count,
+                    "out_count": tw.out_count,
+                }
+                for tw in ctx.get("tripwires", [])
+            ],
+            "queues": queues_out,
+            "zones": zones_out,
+            "staff_zones": staff_zones,
+            "engagement": {
+                "avg_attention_score": attention.get("avg_attention_score", 0.0),
+                "facing_ratio": attention.get("facing_ratio", 0.0),
+                "engaged_ratio": attention.get("engaged_ratio", 0.0),
+                "group_count": groups.get("group_count", 0),
+            },
+            "models": {
+                "person_detector": "yolo26s",
+                "tracker": "bytetrack",
+                "pose": bool(getattr(self, "pose_estimator", None)),
+                "face_boxes": bool(getattr(self, "face_detector", None)),
+                "face_identity": False,
+                "note": "Face boxes used for k-anon age/gender only — no face ID product",
+            },
+            "track_ids": [t.track_id for t in customers[:40]],
+        }
+
+        cam_path = os.path.join(self.live_dir, f"{cam_id}.json")
+        tmp_path = os.path.join(self.live_dir, f"{cam_id}.tmp.json")
+        with open(tmp_path, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp_path, cam_path)
+
+        # Store-wide aggregate (sum of per-cam snapshots on disk)
+        store = {
+            "store_id": self.store_id,
+            "device_id": self.device_id,
+            "timestamp": payload["timestamp"],
+            "cameras": [],
+            "people_now": 0,
+            "staff_now": 0,
+            "total_visitors": 0,
+            "total_exits": 0,
+            "net_occupancy": 0,
+            "queue_length": 0,
+            "avg_queue_wait_seconds": 0.0,
+            "queue_alert_active": False,
+            "avg_dwell_seconds": 0.0,
+            "decode_fps": payload["decode_fps"],
+            "infer_fps": payload["infer_fps"],
+            "source": "live_snapshot",
+            "models": payload.get("models"),
+            "engagement": payload.get("engagement"),
+        }
+        dwell_acc = []
+        for name in os.listdir(self.live_dir):
+            if not name.endswith(".json") or name.startswith("store") or name.endswith(".tmp.json"):
+                continue
+            try:
+                with open(os.path.join(self.live_dir, name)) as f:
+                    row = json.load(f)
+            except Exception:
+                continue
+            store["cameras"].append(row.get("camera_id"))
+            store["people_now"] += int(row.get("people_now", 0) or 0)
+            store["staff_now"] += int(row.get("staff_now", 0) or 0)
+            store["total_visitors"] += int(row.get("total_visitors", 0) or 0)
+            store["total_exits"] += int(row.get("total_exits", 0) or 0)
+            store["net_occupancy"] += int(row.get("net_occupancy", 0) or 0)
+            store["queue_length"] = max(store["queue_length"], int(row.get("queue_length", 0) or 0))
+            store["avg_queue_wait_seconds"] = max(
+                store["avg_queue_wait_seconds"],
+                float(row.get("avg_queue_wait_seconds", 0) or 0),
+            )
+            store["queue_alert_active"] = store["queue_alert_active"] or bool(row.get("queue_alert_active"))
+            if row.get("avg_dwell_seconds"):
+                dwell_acc.append(float(row["avg_dwell_seconds"]))
+            store["infer_fps"] = max(store["infer_fps"], float(row.get("infer_fps", 0) or 0))
+            store["decode_fps"] = max(store["decode_fps"], float(row.get("decode_fps", 0) or 0))
+            if row.get("models"):
+                store["models"] = row["models"]
+            if row.get("engagement"):
+                store["engagement"] = row["engagement"]
+        if dwell_acc:
+            store["avg_dwell_seconds"] = round(sum(dwell_acc) / len(dwell_acc), 1)
+
+        store_tmp = os.path.join(self.live_dir, "store.tmp.json")
+        store_path = os.path.join(self.live_dir, "store.json")
+        with open(store_tmp, "w") as f:
+            json.dump(store, f)
+        os.replace(store_tmp, store_path)
 
     def _persist_crossing_events(self, cam_id: str, events: List[Dict[str, Any]]):
         """Persists individual tripwire crossings as durable events, independent of

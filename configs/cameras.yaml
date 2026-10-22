@@ -46,3 +46,37 @@ cameras:
     - - 124.0
       - 597.0
     type: staff
+
+- id: cam_checkout_01
+  name: Checkout Floor
+  source: data/sample_videos/checkout_sample.mp4
+  fps_target: 12
+  resolution:
+  - 1270
+  - 720
+  tripwires: []
+  zones:
+  - id: queue_zone_checkout_01
+    name: Checkout Queue
+    type: queue
+    polygon:
+    - - 200.0
+      - 400.0
+    - - 600.0
+      - 400.0
+    - - 600.0
+      - 700.0
+    - - 200.0
+      - 700.0
+  - id: staff_zone_checkout_01
+    name: Staff Counter
+    type: staff
+    polygon:
+    - - 50.0
+      - 100.0
+    - - 280.0
+      - 100.0
+    - - 280.0
+      - 350.0
+    - - 50.0
+      - 350.0

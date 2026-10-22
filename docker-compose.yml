@@ -49,6 +49,10 @@ services:
       - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
       # Optional override if CLIP lives elsewhere; default path matches the mount above.
       - CLIP_WEIGHTS_PATH=${CLIP_WEIGHTS_PATH:-/app/weights/clip/ViT-B-32.pt}
+      # Edge → API telemetry must use Compose DNS. localhost:8000 inside this container is empty.
+      - TELEMETRY_LOCAL_ENDPOINT=${TELEMETRY_LOCAL_ENDPOINT:-http://cloud-dashboard:8000/api/v1/telemetry}
+      # Prefer local ingest for Docker demos (cloud Vercel path is optional / often 404).
+      - TELEMETRY_CLOUD_ENDPOINT=${TELEMETRY_CLOUD_ENDPOINT:-http://cloud-dashboard:8000/api/v1/telemetry}
     restart: unless-stopped
 
   # 3. Cloud Telemetry Ingestion & Web Analytics Dashboard

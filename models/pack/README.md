@@ -31,6 +31,10 @@ pack/
 |------|------|--------|-----|
 | `01-detection/yolo26n/yolo26n.pt` | Doorway-only fast detector | **Present** (~5.3MB) · not prod-wired | [ultralytics yolo26n](https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt) |
 | `03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt` | Soft ReID backbone | **Present** (~2.9MB) · default-off | [HF osnet_x0_25](https://huggingface.co/paulosantiago/osnet_x0_25_msmt17/resolve/main/osnet_x0_25_msmt17.pt) |
+| `03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth` | Stronger soft ReID | **Present** (~11MB) · default-off | [HF kaiyangzhou/osnet](https://huggingface.co/kaiyangzhou/osnet) |
+| `05-seg/yolo26m-seg/yolo26m-seg.pt` | Foot-mask salvage | **Present** (mirror) · not prod-wired | ultralytics |
+| `07-openvocab/yolov8s-worldv2.pt` | Shelf/category OV | **Present** (mirror of prod) | ultralytics |
+| `06-clip/` | CLIP ViT-B-32 pointer | Use `weights/clip/` | OpenAI CLIP |
 | `02-tracking/` | OC-SORT / BoT-SORT | **Missing weight N/A** · code deps only | — |
 | `04-attributes/` | Demographics pointer | Use `models/onnx/` (Live) | via `download_models.py` |
 | `05-seg/` | Foot-mask salvage | Use prod `yolo26m-seg.pt` | [yolo26m-seg](https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m-seg.pt) |

@@ -315,9 +315,46 @@ def get_events(store_id: str = "store_mumbai_001", camera_id: Optional[str] = No
         rows = conn.execute(query, params).fetchall()
         return {"events": [dict(r) for r in reversed(rows)]}
 
+def _live_dir() -> str:
+    return os.path.join(os.path.dirname(DB_PATH), "live")
+
+
+def _read_live_snapshot(camera_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Frame-synced JSON written by edge-analyzer (matches YOLO overlay people counts)."""
+    live_dir = _live_dir()
+    path = os.path.join(live_dir, f"{camera_id}.json" if camera_id else "store.json")
+    if not os.path.exists(path):
+        if camera_id:
+            return None
+        if not os.path.isdir(live_dir):
+            return None
+        for name in sorted(os.listdir(live_dir)):
+            if name.endswith(".json") and not name.endswith(".tmp.json") and name != "store.json":
+                path = os.path.join(live_dir, name)
+                break
+        else:
+            return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        ts = data.get("timestamp")
+        if ts:
+            try:
+                age = time.time() - time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+                if age > 15:
+                    data["_stale"] = True
+            except Exception:
+                pass
+        return data
+    except Exception:
+        return None
+
+
 # Live Store Telemetry
 @app.get("/api/v1/live")
 def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None):
+    snap = _read_live_snapshot(camera_id)
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
 
@@ -366,7 +403,21 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         if total_in == 0 and latest_rows:
             total_in = latest_in_count_fallback
 
-        return {
+        # Per-camera freshness for multi-cam honesty (store occupancy still SUMs cams —
+        # not deduplicated until ReID + handoff fusion + consensus ship).
+        per_camera = []
+        for r in latest_rows:
+            per_camera.append({
+                "camera_id": r["camera_id"],
+                "occupancy": r["current_occupancy"],
+                "queue_length": r["queue_length"],
+                "avg_dwell_seconds": r["avg_dwell_seconds"],
+                "in_count": r["in_count"],
+                "out_count": r["out_count"],
+                "last_rollup_at": r["timestamp_end"] if "timestamp_end" in r.keys() else r["received_at"],
+            })
+
+        result = {
             "store_id": store_id,
             "camera_id": camera_id,
             "total_visitors": total_in,
@@ -376,8 +427,84 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
             "queue_length": queue_length,
             "avg_queue_wait_seconds": avg_queue_wait_seconds,
             "queue_alert_active": queue_alert_active,
-            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
+            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "occupancy_mode": "sum",
+            "occupancy_note": "Store occupancy sums per-camera rollups; overlapping FOVs double-count until consensus ships.",
+            "per_camera": per_camera,
+            "source": "telemetry_rollups",
         }
+
+        # Prefer frame-synced snapshot when fresh — numbers match the YOLO MJPEG HUD.
+        if snap and not snap.get("_stale"):
+            result.update({
+                "total_visitors": int(snap.get("total_visitors", result["total_visitors"]) or result["total_visitors"]),
+                "total_exits": int(snap.get("total_exits", result["total_exits"]) or result["total_exits"]),
+                "net_occupancy": int(snap.get("net_occupancy", snap.get("people_now", result["net_occupancy"])) or 0),
+                "people_now": int(snap.get("people_now", 0) or 0),
+                "staff_now": int(snap.get("staff_now", 0) or 0),
+                "avg_dwell_seconds": float(snap.get("avg_dwell_seconds", result["avg_dwell_seconds"]) or 0),
+                "queue_length": int(snap.get("queue_length", result["queue_length"]) or 0),
+                "avg_queue_wait_seconds": float(
+                    snap.get("avg_queue_wait_seconds", result["avg_queue_wait_seconds"]) or 0
+                ),
+                "queue_alert_active": bool(snap.get("queue_alert_active", result["queue_alert_active"])),
+                "infer_fps": snap.get("infer_fps"),
+                "decode_fps": snap.get("decode_fps"),
+                "last_updated": snap.get("timestamp") or result["last_updated"],
+                "source": "live_snapshot",
+                "occupancy_mode": "active_tracks",
+                "occupancy_note": (
+                    "people_now = active customer tracks (matches YOLO overlay). "
+                    "Tripwire IN/OUT are cumulative. Multi-cam still sums cameras."
+                ),
+                "models": snap.get("models"),
+                "engagement": snap.get("engagement"),
+                "cameras": snap.get("cameras"),
+            })
+        elif snap and snap.get("_stale"):
+            result["snapshot_stale"] = True
+
+        # Prefer per-camera rows from frame-synced files when present (fresher than rollups).
+        live_dir = _live_dir()
+        if os.path.isdir(live_dir):
+            snap_cams = []
+            for name in sorted(os.listdir(live_dir)):
+                if not name.endswith(".json") or name in ("store.json",) or name.endswith(".tmp.json"):
+                    continue
+                try:
+                    with open(os.path.join(live_dir, name)) as f:
+                        row = json.load(f)
+                except Exception:
+                    continue
+                if camera_id and row.get("camera_id") != camera_id:
+                    continue
+                snap_cams.append({
+                    "camera_id": row.get("camera_id"),
+                    "occupancy": row.get("people_now", row.get("net_occupancy", 0)),
+                    "queue_length": row.get("queue_length", 0),
+                    "avg_dwell_seconds": row.get("avg_dwell_seconds", 0),
+                    "in_count": row.get("total_visitors", 0),
+                    "out_count": row.get("total_exits", 0),
+                    "last_rollup_at": row.get("timestamp"),
+                    "infer_fps": row.get("infer_fps"),
+                    "source": "live_snapshot",
+                })
+            if snap_cams:
+                result["per_camera"] = snap_cams
+
+        return result
+
+
+@app.get("/api/v1/live/snapshot")
+def get_live_snapshot(camera_id: Optional[str] = None):
+    """Raw frame-synced live JSON (YOLO overlay companion)."""
+    snap = _read_live_snapshot(camera_id)
+    if not snap:
+        raise HTTPException(
+            status_code=404,
+            detail="No live snapshot yet — is edge-analyzer processing video?",
+        )
+    return snap
 
 # Metric Reset Endpoint (Clears accumulated test telemetry)
 @app.post("/api/v1/metrics/reset")
@@ -832,13 +959,34 @@ def get_device_health():
     except ImportError:
         cpu = 14.2
         mem = 38.5
+    # clock_sync.ntp_ok stays null until chrony/systemd-timesyncd is verified on the host.
+    # Frame stamps use host wall + monotonic; do not treat association windows as NTP-safe yet.
+    snap = _read_live_snapshot()
+    pipeline_fps = 13.8
+    if snap and snap.get("infer_fps") is not None:
+        pipeline_fps = float(snap.get("infer_fps") or 0)
+    elif snap and snap.get("decode_fps") is not None:
+        pipeline_fps = float(snap.get("decode_fps") or 0)
     return {
         "device_id": "edge_node_macmini_01",
         "device_name": "Apple Silicon Mac mini (Edge Node)",
         "cpu_usage_percent": cpu,
         "memory_usage_percent": mem,
         "inference_engine": "Core ML / ONNX Runtime FP16",
-        "pipeline_fps": 13.8,
+        "pipeline_fps": pipeline_fps,
+        "decode_fps": snap.get("decode_fps") if snap else None,
+        "infer_fps": snap.get("infer_fps") if snap else None,
+        "people_now": snap.get("people_now") if snap else None,
         "status": "Healthy (Online)",
-        "server_time": time.strftime("%Y-%m-%d %H:%M:%S")
+        "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "live_source": "live_snapshot" if snap and not snap.get("_stale") else "none",
+        "clock_sync": {
+            "ntp_ok": None,
+            "max_estimated_skew_ms": None,
+            "note": "Host NTP not probed yet. Frames carry capture_ts_utc (wall) + capture_ts_mono.",
+        },
+        "reid": {
+            "cross_cam_fusion": False,
+            "note": "Soft OSNet pack weight may be on disk; fusion / global_person_id is Future.",
+        },
     }

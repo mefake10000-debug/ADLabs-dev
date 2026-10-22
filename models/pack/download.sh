@@ -25,4 +25,19 @@ download \
   "$ROOT/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt" \
   2000000
 
-echo "Pack download complete."
+download \
+  "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_5_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth" \
+  "$ROOT/03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth" \
+  8000000
+
+download \
+  "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m-seg.pt" \
+  "$ROOT/05-seg/yolo26m-seg/yolo26m-seg.pt" \
+  40000000
+
+download \
+  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt" \
+  "$ROOT/07-openvocab/yolov8s-worldv2.pt" \
+  20000000
+
+echo "Pack download complete. CLIP stays at repos/ADLabs-dev/weights/clip/ViT-B-32.pt (see pack/06-clip/README.md)."
