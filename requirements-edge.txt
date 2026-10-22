@@ -20,3 +20,6 @@ onnxruntime==1.31.0
 # Build-time only: scripts/download_models.py uses it to quantize the demographic model to INT8.
 # Not imported by the running pipeline.
 onnx>=1.16.0
+# YOLO-World open-vocab class encoding (weights still under weights/clip/; avoids git+CLIP in Docker).
+openai-clip==1.0.1
+ftfy>=6.1.0
