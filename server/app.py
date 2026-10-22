@@ -13,6 +13,7 @@ except ImportError:
     yaml = None
 
 from fastapi import FastAPI, HTTPException, Request, Body
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -20,6 +21,24 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger("EdgeSight-API")
 app = FastAPI(title="AD Labs EdgeSight Enterprise Platform", version="2.0.0")
+
+# Allow the Next.js marketing dashboard (localhost:3000) to call EdgeSight directly
+# when operators bypass the site's /api/edgesight proxy. Override via EDGESIGHT_CORS_ORIGINS.
+_cors_origins = [
+    o.strip()
+    for o in os.environ.get(
+        "EDGESIGHT_CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "X-API-Key"],
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
