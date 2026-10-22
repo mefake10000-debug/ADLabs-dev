@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 logger = logging.getLogger("EdgeSight-API")
 app = FastAPI(title="AD Labs EdgeSight Enterprise Platform", version="2.0.0")
 
+
 # Allow the Next.js marketing dashboard (localhost:3000) to call EdgeSight directly
 # when operators bypass the site's /api/edgesight proxy. Override via EDGESIGHT_CORS_ORIGINS.
 _cors_origins = [
@@ -39,6 +40,7 @@ app.add_middleware(
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["Accept", "Content-Type", "X-API-Key"],
 )
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
@@ -79,13 +81,10 @@ def _redact_source(source: Optional[str]) -> Optional[str]:
     return re.sub(r'(rtsps?://)[^@/\s]+@', r'\1****:****@', source)
 
 def _redact_camera(cam: Dict[str, Any]) -> Dict[str, Any]:
-    if "source" not in cam and "calibrations" not in cam:
+    if "source" not in cam:
         return cam
     redacted = dict(cam)
-    if "source" in redacted:
-        redacted["source"] = _redact_source(redacted["source"])
-    # Keyed by source, so an RTSP URL's password would leak through the keys; clients don't need it.
-    redacted.pop("calibrations", None)
+    redacted["source"] = _redact_source(redacted["source"])
     return redacted
 
 def init_db():
@@ -121,17 +120,46 @@ def init_db():
             received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
-        # The dashboard re-runs these queries every 5s. Without indexes each one scanned the whole
-        # table (~0.7-0.9s at 31k rows on a Docker bind mount), making a refresh slower than the
-        # refresh interval -- the page then stayed permanently mid-refresh and faded.
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rollups_store_camera ON telemetry_rollups (store_id, camera_id, id)")
-        # Covering: today's totals and the hourly summary are answered from the index alone.
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rollups_store_received_cover ON telemetry_rollups "
                      "(store_id, received_at, camera_id, in_count, out_count, avg_dwell_seconds)")
-        # Newest-first history for the whole store (with a camera filter, idx_rollups_store_camera serves).
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rollups_store_id ON telemetry_rollups (store_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_store_camera ON telemetry_events (store_id, camera_id, id)")
+
+        # Enrichment columns (engagement / groups / demographics) are added by
+        # migration rather than by editing the CREATE above, so an existing cloud
+        # database keeps its rows.
+        _add_column(conn, "telemetry_rollups", "avg_attention_score", "REAL")
+        _add_column(conn, "telemetry_rollups", "facing_ratio", "REAL")
+        _add_column(conn, "telemetry_rollups", "phone_usage_rate", "REAL")
+        _add_column(conn, "telemetry_rollups", "engaged_ratio", "REAL")
+        _add_column(conn, "telemetry_rollups", "group_count", "INTEGER")
+        _add_column(conn, "telemetry_rollups", "people_in_groups", "INTEGER")
+        _add_column(conn, "telemetry_rollups", "demographics_json", "TEXT")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS telemetry_products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_id TEXT,
+            device_id TEXT,
+            camera_id TEXT,
+            category TEXT,
+            viewers INTEGER,
+            detections INTEGER,
+            total_dwell_seconds REAL,
+            avg_dwell_seconds REAL,
+            timestamp_start TEXT,
+            timestamp_end TEXT,
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
         conn.commit()
+
+def _add_column(conn, table: str, column: str, column_type: str):
+    """Adds a column if it is missing. Safe to run on every boot."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 init_db()
 
@@ -149,6 +177,15 @@ class RollupItem(BaseModel):
     queue_length: int
     avg_queue_wait_seconds: float
     queue_alert_active: int
+    # Enrichment tier. All optional: an edge node running the fast tier only will
+    # send nulls here.
+    avg_attention_score: Optional[float] = None
+    facing_ratio: Optional[float] = None
+    phone_usage_rate: Optional[float] = None
+    engaged_ratio: Optional[float] = None
+    group_count: Optional[int] = None
+    people_in_groups: Optional[int] = None
+    demographics_json: Optional[str] = None
 
 class TelemetryPayload(BaseModel):
     batch_size: int
@@ -168,6 +205,30 @@ class EventItem(BaseModel):
 class EventBatchPayload(BaseModel):
     batch_size: int
     events: List[EventItem]
+    exported_at: float
+
+class ProductInterestItem(BaseModel):
+    """One category's interest over one rollup window.
+
+    This is an aggregate: a category name, how many distinct shoppers were near it,
+    how many times it was detected and how long they lingered. There is no face,
+    no image and no person-level row anywhere in this payload.
+    """
+    id: Optional[int] = None
+    store_id: str
+    device_id: str
+    camera_id: str
+    category: str
+    viewers: int
+    detections: int
+    total_dwell_seconds: float
+    avg_dwell_seconds: float
+    timestamp_start: str
+    timestamp_end: str
+
+class ProductBatchPayload(BaseModel):
+    batch_size: int
+    products: List[ProductInterestItem]
     exported_at: float
 
 # Web App Entrypoint (Structured Production SPA)
@@ -193,15 +254,36 @@ def receive_telemetry(payload: TelemetryPayload):
             INSERT INTO telemetry_rollups (
                 store_id, device_id, camera_id, timestamp_start, timestamp_end,
                 in_count, out_count, current_occupancy, avg_dwell_seconds,
-                queue_length, avg_queue_wait_seconds, queue_alert_active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                queue_length, avg_queue_wait_seconds, queue_alert_active,
+                avg_attention_score, facing_ratio, phone_usage_rate, engaged_ratio,
+                group_count, people_in_groups, demographics_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 r.store_id, r.device_id, r.camera_id, r.timestamp_start, r.timestamp_end,
                 r.in_count, r.out_count, r.current_occupancy, r.avg_dwell_seconds,
-                r.queue_length, r.avg_queue_wait_seconds, r.queue_alert_active
+                r.queue_length, r.avg_queue_wait_seconds, r.queue_alert_active,
+                r.avg_attention_score, r.facing_ratio, r.phone_usage_rate, r.engaged_ratio,
+                r.group_count, r.people_in_groups, r.demographics_json
             ))
         conn.commit()
     return {"status": "success", "processed_records": len(payload.rollups)}
+
+# Product Interest Sync Endpoint (per-category aggregates, no person-level data)
+@app.post("/api/v1/telemetry/products")
+def receive_products(payload: ProductBatchPayload):
+    with sqlite3.connect(DB_PATH) as conn:
+        for p in payload.products:
+            conn.execute("""
+            INSERT INTO telemetry_products (
+                store_id, device_id, camera_id, category, viewers, detections,
+                total_dwell_seconds, avg_dwell_seconds, timestamp_start, timestamp_end
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                p.store_id, p.device_id, p.camera_id, p.category, p.viewers, p.detections,
+                p.total_dwell_seconds, p.avg_dwell_seconds, p.timestamp_start, p.timestamp_end
+            ))
+        conn.commit()
+    return {"status": "success", "processed_records": len(payload.products)}
 
 # Per-Crossing Event Sync Endpoint (durable, independent of rollup aggregation)
 @app.post("/api/v1/telemetry/events")
@@ -268,7 +350,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         footfall_query = """
         SELECT SUM(in_count) as total_visitors, SUM(out_count) as total_exits, AVG(avg_dwell_seconds) as avg_dwell
         FROM telemetry_rollups
-        WHERE store_id = ? AND received_at >= date('now') AND received_at < date('now', '+1 day')
+        WHERE store_id = ? AND date(received_at) = date('now')
         """
         footfall_params: List[Any] = [store_id]
         if camera_id:
@@ -322,13 +404,11 @@ def get_history(
         if camera_id:
             query += " AND camera_id = ?"
             params.append(camera_id)
-        # "+received_at" stops SQLite planning around the date range: it's ~150x faster to walk the
-        # store's newest rows (idx_rollups_store_id / _store_camera) and stop at the limit.
         if start_date:
-            query += " AND +received_at >= date(?)"
+            query += " AND date(received_at) >= date(?)"
             params.append(start_date)
         if end_date:
-            query += " AND +received_at < date(?, '+1 day')"
+            query += " AND date(received_at) <= date(?)"
             params.append(end_date)
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
@@ -357,10 +437,10 @@ def get_analytics_summary(
             query += " AND camera_id = ?"
             params.append(camera_id)
         if start_date:
-            query += " AND received_at >= date(?)"
+            query += " AND date(received_at) >= date(?)"
             params.append(start_date)
         if end_date:
-            query += " AND received_at < date(?, '+1 day')"
+            query += " AND date(received_at) <= date(?)"
             params.append(end_date)
         query += " GROUP BY hour_bucket ORDER BY hour_bucket ASC"
         rows = conn.execute(query, params).fetchall()
@@ -388,6 +468,159 @@ def get_analytics_summary(
             "hourly_breakdown": hourly
         }
 
+# --- Enrichment analytics -------------------------------------------------------
+# Engagement, social grouping, population cohorts and product interest. These come
+# from the edge node's slow tier and are synced alongside the traffic rollups.
+
+@app.get("/api/v1/analytics/engagement")
+def get_engagement_analytics(
+    store_id: str = "store_mumbai_001",
+    camera_id: Optional[str] = None,
+    limit: int = 50
+):
+    """Attention, facing and phone-use rates over time."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        query = """
+        SELECT camera_id, timestamp_start, timestamp_end,
+               avg_attention_score, facing_ratio, phone_usage_rate, engaged_ratio,
+               group_count, people_in_groups, demographics_json
+        FROM telemetry_rollups
+        WHERE store_id = ? AND avg_attention_score IS NOT NULL
+        """
+        params: List[Any] = [store_id]
+        if camera_id:
+            query += " AND camera_id = ?"
+            params.append(camera_id)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+
+        series = []
+        for r in reversed(rows):
+            series.append({
+                "camera_id": r["camera_id"],
+                "timestamp_start": r["timestamp_start"],
+                "timestamp_end": r["timestamp_end"],
+                "avg_attention_score": r["avg_attention_score"],
+                "facing_ratio": r["facing_ratio"],
+                "phone_usage_rate": r["phone_usage_rate"],
+                "engaged_ratio": r["engaged_ratio"],
+                "group_count": r["group_count"],
+                "people_in_groups": r["people_in_groups"],
+            })
+
+        def _avg(field):
+            vals = [s[field] for s in series if s[field] is not None]
+            return round(sum(vals) / len(vals), 3) if vals else None
+
+        return {
+            "store_id": store_id,
+            "camera_id": camera_id,
+            "windows": len(series),
+            "avg_attention_score": _avg("avg_attention_score"),
+            "avg_facing_ratio": _avg("facing_ratio"),
+            "avg_phone_usage_rate": _avg("phone_usage_rate"),
+            "avg_engaged_ratio": _avg("engaged_ratio"),
+            "avg_group_count": _avg("group_count"),
+            "series": series,
+        }
+
+@app.get("/api/v1/analytics/demographics")
+def get_demographics_analytics(
+    store_id: str = "store_mumbai_001",
+    camera_id: Optional[str] = None
+):
+    """The latest k-anonymous population cohorts for the store.
+
+    The edge node only sends cohorts that already cleared the k-anonymity
+    threshold, so everything in this response describes at least k individuals.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        query = """
+        SELECT camera_id, timestamp_start, timestamp_end, demographics_json
+        FROM telemetry_rollups
+        WHERE store_id = ? AND demographics_json IS NOT NULL AND demographics_json != ''
+        """
+        params: List[Any] = [store_id]
+        if camera_id:
+            query += " AND camera_id = ?"
+            params.append(camera_id)
+        query += " ORDER BY id DESC LIMIT 1"
+        row = conn.execute(query, params).fetchone()
+
+    if row is None:
+        return {
+            "store_id": store_id,
+            "camera_id": camera_id,
+            "available": False,
+            "reason": "no k-anonymous cohorts have been synced yet",
+            "demographics": None,
+        }
+
+    try:
+        payload = json.loads(row["demographics_json"])
+    except (TypeError, ValueError):
+        payload = None
+
+    return {
+        "store_id": store_id,
+        "camera_id": row["camera_id"],
+        "available": payload is not None,
+        "timestamp_start": row["timestamp_start"],
+        "timestamp_end": row["timestamp_end"],
+        "demographics": payload,
+    }
+
+@app.get("/api/v1/analytics/products")
+def get_product_analytics(
+    store_id: str = "store_mumbai_001",
+    camera_id: Optional[str] = None,
+    hours: int = 24,
+    limit: int = 100
+):
+    """Per-category product interest: viewers, detections and dwell time."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        query = """
+        SELECT category,
+               SUM(viewers) AS viewers,
+               SUM(detections) AS detections,
+               SUM(total_dwell_seconds) AS total_dwell_seconds,
+               COUNT(*) AS windows
+        FROM telemetry_products
+        WHERE store_id = ?
+          AND datetime(received_at) >= datetime('now', ?)
+        """
+        params: List[Any] = [store_id, f"-{int(hours)} hours"]
+        if camera_id:
+            query += " AND camera_id = ?"
+            params.append(camera_id)
+        query += " GROUP BY category ORDER BY total_dwell_seconds DESC, viewers DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+
+        categories = []
+        for r in rows:
+            windows = r["windows"] or 0
+            total_dwell = r["total_dwell_seconds"] or 0.0
+            categories.append({
+                "category": r["category"],
+                "viewers": r["viewers"] or 0,
+                "detections": r["detections"] or 0,
+                "total_dwell_seconds": round(total_dwell, 1),
+                "avg_dwell_seconds": round(total_dwell / windows, 1) if windows else 0.0,
+                "windows": windows,
+            })
+
+        return {
+            "store_id": store_id,
+            "camera_id": camera_id,
+            "hours": hours,
+            "categories": categories,
+        }
+
 # Camera Discovery Endpoint
 @app.get("/api/v1/cameras")
 def list_cameras():
@@ -413,8 +646,8 @@ def get_snapshot(camera_id: str):
         data = f.read()
     return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
-# Floor heatmap: where customers have spent time since the camera's pipeline started
-# (written by the edge every analytics.heatmap_write_seconds)
+# Live Fluid Video Stream (MJPEG)
+
 @app.get("/api/v1/heatmap/{camera_id}")
 def get_heatmap(camera_id: str):
     path = os.path.join(os.path.dirname(DB_PATH), "heatmaps", f"{camera_id}.jpg")
@@ -424,7 +657,6 @@ def get_heatmap(camera_id: str):
         data = f.read()
     return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
-# Live Fluid Video Stream (MJPEG)
 @app.get("/api/v1/stream/{camera_id}")
 def get_stream(camera_id: str):
     frames_dir = os.path.join(os.path.dirname(DB_PATH), "frames")
@@ -547,8 +779,8 @@ class ZoneConfig(BaseModel):
     @field_validator("type")
     @classmethod
     def _type(cls, v):
-        if v not in ("dwell", "queue", "staff"):
-            raise ValueError("zone type must be 'dwell', 'queue' or 'staff'")
+        if v not in ("dwell", "queue"):
+            raise ValueError("zone type must be 'dwell' or 'queue'")
         return v
 
 class CalibrationUpdate(BaseModel):
@@ -560,38 +792,15 @@ class CalibrationUpdate(BaseModel):
 def list_video_sources():
     if not os.path.isdir(VIDEO_DIR):
         return {"video_dir": VIDEO_DIR, "videos": []}
-    # Subfolders included, so footage can be kept per source (e.g. sample_videos/garage/).
-    videos = sorted(
-        os.path.relpath(os.path.join(root, f), VIDEO_DIR).replace("\\", "/")
-        for root, _, files in os.walk(VIDEO_DIR) for f in files if f.lower().endswith(VIDEO_EXTS)
-    )
+    videos = sorted(f for f in os.listdir(VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS))
     return {"video_dir": VIDEO_DIR, "videos": [f"{VIDEO_DIR}/{f}" for f in videos]}
 
-def _swap_calibration(cam: Dict[str, Any], new_source: str):
-    """Tripwires/zones are drawn on one video, so each source keeps its own: park the current
-    source's shapes under `calibrations` and bring back the new source's (none if never drawn)."""
-    old_source = cam.get("source", "")
-    if old_source == new_source:
-        return
-    saved = cam.setdefault("calibrations", {})
-    current = {k: cam[k] for k in ("tripwires", "zones") if cam.get(k)}
-    if current:
-        saved[old_source] = current
-    else:
-        saved.pop(old_source, None)
-    restored = saved.pop(new_source, {})
-    cam["tripwires"] = restored.get("tripwires", [])
-    cam["zones"] = restored.get("zones", [])
-    if not saved:
-        del cam["calibrations"]
-
-# Switch one camera's input source, swapping in that source's own calibration; other cameras untouched
+# Switch one camera's input source without touching its calibration or other cameras
 @app.post("/api/v1/config/cameras/{camera_id}/source")
 def update_camera_source(camera_id: str, body: SourceUpdate):
     source = _validate_source(body.source)
     config = _read_config()
     cam = _find_camera(config, camera_id)
-    _swap_calibration(cam, source)
     cam["source"] = source
     if body.name:
         cam["name"] = body.name

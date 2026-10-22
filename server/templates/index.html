@@ -81,17 +81,23 @@
         </div>
 
         <!-- Edge Node Status Widget -->
-        <div class="p-4 border-t border-surface-border">
+        <div class="p-4 border-t border-surface-border space-y-3">
             <div class="bg-surface-card rounded-lg p-3 border border-surface-border">
                 <div class="flex items-center justify-between mb-2">
                     <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Edge Compute</span>
-                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-400">ONLINE</span>
+                    <span id="device-online-pill" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-400">ONLINE</span>
                 </div>
                 <div class="text-xs text-white font-medium mb-1" id="device-name">Apple Silicon Mac mini</div>
                 <div class="flex justify-between text-[11px] text-gray-400">
-                    <span>Inference: <strong class="text-gray-200" id="device-fps">13.8 FPS</strong></span>
-                    <span>CPU: <strong class="text-gray-200" id="device-cpu">14%</strong></span>
+                    <span>Inference: <strong class="text-gray-200" id="device-fps">— FPS</strong></span>
+                    <span>CPU: <strong class="text-gray-200" id="device-cpu">—%</strong></span>
                 </div>
+                <div class="mt-2 text-[10px] text-gray-500 leading-relaxed" id="device-engine">Core ML / ONNX · Edge or Cloud</div>
+            </div>
+            <div class="bg-surface-card rounded-lg p-3 border border-surface-border">
+                <div class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Cameras</div>
+                <div id="cam-strip" class="space-y-1.5 text-[11px] text-gray-300"><p class="text-gray-500">Loading…</p></div>
+                <p class="mt-2 text-[10px] text-gray-500 leading-relaxed">Cross-cam ReID / identity fusion is <strong class="text-amber-400/90">Future</strong> — occupancy today sums cameras without dedup.</p>
             </div>
         </div>
     </aside>
@@ -130,74 +136,80 @@
             <!-- ============================================== -->
             <!-- VIEW 1: LIVE VISION STUDIO                      -->
             <!-- ============================================== -->
-            <section id="view-live" class="tab-content active space-y-5">
-                <!-- Top Summary Ribbon -->
-                <div class="grid grid-cols-3 gap-5">
-                    <div class="bg-surface-card border border-surface-border rounded-xl p-5">
-                        <div class="text-xs font-semibold text-gray-400 mb-1">Live People Count</div>
-                        <div class="text-3xl font-bold text-cyan-400 flex items-baseline justify-between">
-                            <span id="kpi-occupancy">0</span>
-                            <span class="text-xs font-normal text-cyan-500/80 flex items-center"><i data-lucide="users" class="w-4 h-4 mr-1"></i>Currently in Frame</span>
-                        </div>
+                        <section id="view-live" class="tab-content active space-y-5">
+                <div class="grid grid-cols-2 xl:grid-cols-5 gap-4">
+                    <div class="bg-surface-card border border-surface-border rounded-xl p-4">
+                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Net occupancy</div>
+                        <div class="text-2xl font-bold text-cyan-400" id="kpi-occupancy">0</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Tripwire net or live tracks</div>
                     </div>
-                    <div class="bg-surface-card border border-surface-border rounded-xl p-5">
-                        <div class="text-xs font-semibold text-gray-400 mb-1">Total Unique People Tracked</div>
-                        <div class="text-3xl font-bold text-emerald-400 flex items-baseline justify-between">
-                            <span id="kpi-visitors">0</span>
-                            <span class="text-xs font-normal text-emerald-500/80 flex items-center"><i data-lucide="user-check" class="w-4 h-4 mr-1"></i>Cumulative Today</span>
-                        </div>
+                    <div class="bg-surface-card border border-surface-border rounded-xl p-4">
+                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Entries (tripwire)</div>
+                        <div class="text-2xl font-bold text-emerald-400" id="kpi-visitors">0</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Exits <span id="kpi-exits">0</span></div>
                     </div>
-                    <div class="bg-surface-card border border-surface-border rounded-xl p-5">
-                        <div class="text-xs font-semibold text-gray-400 mb-1">Average Tracking Dwell</div>
-                        <div class="text-3xl font-bold text-white flex items-baseline justify-between">
-                            <span id="kpi-dwell">0.0s</span>
-                            <span class="text-xs text-gray-400">Duration in View</span>
-                        </div>
+                    <div class="bg-surface-card border border-surface-border rounded-xl p-4">
+                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Avg dwell</div>
+                        <div class="text-2xl font-bold text-white" id="kpi-dwell">0.0s</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Zone dwell or time-in-frame</div>
+                    </div>
+                    <div class="bg-surface-card border border-surface-border rounded-xl p-4">
+                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Queue length</div>
+                        <div class="text-2xl font-bold text-sky-400" id="kpi-queue">0</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Wait <span id="kpi-wait">0s</span> · ≥5s in queue</div>
+                    </div>
+                    <div class="bg-surface-card border border-surface-border rounded-xl p-4">
+                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Queue alert</div>
+                        <div class="text-2xl font-bold text-gray-400" id="kpi-queue-alert">Off</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Not fire/theft alarm</div>
                     </div>
                 </div>
 
-                <!-- Video Viewport & Side HUD -->
                 <div class="grid grid-cols-4 gap-5">
                     <div class="col-span-3 bg-surface-card border border-surface-border rounded-xl overflow-hidden shadow-xl">
                         <div class="h-10 bg-[#0E1420] px-4 flex items-center justify-between border-b border-surface-border">
                             <div class="flex items-center space-x-2 text-xs text-gray-300 font-medium">
                                 <i data-lucide="activity" class="w-4 h-4 text-emerald-400"></i>
-                                <span>Real-Time Person Tracking (YOLO + ByteTrack)</span>
+                                <span>Live track overlay · YOLO26s + ByteTrack <span class="text-emerald-400/80">(Live)</span></span>
                             </div>
-                            <span class="text-[11px] text-gray-400 font-mono" id="stream-hud">1270x720 @ 14 FPS</span>
+                            <span class="text-[11px] text-gray-400 font-mono" id="stream-hud">— @ — FPS</span>
                         </div>
-
-                        <!-- Fluid Video Stream -->
                         <div class="relative bg-black flex items-center justify-center min-h-[460px]">
                             <img id="live-stream-img" src="/api/v1/stream/cam_entrance_01" class="w-full h-auto block" alt="Live Stream Feed">
+                            <div class="absolute top-3 left-3 flex flex-wrap gap-1.5">
+                                <span class="px-2 py-0.5 rounded bg-black/60 border border-emerald-500/40 text-[10px] text-emerald-300 font-semibold">Live CV</span>
+                                <span class="px-2 py-0.5 rounded bg-black/60 border border-amber-500/30 text-[10px] text-amber-200/90 font-medium">No face ID</span>
+                            </div>
                         </div>
                     </div>
-
-                    <!-- Right Legend & Stream Insights -->
                     <div class="col-span-1 space-y-4">
                         <div class="bg-surface-card border border-surface-border rounded-xl p-4">
-                            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-3">Model Overlay Key</h3>
-                            <ul class="space-y-2.5 text-xs text-gray-300">
-                                <li class="flex items-center space-x-2.5">
-                                    <span class="w-3 h-3 rounded-full bg-amber-400 shrink-0"></span>
-                                    <span><strong>Yellow Box:</strong> Detected Person + Track ID</span>
-                                </li>
-                                <li class="flex items-center space-x-2.5">
-                                    <span class="w-3 h-3 rounded-full bg-red-500 shrink-0"></span>
-                                    <span><strong>Red Point:</strong> Ground Contact Coord</span>
-                                </li>
+                            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-3">Model status HUD</h3>
+                            <ul id="model-status-hud" class="space-y-2 text-[11px] text-gray-300">
+                                <li class="flex justify-between gap-2"><span>YOLO26s detect</span><span class="text-emerald-400 font-semibold">Live</span></li>
+                                <li class="flex justify-between gap-2"><span>ByteTrack</span><span class="text-emerald-400 font-semibold">Live</span></li>
+                                <li class="flex justify-between gap-2"><span>Pose / YuNet / age-gender</span><span class="text-emerald-400 font-semibold">Live</span></li>
+                                <li class="flex justify-between gap-2"><span>YOLO-World interest</span><span class="text-emerald-400 font-semibold">Live</span></li>
+                                <li class="flex justify-between gap-2"><span>Window stop ≥4s</span><span class="text-amber-400 font-semibold">Partial</span></li>
+                                <li class="flex justify-between gap-2"><span>OSNet multi-cam ReID</span><span class="text-violet-300 font-semibold">Future</span></li>
+                                <li class="flex justify-between gap-2"><span>POS / basket / ROI</span><span class="text-gray-500 font-semibold">Not CV</span></li>
                             </ul>
                         </div>
-
                         <div class="bg-surface-card border border-surface-border rounded-xl p-4">
-                            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">Edge Guarantee</h3>
-                            <p class="text-xs text-gray-400 leading-relaxed">
-                                Zero video leaves the on-premise hardware. Computer vision decoding, person tracking, and spatial counting execute completely in local memory.
-                            </p>
+                            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-3">Overlay key</h3>
+                            <ul class="space-y-2.5 text-xs text-gray-300">
+                                <li class="flex items-center space-x-2.5"><span class="w-3 h-3 rounded-full bg-amber-400 shrink-0"></span><span><strong>Yellow box:</strong> person + track ID</span></li>
+                                <li class="flex items-center space-x-2.5"><span class="w-3 h-3 rounded-full bg-red-500 shrink-0"></span><span><strong>Red point:</strong> foot / ground contact</span></li>
+                            </ul>
+                        </div>
+                        <div class="bg-surface-card border border-surface-border rounded-xl p-4">
+                            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">Deploy · privacy</h3>
+                            <p class="text-xs text-gray-400 leading-relaxed">Edge AI: frames stay on-site. Cloud: same signals under contract. Both DPDP + GDPR. <strong class="text-gray-300">No facial identity product.</strong></p>
                         </div>
                     </div>
                 </div>
             </section>
+
 
             <!-- ============================================== -->
             <!-- VIEW 2: TRAFFIC & FOOTFALL ANALYTICS            -->
@@ -256,10 +268,28 @@
             <!-- VIEW 3: VISUAL CALIBRATION STUDIO               -->
             <!-- ============================================== -->
             <section id="view-calibration" class="tab-content space-y-5">
-                <div class="bg-surface-card border border-surface-border rounded-xl p-4 flex items-center justify-between">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div class="bg-surface-card border border-surface-border rounded-xl px-4 py-3">
+                        <div class="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Active camera</div>
+                        <div class="text-sm font-bold text-white mt-0.5" id="calib-hud-cam">—</div>
+                    </div>
+                    <div class="bg-surface-card border border-surface-border rounded-xl px-4 py-3">
+                        <div class="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Tripwires</div>
+                        <div class="text-sm font-bold text-emerald-400 mt-0.5" id="calib-hud-tw">0</div>
+                    </div>
+                    <div class="bg-surface-card border border-surface-border rounded-xl px-4 py-3">
+                        <div class="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Zones (dwell / queue / staff)</div>
+                        <div class="text-sm font-bold text-amber-300 mt-0.5" id="calib-hud-zones">0 / 0 / 0</div>
+                    </div>
+                    <div class="bg-surface-card border border-surface-border rounded-xl px-4 py-3">
+                        <div class="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Homography / overlap</div>
+                        <div class="text-sm font-bold text-violet-300 mt-0.5">Future</div>
+                    </div>
+                </div>
+                <div class="bg-surface-card border border-surface-border rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
                     <div>
                         <h3 class="text-base font-bold text-white">Interactive Video Calibration Studio</h3>
-                        <p class="text-xs text-gray-400">Click directly on the camera frame to draw tripwires and polygon zones without touching YAML.</p>
+                        <p class="text-xs text-gray-400">Draw tripwire · dwell · queue · staff. Saves via POST /api/v1/config/cameras/{id}/calibration. Multi-cam: header selector — each cam keeps its own shapes.</p>
                     </div>
 
                     <div class="flex items-center space-x-2">
@@ -414,27 +444,31 @@
             }
         }
 
-        // Live Telemetry Poller
+        // Live Telemetry Poller — GET /api/v1/live fields only
         async function fetchLiveTelemetry() {
             try {
-                const res = await fetch('/api/v1/live');
+                const camQ = currentCameraId ? `?camera_id=${encodeURIComponent(currentCameraId)}` : '';
+                const res = await fetch('/api/v1/live' + camQ);
                 if (!res.ok) return;
                 const d = await res.json();
-
-                const elOcc = document.getElementById('kpi-occupancy');
-                if (elOcc) elOcc.innerText = d.net_occupancy || 0;
-
-                const elVis = document.getElementById('kpi-visitors');
-                if (elVis) elVis.innerText = d.total_visitors || 0;
-
-                const elDwell = document.getElementById('kpi-dwell');
-                if (elDwell) elDwell.innerText = (d.avg_dwell_seconds || 0).toFixed(1) + 's';
+                const set = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
+                set('kpi-occupancy', d.net_occupancy ?? 0);
+                set('kpi-visitors', d.total_visitors ?? 0);
+                set('kpi-exits', d.total_exits ?? 0);
+                set('kpi-dwell', (d.avg_dwell_seconds || 0).toFixed(1) + 's');
+                set('kpi-queue', d.queue_length ?? 0);
+                set('kpi-wait', (d.avg_queue_wait_seconds || 0).toFixed(1) + 's');
+                const elA = document.getElementById('kpi-queue-alert');
+                if (elA) {
+                    const on = Boolean(d.queue_alert_active);
+                    elA.innerText = on ? 'On' : 'Off';
+                    elA.className = 'text-2xl font-bold ' + (on ? 'text-rose-400' : 'text-gray-400');
+                }
             } catch (e) {
                 console.error('Failed to fetch live telemetry:', e);
             }
         }
 
-        // Device Health Poller
         async function fetchDeviceHealth() {
             try {
                 const res = await fetch('/api/v1/device/health');
@@ -443,8 +477,64 @@
                 document.getElementById('device-name').innerText = h.device_name;
                 document.getElementById('device-fps').innerText = h.pipeline_fps + ' FPS';
                 document.getElementById('device-cpu').innerText = Math.round(h.cpu_usage_percent) + '%';
-                document.getElementById('stream-hud').innerText = `1270x720 @ ${h.pipeline_fps} FPS`;
+                const eng = document.getElementById('device-engine');
+                if (eng) eng.innerText = (h.inference_engine || 'Edge inference') + ' · ' + (h.status || '');
+                const pill = document.getElementById('device-online-pill');
+                if (pill) {
+                    const ok = String(h.status || '').toLowerCase().includes('healthy') || String(h.status || '').toLowerCase().includes('online');
+                    pill.innerText = ok ? 'ONLINE' : 'CHECK';
+                    pill.className = ok
+                        ? 'inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-400'
+                        : 'inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300';
+                }
+                const cam = cameraConfigs[currentCameraId] || {};
+                const resLabel = (cam.resolution && cam.resolution.length === 2) ? `${cam.resolution[0]}x${cam.resolution[1]}` : 'frame';
+                document.getElementById('stream-hud').innerText = `${resLabel} @ ${h.pipeline_fps} FPS`;
             } catch (e) {}
+        }
+
+        function updateCalibHud() {
+            const cam = cameraConfigs[currentCameraId] || {};
+            const elCam = document.getElementById('calib-hud-cam');
+            if (elCam) elCam.innerText = (cam.name || currentCameraId || '—');
+            const elTw = document.getElementById('calib-hud-tw');
+            if (elTw) elTw.innerText = String(calibLines.length);
+            let dwell = 0, queue = 0, staff = 0;
+            calibPolygons.forEach(z => {
+                if (z.type === 'queue') queue++;
+                else if (z.type === 'staff') staff++;
+                else dwell++;
+            });
+            const elZ = document.getElementById('calib-hud-zones');
+            if (elZ) elZ.innerText = `${dwell} / ${queue} / ${staff}`;
+        }
+
+        function renderCamStrip() {
+            const el = document.getElementById('cam-strip');
+            if (!el) return;
+            const ids = Object.keys(cameraConfigs);
+            if (!ids.length) { el.innerHTML = '<p class="text-gray-500">No cameras in config</p>'; return; }
+            el.innerHTML = ids.map(id => {
+                const c = cameraConfigs[id] || {};
+                const tw = (c.tripwires || []).length;
+                const zones = c.zones || [];
+                const q = zones.filter(z => z.type === 'queue').length;
+                const s = zones.filter(z => z.type === 'staff').length;
+                const d = zones.length - q - s;
+                const active = id === currentCameraId;
+                return `<button type="button" onclick="selectCamera('${id}')" class="w-full text-left rounded-md px-2 py-1.5 border ${active ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-surface-border bg-[#0E1420]'}">
+                    <div class="font-medium text-white truncate">${escapeHtml(c.name || id)}</div>
+                    <div class="text-[10px] text-gray-500 font-mono truncate">${escapeHtml(id)} · TW ${tw} · Z ${d}/${q}/${s}</div>
+                </button>`;
+            }).join('');
+        }
+
+        function selectCamera(id) {
+            if (!cameraConfigs[id]) return;
+            currentCameraId = id;
+            const sel = document.getElementById('camera-selector');
+            if (sel) sel.value = id;
+            onCameraChange();
         }
 
         async function resetMetrics() {
@@ -668,6 +758,7 @@
             calibPolygons.forEach((z, i) => rows.push(shapeRow(
                 (ZONE_STYLE[z.type] || ZONE_STYLE.dwell).label, z.name || z.id, z.polygon.length + ' points', 'zone', i)));
             el.innerHTML = rows.length ? rows.join('') : '<p class="text-xs text-gray-500">Nothing drawn yet.</p>';
+            updateCalibHud();
         }
 
         function removeCalibShape(type, idx) {
@@ -763,6 +854,8 @@
                 if (!cameraConfigs[currentCameraId]) currentCameraId = ids[0];
                 sel.value = currentCameraId;
                 fillCameraSettings();
+                renderCamStrip();
+                updateCalibHud();
             } catch (e) {
                 console.error('Failed to load camera configs:', e);
             }
@@ -780,6 +873,9 @@
             currentCameraId = document.getElementById('camera-selector').value;
             document.getElementById('live-stream-img').src = `/api/v1/stream/${currentCameraId}`;
             fillCameraSettings();
+            renderCamStrip();
+            updateCalibHud();
+            fetchLiveTelemetry();
             if (currentView === 'view-calibration') initCalibrationStudio();
         }
 

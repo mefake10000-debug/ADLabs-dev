@@ -6,7 +6,7 @@ edge:
   hardware_backend: "auto" # "auto", "coreml", "cuda", or "cpu"
 
 perception:
-  model_name: "models/yolo26s.pt"   # small: as accurate as medium on our footage, 2.3x faster (docs/model-benchmark.md). Cached in ./models (bind-mounted)
+  model_name: "models/yolo26s.pt"   # production small detector (docs/model-benchmark.md)   # cached in ./models (bind-mounted), so it is downloaded once, not per container
   confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
                                # real person" bar is tracking.track_thresh below; detections between
                                # this floor and track_thresh can only extend a track that already
@@ -40,22 +40,100 @@ analytics:
   zone_exit_grace_seconds: 3.0  # A track missing from a dwell/queue zone for less than this is still
                                   # counted as present, so a single dropped detection doesn't reset
                                   # dwell time or make someone flicker in and out of a queue count.
-  heatmap_write_seconds: 10.0  # How often the edge re-renders each camera's floor heatmap (dashboard Heatmap tab).
-  staff_min_seconds_in_zone: 10.0  # Time inside a "staff" zone (drawn in the Calibration Studio) before
-                                   # a track is tagged staff and excluded from every customer metric --
-                                   # visitors, occupancy, dwell, queue, tripwire crossings. The tag sticks
-                                   # to that track ID after it leaves the zone (a cashier restocking a
-                                   # shelf stays staff). Only draw staff zones where customers never
-                                   # stand, e.g. behind the counter: a customer lingering this long
-                                   # inside one gets tagged too.
+
+# --- Perception model tier ------------------------------------------------------
+# Everything above this line is the "fast tier": person detection + tracking +
+# tripwire/zone/queue analytics, run on every frame. The block below adds the
+# enrichment models (pose, face, demographics, open-vocabulary products) on a slower
+# cadence, so adding them does not degrade the core footfall numbers.
+#
+# Weights are not committed (see .gitignore). Run `python scripts/download_models.py`
+# once after cloning.
+models:
+  enabled: true
+  device: "auto"              # auto (CUDA -> MPS -> CPU) | cuda | mps | cpu
+  # The enrichment tier runs on its own thread while the fast tier keeps inferring.
+  # PyTorch's MPS backend is not thread-safe, so when the fast tier owns MPS the
+  # enrichment tier is moved to the CPU. "auto" picks the safe combination.
+  enrichment_device: "auto"   # auto | cuda | mps | cpu
+  # Worker threads for the enrichment tier. The fast tier's detector and the
+  # enrichment tier share the machine, so letting each library spawn one worker per
+  # core oversubscribes it and slows the fast tier down. 3 leaves the detector room
+  # on an 8-thread machine.
+  enrichment_threads: 3
+  slow_tier:
+    # Measured per-pass cost on this Mac (8-core M-series, CPU provider):
+    #   pose 189ms + face 42ms + open-vocab 91ms + 67ms per demographic face.
+    # At interval_frames=8 and 3 faces per pass a pass costs ~520ms, which leaves the
+    # fast tier (MPS, ~14 FPS) enough headroom to stay at full rate.
+    interval_frames: 8        # run the enrichment pass every N processed frames
+    max_faces_per_tick: 3     # cap face-model inferences per pass (keeps the tick bounded)
+    max_products_per_tick: 24 # cap open-vocabulary detections fed to the interest model
+
+  pose:
+    enabled: true
+    weights: "models/yolo26m-pose.pt"
+    confidence: 0.30
+    match_iou: 0.30           # min IoU to bind a pose to an existing track
+
+  face:
+    enabled: true
+    weights: "models/onnx/face_detection_yunet_2023mar.onnx"
+    score_threshold: 0.55
+    min_face_px: 30           # faces smaller than this are too noisy for the attribute model
+    upscale_crops: true       # re-detect inside an upscaled person crop when no face was found
+    align: true               # warp the face onto the canonical 5-point template before inference
+
+  demographics:
+    enabled: true
+    weights: "models/onnx/age_gender_vit.onnx"
+    # INT8 copy of the same network: 1.7x faster on CPU with predictions within ~0.5y
+    # of the FP32 model on the sample footage. Used automatically when present.
+    quantized_weights: "models/onnx/age_gender_vit_int8.onnx"
+    # CoreML EP is measurably slower than CPU for this graph (1.3s/face vs 0.28s) and
+    # corrupts the INT8 output, so demographics are pinned to the CPU provider.
+    providers: ["CPUExecutionProvider"]
+    k_anonymity: 10           # cohorts smaller than this are withheld from every API response
+    smoothing_alpha: 0.35     # EMA weight for the newest face-model reading
+    window_seconds: 3600      # rolling window for the population mix (departed shoppers are
+                               # counted as aggregates only; per-person state is deleted)
+
+  head_pose:
+    enabled: true
+    focal_scale: 1.0          # 1.0 => focal length equals frame width
+
+  products:
+    enabled: true
+    weights: "models/yolov8s-worldv2.pt"
+    confidence: 0.20
+    max_person_overlap: 0.5   # drop detections that are really a shopper wearing the item
+    engagement_radius_px: 160 # how close a shopper must be to count as viewing a product
+    min_dwell_seconds: 1.0    # dwell below this is a glance, not an interest
+    vocabulary:
+      - shoe
+      - handbag
+      - backpack
+      - suitcase
+      - shirt
+      - dress
+      - jacket
+      - hat
+      - watch
+      - eyeglasses
+      - phone
+      - bottle
+      - shopping cart
+      - umbrella
 
 storage:
   db_path: "data/storage/edgesight.db"
   rollup_interval_seconds: 10
 
 telemetry:
-  cloud_endpoint: "http://cloud-dashboard:8000/api/v1/telemetry"
-  # Fallback for local testing outside docker:
+  # Production cloud: the Vercel-hosted EdgeSight ingest API. It writes to
+  # Neon Postgres and the Live Demo reads it back out.
+  cloud_endpoint: "https://adlabs-site.vercel.app/api/v1/telemetry"
+  # Local mirror: the FastAPI service on this machine, same schema.
   local_endpoint: "http://localhost:8000/api/v1/telemetry"
   push_interval_seconds: 10
   retry_backoff_seconds: 3

@@ -14,3 +14,9 @@ opencv-python==5.0.0.93
 numpy>=1.24.0,<3.0.0
 pyyaml>=6.0,<7.0
 requests>=2.31.0,<3.0.0
+# Runtime for the ONNX enrichment models (YuNet face detection, age/gender ViT).
+# On Apple Silicon this picks up the CoreML execution provider automatically.
+onnxruntime==1.31.0
+# Build-time only: scripts/download_models.py uses it to quantize the demographic model to INT8.
+# Not imported by the running pipeline.
+onnx>=1.16.0

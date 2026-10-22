@@ -5,15 +5,26 @@ import json
 import signal
 import yaml
 import logging
-from typing import Dict, List, Any
+import threading
+from typing import Dict, List, Any, Optional
 
 from src.ingestion.stream_reader import StreamReader
 from src.perception.detector import PersonDetector
 from src.perception.tracker import SimpleByteTracker
+from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_SLOW
+from src.perception.pose_estimator import PoseEstimator, match_pose_to_track
+from src.perception.face_detector import FaceDetector, face_inside_box, crop_face, align_face
+from src.perception.age_gender import AgeGenderEstimator
+from src.perception.head_pose import HeadPoseEstimator
+from src.perception.world_detector import OpenVocabProductDetector, filter_out_persons
 from src.analytics.tripwire import Tripwire
 from src.analytics.zones import Zone
 from src.analytics.queue_analyzer import QueueAnalyzer
 from src.analytics.heatmap import Heatmap
+from src.analytics.demographics import DemographicsAnalyzer
+from src.analytics.groups import GroupAnalyzer
+from src.analytics.attention import AttentionAnalyzer
+from src.analytics.product_interest import ProductInterestAnalyzer
 from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
@@ -39,17 +50,12 @@ class EdgePipeline:
         self.store_id = self.pipeline_cfg.get("edge", {}).get("store_id", "store_default")
         self.device_id = self.pipeline_cfg.get("edge", {}).get("device_id", "edge_01")
         self.rollup_interval = self.pipeline_cfg.get("storage", {}).get("rollup_interval_seconds", 30)
-        self.staff_min_seconds = self.pipeline_cfg.get("analytics", {}).get("staff_min_seconds_in_zone", 10.0)
 
         # Storage & Telemetry
         db_path = self.pipeline_cfg.get("storage", {}).get("db_path", "data/storage/edgesight.db")
         self.local_buffer = LocalBuffer(db_path=db_path)
         self.frames_dir = os.path.join(os.path.dirname(db_path), "frames")
         os.makedirs(self.frames_dir, exist_ok=True)
-        # Kept apart from frames/: the API treats every frames/*.jpg as a camera.
-        self.heatmaps_dir = os.path.join(os.path.dirname(db_path), "heatmaps")
-        os.makedirs(self.heatmaps_dir, exist_ok=True)
-        self.heatmap_write_seconds = self.pipeline_cfg.get("analytics", {}).get("heatmap_write_seconds", 10.0)
 
         cloud_endpoint = self.pipeline_cfg.get("telemetry", {}).get("cloud_endpoint", "http://localhost:8000/api/v1/telemetry")
         local_endpoint = self.pipeline_cfg.get("telemetry", {}).get("local_endpoint", "http://localhost:8000/api/v1/telemetry")
@@ -61,6 +67,10 @@ class EdgePipeline:
             api_key=os.environ.get("EDGESIGHT_API_KEY")
         )
         self.health_monitor = HealthMonitor(self.device_id)
+        self.staff_min_seconds = self.pipeline_cfg.get("analytics", {}).get("staff_min_seconds_in_zone", 10.0)
+        self.heatmaps_dir = os.path.join(os.path.dirname(db_path), "heatmaps")
+        os.makedirs(self.heatmaps_dir, exist_ok=True)
+        self.heatmap_write_seconds = self.pipeline_cfg.get("analytics", {}).get("heatmap_write_seconds", 10.0)
 
         # Perception model (shared across cameras to optimize memory)
         p_cfg = self.pipeline_cfg.get("perception", {})
@@ -90,11 +100,193 @@ class EdgePipeline:
         self.last_config_mtime = os.path.getmtime(cameras_config_path) if os.path.exists(cameras_config_path) else 0
         self.last_reload_check = time.time()
 
+        # --- Enrichment model tier -------------------------------------------
+        # The fast tier above (person detection + tracking + tripwire/zone/queue) is
+        # untouched. These models add the retail-analytics detail the fast tier cannot
+        # see: body behaviour, head orientation, population cohorts and products.
+        self.models_cfg = self.pipeline_cfg.get("models", {}) or {}
+        self.models_enabled = bool(self.models_cfg.get("enabled", True))
+        self.device = select_device(self.models_cfg.get("device", "auto"))
+        self.enrichment_device = self._resolve_enrichment_device()
+        self.enrichment_threads = int(self.models_cfg.get("enrichment_threads", 3))
+        if self.models_enabled and self.enrichment_device == "cpu":
+            # The enrichment tier's torch models (pose, open-vocab products) run on the
+            # CPU alongside the fast tier's detector. Letting torch spawn a worker per
+            # core oversubscribes the machine and slows the fast tier down; capping the
+            # pool keeps both tiers responsive.
+            try:
+                import torch
+                torch.set_num_threads(self.enrichment_threads)
+            except Exception:
+                pass
+        self.registry = ModelRegistry(os.getcwd())
+        self.pose_estimator = None
+        self.face_detector = None
+        self.age_gender = None
+        self.head_pose = None
+        self.world_detector = None
+        self.model_errors: Dict[str, str] = {}
+
+        if self.models_enabled:
+            self._init_enrichment_models()
+
         # Camera context pipelines
         self.camera_contexts: Dict[str, Dict[str, Any]] = {}
         self._init_cameras()
 
         self.running = False
+
+    # ------------------------------------------------------------------ models
+    def _resolve_enrichment_device(self) -> str:
+        """Picks the device the enrichment tier runs on.
+
+        The enrichment tier runs in its own thread while the fast tier keeps
+        inferring. PyTorch's MPS backend keeps a single Metal command buffer per
+        device and is not safe to drive from two threads at once -- running the
+        person detector on MPS and the enrichment models on MPS concurrently aborts
+        the process with
+
+            failed assertion _status < MTLCommandBufferStatusCommitted
+            in -[IOGPUMetalCommandBuffer setCurrentCommandEncoder:]
+
+        (reproduced by scripts/check_mps_concurrency.py). So when the fast tier owns
+        MPS, the enrichment tier runs on the CPU instead. The enrichment tier is
+        deliberately low-frequency, so CPU inference there costs nothing that matters.
+
+        CUDA is thread-safe, so on an NVIDIA edge node both tiers can share the GPU.
+        """
+        configured = (self.models_cfg.get("enrichment_device", "auto") or "auto").lower()
+        if configured != "auto":
+            if configured == self.device == "mps":
+                logger.error(
+                    "enrichment_device is 'mps' while the person detector is also on 'mps'. "
+                    "PyTorch's MPS backend is not thread-safe and this combination aborts the "
+                    "process. Falling back to 'cpu' for the enrichment tier."
+                )
+                return "cpu"
+            return configured
+
+        if self.device == "mps":
+            return "cpu"
+        return self.device
+
+    def _init_enrichment_models(self):
+        """Registers and lazily prepares the enrichment models.
+
+        Each model is loaded on its own so that one unavailable checkpoint (say, a
+        345MB demographic model that was not downloaded) degrades that single
+        capability instead of stopping the pipeline. The person detector is never
+        affected -- it is not part of this tier.
+        """
+        pose_cfg = self.models_cfg.get("pose", {}) or {}
+        face_cfg = self.models_cfg.get("face", {}) or {}
+        demo_cfg = self.models_cfg.get("demographics", {}) or {}
+        head_cfg = self.models_cfg.get("head_pose", {}) or {}
+        prod_cfg = self.models_cfg.get("products", {}) or {}
+
+        if pose_cfg.get("enabled", True):
+            self.registry.register(ModelSpec(
+                key="pose", kind="ultralytics", path=pose_cfg.get("weights", "models/yolo26m-pose.pt"),
+                capability="pose", tier=TIER_SLOW, task="pose",
+                params={"device": self.enrichment_device},
+            ))
+        if face_cfg.get("enabled", True):
+            self.registry.register(ModelSpec(
+                key="face", kind="onnx", path=face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx"),
+                capability="face", tier=TIER_SLOW,
+                params={"intra_op_num_threads": self.enrichment_threads},
+            ))
+        if demo_cfg.get("enabled", True):
+            demo_path = self._resolve_demographics_weights(demo_cfg)
+            self.registry.register(ModelSpec(
+                key="demographics", kind="onnx", path=demo_path,
+                capability="demographics", tier=TIER_SLOW,
+                params={
+                    "providers": demo_cfg.get("providers", ["CPUExecutionProvider"]),
+                    "intra_op_num_threads": self.enrichment_threads,
+                },
+            ))
+        if prod_cfg.get("enabled", True):
+            self.registry.register(ModelSpec(
+                key="products", kind="ultralytics", path=prod_cfg.get("weights", "models/yolov8s-worldv2.pt"),
+                capability="product", tier=TIER_SLOW,
+                params={"device": self.enrichment_device},
+            ))
+
+        # Warm each model up front so the first real frame does not pay the load cost.
+        if pose_cfg.get("enabled", True):
+            model = self.registry.get("pose")
+            if model is not None:
+                self.pose_estimator = PoseEstimator(
+                    model,
+                    conf_threshold=float(pose_cfg.get("confidence", 0.30)),
+                    device=self.enrichment_device,
+                )
+            else:
+                self.model_errors["pose"] = self.registry.error("pose") or "unavailable"
+
+        if face_cfg.get("enabled", True):
+            weights = face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx")
+            path = weights if os.path.isabs(weights) else os.path.join(os.getcwd(), weights)
+            try:
+                self.face_detector = FaceDetector(
+                    path,
+                    score_threshold=float(face_cfg.get("score_threshold", 0.55)),
+                )
+            except Exception as e:
+                self.model_errors["face"] = str(e)
+                logger.error(f"Face detector unavailable: {e}")
+
+        if demo_cfg.get("enabled", True):
+            session = self.registry.get("demographics")
+            if session is not None:
+                self.age_gender = AgeGenderEstimator(
+                    session,
+                    min_face_px=float(face_cfg.get("min_face_px", 30)),
+                )
+            else:
+                self.model_errors["demographics"] = self.registry.error("demographics") or "unavailable"
+
+        if head_cfg.get("enabled", True):
+            self.head_pose = HeadPoseEstimator(focal_scale=float(head_cfg.get("focal_scale", 1.0)))
+
+        if prod_cfg.get("enabled", True):
+            model = self.registry.get("products")
+            if model is not None:
+                self.world_detector = OpenVocabProductDetector(
+                    model,
+                    vocabulary=prod_cfg.get("vocabulary"),
+                    conf_threshold=float(prod_cfg.get("confidence", 0.20)),
+                    device=self.enrichment_device,
+                )
+            else:
+                self.model_errors["products"] = self.registry.error("products") or "unavailable"
+
+        logger.info(
+            f"Enrichment tier ready on device '{self.enrichment_device}' "
+            f"(fast tier on '{self.device}'): "
+            f"pose={'yes' if self.pose_estimator else 'no'}, "
+            f"face={'yes' if self.face_detector else 'no'}, "
+            f"demographics={'yes' if self.age_gender else 'no'}, "
+            f"products={'yes' if self.world_detector else 'no'}"
+        )
+
+    def _resolve_demographics_weights(self, demo_cfg: Dict[str, Any]) -> str:
+        """Picks the demographics checkpoint to load.
+
+        Prefers the INT8 copy when it exists. Measured on this Mac (8-core M-series,
+        CPU execution provider): FP32 493ms/face, INT8 283ms/face, with predictions
+        within ~0.5 years of each other on the sample footage. The CoreML provider is
+        both slower (1.3s/face) and numerically wrong for the INT8 graph, so the
+        demographics session is pinned to the CPU provider in the config.
+        """
+        quantized = demo_cfg.get("quantized_weights")
+        if quantized:
+            q_path = quantized if os.path.isabs(quantized) else os.path.join(os.getcwd(), quantized)
+            if os.path.exists(q_path):
+                logger.info(f"Using INT8 demographics checkpoint: {quantized}")
+                return quantized
+        return demo_cfg.get("weights", "models/onnx/age_gender_vit.onnx")
 
     def _load_yaml(self, path: str) -> Dict[str, Any]:
         if not os.path.exists(path):
@@ -156,7 +348,12 @@ class EdgePipeline:
         fps_target = cam.get("fps_target", 15)
 
         tripwires, zones, queues, staff_zones = self._build_analytics(cam)
+
+        demo_cfg = (getattr(self, "models_cfg", {}) or {}).get("demographics", {}) or {}
+        prod_cfg = (getattr(self, "models_cfg", {}) or {}).get("products", {}) or {}
+
         return {
+            "camera_id": cam_id,
             "name": cam.get("name", cam_id),
             "source": source,
             "fps_target": fps_target,
@@ -176,18 +373,36 @@ class EdgePipeline:
             "staff_ids": set(),
             "staff_visible": 0,
             "tracked_ids_today": set(),
+            "heatmap": None,
+            "last_heatmap_write": 0.0,
             "last_unique_count": 0,
             "current_active_tracks": [],
             "last_rollup_time": time.time(),
-            "heatmap": None,  # built on the first frame, once the resolution is known
-            "last_heatmap_write": 0.0,
             "rollup_start_time": time.time(),
             "frames_processed": 0,
             "processed_fps": 0.0,
             "fps_window_start": time.time(),
             "fps_window_frames": 0,
             "last_in_count": 0,
-            "last_out_count": 0
+            "last_out_count": 0,
+            # --- Enrichment tier state ---
+            "demographics": DemographicsAnalyzer(
+                k_anonymity=int(demo_cfg.get("k_anonymity", 10)),
+                smoothing_alpha=float(demo_cfg.get("smoothing_alpha", 0.35)),
+                window_seconds=float(demo_cfg.get("window_seconds", 3600.0)),
+            ),
+            "groups": GroupAnalyzer(),
+            "attention": AttentionAnalyzer(),
+            "products": ProductInterestAnalyzer(
+                engagement_radius_px=float(prod_cfg.get("engagement_radius_px", 160)),
+                min_dwell_seconds=float(prod_cfg.get("min_dwell_seconds", 1.0)),
+            ),
+            "frame_lock": threading.Lock(),
+            "latest_frame": None,
+            "last_slow_frame_idx": -1,
+            "slow_ticks": 0,
+            "demo_cursor": 0,
+            "slow_thread": None,
         }
 
     def _init_cameras(self):
@@ -201,6 +416,7 @@ class EdgePipeline:
 
         for ctx in self.camera_contexts.values():
             ctx["reader"].start()
+            self._start_slow_tier(ctx)
 
         logger.info(f"AD Labs EdgeSight running for store '{self.store_id}'. Processing active streams...")
 
@@ -214,6 +430,13 @@ class EdgePipeline:
 
                     frame_idx, frame_time, frame = item
                     ctx["frames_processed"] += 1
+
+                    # Publish the frame for the enrichment tier. The slow worker runs
+                    # in its own thread, so it gets its own copy: the debug overlay
+                    # draws on this buffer in place and a half-drawn frame would be
+                    # nonsense to a face model.
+                    with ctx["frame_lock"]:
+                        ctx["latest_frame"] = (frame_idx, frame_time, frame.copy())
 
                     # Inference throughput (frames actually run through detect+track), as opposed to
                     # the reader's decode rate: the ring buffer silently drops frames when inference lags.
@@ -229,32 +452,58 @@ class EdgePipeline:
 
                     # 2. Tracking
                     active_tracks = ctx["tracker"].update(detections, frame_time)
+                    # Staff polygons first — sticky tags, then customer-only analytics (HEAD id-switch staff zones)
+                    for staff_zone in ctx.get("staff_zones", []):
+                        staff_zone.update(active_tracks, frame_time)
+                        for tid, entered in staff_zone.active_tracks_in_zone.items():
+                            if frame_time - entered >= self.staff_min_seconds:
+                                ctx["staff_ids"].add(tid)
+                    customers = [t for t in active_tracks if t.track_id not in ctx["staff_ids"]]
+                    ctx["current_active_tracks"] = customers
+                    ctx["staff_visible"] = len(active_tracks) - len(customers)
+                    ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
 
-                    # 3. Staff tagging + spatial analytics
-                    self._update_analytics(cam_id, ctx, active_tracks, frame_time)
+                    # 3. Spatial Analytics (customers only)
+                    crossing_events: List[Dict[str, Any]] = []
+                    for tw in ctx["tripwires"]:
+                        crossing_events.extend(tw.update(customers, frame_time))
+                    if crossing_events:
+                        self._persist_crossing_events(cam_id, crossing_events)
 
-                    # Heatmap: customers only (_update_analytics has already removed tagged staff)
-                    if ctx["heatmap"] is None:
+                    for zone in ctx["zones"]:
+                        zone.update(customers, frame_time)
+
+                    for q in ctx["queues"]:
+                        q.update(customers, frame_time)
+
+                    if ctx.get("heatmap") is None:
                         ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
-                    ctx["heatmap"].add(ctx["current_active_tracks"], frame_time)
-                    if cv2 is not None and frame_time - ctx["last_heatmap_write"] >= self.heatmap_write_seconds:
+                    ctx["heatmap"].add(customers, frame_time)
+                    if cv2 is not None and frame_time - ctx.get("last_heatmap_write", 0.0) >= self.heatmap_write_seconds:
                         self._write_heatmap(cam_id, ctx, frame, frame_time)
 
                     # 4. Render and Save Live Vision Feed with Model Outputs (~8-10 FPS)
                     if cv2 is not None and ctx["frames_processed"] % 2 == 0:
                         try:
-                            annotated = DebugOverlay.draw_pipeline(
+                            draw_kwargs = dict(
                                 frame=frame,
                                 tracks=active_tracks,
                                 tripwires=ctx["tripwires"],
                                 zones=ctx["zones"],
                                 queues=ctx["queues"],
-                                staff_zones=ctx["staff_zones"],
-                                staff_ids=ctx["staff_ids"],
                                 camera_name=ctx["name"],
                                 fps=ctx["reader"].fps_actual,
-                                infer_fps=ctx["processed_fps"]
+                                infer_fps=ctx["processed_fps"],
                             )
+                            # Optional kwargs if DebugOverlay supports staff overlays
+                            try:
+                                annotated = DebugOverlay.draw_pipeline(
+                                    **draw_kwargs,
+                                    staff_zones=ctx.get("staff_zones", []),
+                                    staff_ids=ctx.get("staff_ids", set()),
+                                )
+                            except TypeError:
+                                annotated = DebugOverlay.draw_pipeline(**draw_kwargs)
                             frame_path = os.path.join(self.frames_dir, f"{cam_id}.jpg")
                             tmp_path = os.path.join(self.frames_dir, f"{cam_id}.tmp.jpg")
                             cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -281,6 +530,205 @@ class EdgePipeline:
             logger.info("Shutdown requested by user.")
         finally:
             self.stop()
+
+    # --------------------------------------------------------- enrichment tier
+    def _start_slow_tier(self, ctx: Dict[str, Any]):
+        """Starts the enrichment worker for one camera.
+
+        The enrichment models (pose, face, demographics, products) cost far more per
+        frame than person detection. Running them inline would cut the throughput of
+        the core counters, so they get their own thread and their own frame copy.
+        The fast tier therefore keeps its latency while the enrichment tier catches up
+        on its own cadence.
+        """
+        if not getattr(self, "models_enabled", False):
+            return
+        if self.pose_estimator is None and self.face_detector is None \
+                and self.age_gender is None and self.world_detector is None:
+            logger.warning("Enrichment tier enabled but no enrichment model loaded; skipping.")
+            return
+
+        interval = int((self.models_cfg.get("slow_tier", {}) or {}).get("interval_frames", 4))
+        cam_id = ctx.get("camera_id", "camera")
+
+        def _worker():
+            while self.running:
+                with ctx["frame_lock"]:
+                    latest = ctx["latest_frame"]
+                if latest is None:
+                    time.sleep(0.05)
+                    continue
+                frame_idx, frame_time, frame = latest
+                # Honour the configured cadence. The frame index counts decoded frames,
+                # so this is "every N video frames" regardless of how fast inference runs.
+                if frame_idx - ctx["last_slow_frame_idx"] < interval:
+                    time.sleep(0.01)
+                    continue
+                ctx["last_slow_frame_idx"] = frame_idx
+                try:
+                    self._process_slow_tier(cam_id, ctx, frame_time, frame)
+                    ctx["slow_ticks"] += 1
+                except Exception as e:
+                    logger.error(f"Enrichment pass failed on {cam_id}: {e}", exc_info=True)
+
+        thread = threading.Thread(target=_worker, name=f"Enrichment-{cam_id}", daemon=True)
+        ctx["slow_thread"] = thread
+        thread.start()
+        logger.info(f"Enrichment tier started for camera '{cam_id}' (every {interval} frames).")
+
+    def _process_slow_tier(self, cam_id: str, ctx: Dict[str, Any], frame_time: float, frame: Any):
+        """One enrichment pass: pose, face, head pose, demographics, groups, attention.
+
+        Everything produced here is ephemeral. No face crop, landmark, embedding or
+        per-person estimate is written to disk or sent anywhere -- only aggregate
+        cohorts, group sizes and engagement counters leave this function.
+        """
+        tracks = list(ctx.get("current_active_tracks", []))
+        if not tracks:
+            return
+
+        frame_h, frame_w = frame.shape[:2]
+        slow_cfg = self.models_cfg.get("slow_tier", {}) or {}
+        pose_cfg = self.models_cfg.get("pose", {}) or {}
+        face_cfg = self.models_cfg.get("face", {}) or {}
+        prod_cfg = self.models_cfg.get("products", {}) or {}
+
+        # --- 1. Pose: what the body is doing ---------------------------------
+        pose_by_track: Dict[int, Dict[str, Any]] = {}
+        if self.pose_estimator is not None:
+            iou_min = float(pose_cfg.get("match_iou", 0.30))
+            for pose in self.pose_estimator.estimate(frame):
+                best_track = None
+                best_iou = 0.0
+                for track in tracks:
+                    iou = match_pose_to_track(pose, track.bbox)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_track = track
+                if best_track is not None and best_iou >= iou_min:
+                    pose_by_track[best_track.track_id] = pose
+
+        # --- 2. Faces: assign a face to the body it belongs to -------------
+        face_by_track: Dict[int, Dict[str, Any]] = {}
+        faces = self.face_detector.detect(frame) if self.face_detector is not None else []
+        if faces:
+            for face in faces:
+                for track in tracks:
+                    if face_inside_box(face, track.bbox):
+                        # Keep the largest (closest) face if several match one body.
+                        existing = face_by_track.get(track.track_id)
+                        if existing is None or face["width"] * face["height"] > existing["width"] * existing["height"]:
+                            face_by_track[track.track_id] = face
+                        break
+
+        # Wide-angle store cameras put faces at 20-40px, which YuNet can miss at
+        # frame level. Re-running it on an upscaled person crop recovers them.
+        if self.face_detector is not None and bool(face_cfg.get("upscale_crops", True)):
+            max_crops = int(slow_cfg.get("max_faces_per_tick", 8))
+            missing = [t for t in tracks if t.track_id not in face_by_track]
+            for track in missing[:max_crops]:
+                for face in self.face_detector.detect_in_crop(frame, track.bbox):
+                    if face["width"] < float(face_cfg.get("min_face_px", 30)):
+                        continue
+                    face_by_track[track.track_id] = face
+                    break
+
+        # --- 3. Head pose + demographics -----------------------------------
+        head_by_track: Dict[int, Dict[str, Any]] = {}
+        if self.head_pose is not None:
+            for track_id, face in face_by_track.items():
+                pose = self.head_pose.estimate(face, frame_w, frame_h)
+                if pose is not None:
+                    head_by_track[track_id] = pose
+
+        predictions: Dict[int, Dict[str, Any]] = {}
+        if self.age_gender is not None and face_by_track:
+            max_faces = int(slow_cfg.get("max_faces_per_tick", 2))
+            # Rotate the sampled faces every tick. The demographic model is the most
+            # expensive step in the tier (~0.28s/face on CPU), so only a couple of
+            # faces are inferred per pass; without rotation the same two people
+            # would monopolise the budget and the rest of the store would never
+            # get sampled. The per-track EMA in DemographicsAnalyzer accumulates
+            # the readings over time.
+            candidates = list(face_by_track.items())
+            cursor = int(ctx.get("demo_cursor", 0)) % max(1, len(candidates))
+            rotated = candidates[cursor:] + candidates[:cursor]
+            selected = rotated[:max_faces]
+            ctx["demo_cursor"] = (cursor + max_faces) % max(1, len(candidates))
+
+            align = bool(face_cfg.get("align", True))
+            crops = []
+            for _track_id, face in selected:
+                crop = None
+                if align:
+                    crop = align_face(frame, face)
+                if crop is None:
+                    crop = crop_face(frame, face)
+                crops.append(crop)
+            results = self.age_gender.predict_batch(crops)
+            for (track_id, _face), prediction in zip(selected, results):
+                predictions[track_id] = prediction
+
+        demographics = ctx["demographics"]
+        for track_id, prediction in predictions.items():
+            demographics.observe(track_id, prediction, frame_time)
+
+        # --- 4. Engagement --------------------------------------------------
+        attention = ctx["attention"]
+        for track in tracks:
+            pose = pose_by_track.get(track.track_id)
+            head = head_by_track.get(track.track_id)
+            attention.observe(
+                track_id=track.track_id,
+                timestamp=frame_time,
+                attention_score=head["attention_score"] if head else None,
+                facing_camera=head["facing_camera"] if head else None,
+                phone_in_hand=pose["phone_in_hand"] if pose else None,
+                in_zone=self._track_in_zone(ctx, track),
+            )
+
+        # --- 5. Social grouping ---------------------------------------------
+        ctx["groups"].update(tracks)
+
+        # --- 6. Product interest --------------------------------------------
+        if self.world_detector is not None:
+            detections = self.world_detector.detect(frame)
+            # A shopper wearing a jacket is not a product on display.
+            detections = filter_out_persons(
+                detections,
+                [t.bbox for t in tracks],
+                max_overlap=float(prod_cfg.get("max_person_overlap", 0.5)),
+            )
+            max_products = int(slow_cfg.get("max_products_per_tick", 24))
+            ctx["products"].observe(detections[:max_products], tracks, frame_time)
+
+        # --- 7. Housekeeping -------------------------------------------------
+        active_ids = [t.track_id for t in tracks]
+        demographics.prune(active_ids, frame_time)
+        attention.prune(active_ids)
+        ctx["groups"].prune(active_ids)
+        ctx["products"].prune(active_ids)
+
+    @staticmethod
+    def _track_in_zone(ctx: Dict[str, Any], track: Any) -> bool:
+        """True when a shopper's feet are inside any configured region of interest.
+
+        Queue zones count too. A shopper standing at the checkout is inside a
+        configured region just as much as one browsing the floor, and the
+        engagement metric is about "attending the space you are standing in".
+        Only dwell zones land in ctx["zones"]; queues are tracked separately by
+        the QueueAnalyzer, so both have to be consulted here.
+        """
+        from src.analytics.zones import point_in_polygon
+
+        foot = track.foot_point
+        for zone in ctx.get("zones", []):
+            if point_in_polygon(foot, zone.polygon):
+                return True
+        for queue in ctx.get("queues", []):
+            if point_in_polygon(foot, queue.zone.polygon):
+                return True
+        return False
 
     def check_hot_reload(self):
         if not os.path.exists(self.cameras_cfg_path):
@@ -315,6 +763,7 @@ class EdgePipeline:
                 self.camera_contexts[cam_id] = self._build_camera_context(cam)
                 if self.running:
                     self.camera_contexts[cam_id]["reader"].start()
+                    self._start_slow_tier(self.camera_contexts[cam_id])
                 logger.info(f"Camera {cam_id} added from config.")
                 continue
 
@@ -324,6 +773,7 @@ class EdgePipeline:
                 self.camera_contexts[cam_id] = self._build_camera_context(cam)
                 if self.running:
                     self.camera_contexts[cam_id]["reader"].start()
+                    self._start_slow_tier(self.camera_contexts[cam_id])
                 logger.info(f"Camera {cam_id} source changed: {ctx['source']} -> {cam.get('source', '')}")
                 continue
 
@@ -337,46 +787,11 @@ class EdgePipeline:
                 ctx["calibration_sig"] = self._calibration_signature(cam)
                 ctx["last_in_count"] = 0
                 ctx["last_out_count"] = 0
-                # Recalibration is a fresh start for analytics, staff tags included: anyone still in
-                # a staff zone is re-tagged after staff_min_seconds_in_zone, and removing a staff
-                # zone actually stops excluding people instead of leaving stale tags behind.
                 ctx["staff_ids"] = set()
                 logger.info(
                     f"Hot-reloaded {len(ctx['tripwires'])} tripwires and "
-                    f"{len(ctx['zones']) + len(ctx['queues']) + len(ctx['staff_zones'])} zones for {cam_id}"
+                    f"{len(ctx['zones']) + len(ctx['queues']) + len(ctx.get('staff_zones', []))} zones for {cam_id}"
                 )
-
-    def _update_analytics(self, cam_id: str, ctx: Dict[str, Any], active_tracks: List[Any], frame_time: float):
-        """Tags staff, then runs every customer-facing analytic on customers only.
-
-        A track that has spent staff_min_seconds_in_zone inside any staff zone is tagged staff for
-        the rest of that track's life, so a cashier who walks out to restock a shelf stays excluded
-        while their track survives. The tag is per track ID: if the tracker loses them and assigns
-        a new ID, they count as a customer again until they're back in a staff zone long enough."""
-        for staff_zone in ctx["staff_zones"]:
-            staff_zone.update(active_tracks, frame_time)
-            for tid, entered in staff_zone.active_tracks_in_zone.items():
-                if frame_time - entered >= self.staff_min_seconds:
-                    ctx["staff_ids"].add(tid)
-
-        customers = [t for t in active_tracks if t.track_id not in ctx["staff_ids"]]
-        ctx["current_active_tracks"] = customers
-        ctx["staff_visible"] = len(active_tracks) - len(customers)
-        # Everyone goes in; tagged staff are subtracted when counting (they're usually seen before
-        # they've been in a staff zone long enough to be tagged).
-        ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
-
-        crossing_events: List[Dict[str, Any]] = []
-        for tw in ctx["tripwires"]:
-            crossing_events.extend(tw.update(customers, frame_time))
-        if crossing_events:
-            self._persist_crossing_events(cam_id, crossing_events)
-
-        for zone in ctx["zones"]:
-            zone.update(customers, frame_time)
-
-        for q in ctx["queues"]:
-            q.update(customers, frame_time)
 
     def _write_heatmap(self, cam_id: str, ctx: Dict[str, Any], frame: Any, frame_time: float):
         """Renders the camera's heatmap over the current clean (un-annotated) frame and writes it
@@ -389,6 +804,7 @@ class EdgePipeline:
             os.replace(tmp, path)
         except Exception as e:
             logger.debug(f"Heatmap export error for {cam_id}: {e}")
+
 
     def _persist_crossing_events(self, cam_id: str, events: List[Dict[str, Any]]):
         """Persists individual tripwire crossings as durable events, independent of
@@ -406,7 +822,6 @@ class EdgePipeline:
             })
 
     def _generate_and_save_rollup(self, cam_id: str, ctx: Dict[str, Any], current_time: float):
-        unique_customers = len(ctx["tracked_ids_today"] - ctx.get("staff_ids", set()))
         if ctx["tripwires"]:
             current_in = sum(tw.in_count for tw in ctx["tripwires"])
             current_out = sum(tw.out_count for tw in ctx["tripwires"])
@@ -417,10 +832,8 @@ class EdgePipeline:
             current_occupancy = max(0, current_in - current_out)
         else:
             # Pure Computer Vision People Tracking and Counting
-            total_unique = unique_customers
-            # Can shrink when someone already counted gets tagged staff; never report a negative
-            # entry count for that, just stop counting them from here on.
-            delta_in = max(0, total_unique - ctx["last_unique_count"])
+            total_unique = len(ctx["tracked_ids_today"])
+            delta_in = total_unique - ctx["last_unique_count"]
             ctx["last_unique_count"] = total_unique
             delta_out = 0
             current_occupancy = len(ctx.get("current_active_tracks", []))
@@ -444,6 +857,13 @@ class EdgePipeline:
             avg_wait = max(m["avg_wait_seconds"] for m in queue_metrics)
             alert_active = int(any(m["alert_active"] for m in queue_metrics))
 
+        # --- Enrichment-tier aggregates -------------------------------------
+        # A camera context built before the enrichment tier existed (or by a test)
+        # simply contributes zeros rather than failing the rollup.
+        attention_metrics = ctx["attention"].snapshot() if ctx.get("attention") else {}
+        group_metrics = ctx["groups"].snapshot() if ctx.get("groups") else {}
+        demographics_metrics = ctx["demographics"].snapshot() if ctx.get("demographics") else {}
+
         rollup = {
             "store_id": self.store_id,
             "device_id": self.device_id,
@@ -456,24 +876,71 @@ class EdgePipeline:
             "avg_dwell_seconds": avg_dwell,
             "queue_length": queue_len,
             "avg_queue_wait_seconds": avg_wait,
-            "queue_alert_active": alert_active
+            "queue_alert_active": alert_active,
+            "avg_attention_score": attention_metrics.get("avg_attention_score", 0.0),
+            "facing_ratio": attention_metrics.get("facing_ratio", 0.0),
+            "phone_usage_rate": attention_metrics.get("phone_usage_rate", 0.0),
+            "engaged_ratio": attention_metrics.get("engaged_ratio", 0.0),
+            "group_count": group_metrics.get("group_count", 0),
+            "people_in_groups": group_metrics.get("people_in_companies", 0),
+            "demographics_json": json.dumps(demographics_metrics),
         }
 
         self.local_buffer.save_rollup(rollup)
+        self._persist_product_interest(cam_id, ctx, current_time)
         ctx["last_rollup_time"] = current_time
         ctx["rollup_start_time"] = current_time
 
         logger.info(
             f"[{cam_id}] People Count: {current_occupancy} live | "
-            f"New Shoppers: +{delta_in} | Total Unique: {unique_customers} | "
-            f"Staff: {ctx.get('staff_visible', 0)} visible, {len(ctx.get('staff_ids', ()))} tagged | "
+            f"New Shoppers: +{delta_in} | Total Unique: {len(ctx['tracked_ids_today'])} | "
             f"Decode FPS: {getattr(ctx.get('reader'), 'fps_actual', 0.0)} | Inference FPS: {ctx.get('processed_fps', 0.0)}"
         )
+        if ctx.get("slow_ticks", 0):
+            logger.info(
+                f"[{cam_id}] Engagement: attention {attention_metrics.get('avg_attention_score', 0.0):.2f} | "
+                f"facing {attention_metrics.get('facing_ratio', 0.0):.0%} | "
+                f"on phone {attention_metrics.get('phone_usage_rate', 0.0):.0%} | "
+                f"groups {group_metrics.get('group_count', 0)} "
+                f"({group_metrics.get('people_in_companies', 0)} together) | "
+                f"demographics sample {demographics_metrics.get('sample_size', 0)} "
+                f"(k={demographics_metrics.get('k_anonymity', 10)})"
+            )
+
+    def _persist_product_interest(self, cam_id: str, ctx: Dict[str, Any], current_time: float):
+        """Writes the per-category product interest rows for this rollup window."""
+        if not ctx.get("products"):
+            return
+        snapshot = ctx["products"].snapshot()
+        products = snapshot.get("products") or []
+        if not products:
+            return
+        timestamp_start = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ctx["rollup_start_time"]))
+        timestamp_end = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(current_time))
+        for product in products:
+            try:
+                self.local_buffer.save_product_interest({
+                    "store_id": self.store_id,
+                    "device_id": self.device_id,
+                    "camera_id": cam_id,
+                    "category": product["category"],
+                    "viewers": product["viewers"],
+                    "detections": product["detections"],
+                    "total_dwell_seconds": product["total_dwell_seconds"],
+                    "avg_dwell_seconds": product["avg_dwell_seconds"],
+                    "timestamp_start": timestamp_start,
+                    "timestamp_end": timestamp_end,
+                })
+            except Exception as e:
+                logger.error(f"Failed to persist product interest row: {e}")
 
     def stop(self):
         self.running = False
         logger.info("Stopping pipeline and saving state...")
         for ctx in self.camera_contexts.values():
+            thread = ctx.get("slow_thread")
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=1.0)
             ctx["reader"].stop()
         self.exporter.stop()
         logger.info("EdgePipeline cleanly terminated.")

@@ -47,6 +47,7 @@ class TelemetryExporter:
             try:
                 self.flush_once()
                 self.flush_events_once()
+                self.flush_products_once()
             except Exception as e:
                 logger.error(f"Error in telemetry export loop: {e}")
 
@@ -68,6 +69,21 @@ class TelemetryExporter:
             records=unexported,
             payload_key="events",
             mark_exported=self.local_buffer.mark_events_as_exported
+        )
+
+    def flush_products_once(self) -> int:
+        """Pushes pending unexported product-interest rows.
+
+        These carry category, viewer count and dwell time. No face, no image and no
+        person-level record is ever included -- a row is a per-category aggregate for
+        one camera over one rollup window.
+        """
+        unexported = self.local_buffer.get_unexported_products(limit=200)
+        return self._push_batch(
+            endpoints=[e + "/products" for e in self._endpoints()],
+            records=unexported,
+            payload_key="products",
+            mark_exported=self.local_buffer.mark_products_as_exported
         )
 
     def _endpoints(self) -> list:
