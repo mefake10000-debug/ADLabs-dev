@@ -1,0 +1,12 @@
+# Optional overlay: expose segregated pack weights inside the edge container.
+# Does not change production model paths. Use with:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d
+#
+# Inside edge-analyzer: /app/models/pack/...
+# Desktop mirror: ~/Desktop/ad-labs-project/models/pack/
+
+services:
+  edge-analyzer:
+    volumes:
+      - ./models/pack:/app/models/pack:ro

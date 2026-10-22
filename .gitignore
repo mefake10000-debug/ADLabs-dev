@@ -84,3 +84,8 @@ configs/*.bak
 data/storage/count_checks/
 # Working files of scripts/prepare_footage.py
 data/storage/footage_work/
+
+# Segregated pack weights (download via scripts/download_pack_models.py)
+models/pack/**/*.pt
+models/pack/**/*.pth
+models/pack/**/*.onnx
