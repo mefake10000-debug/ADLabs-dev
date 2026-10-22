@@ -42,6 +42,8 @@ models/*.pt
 models/*.onnx
 models/*.engine
 !models/.gitkeep
+# CLIP / open_clip caches (e.g. weights/clip/ViT-B-32.pt) — download locally, never commit
+weights/
 
 # IDE and OS
 .vscode/

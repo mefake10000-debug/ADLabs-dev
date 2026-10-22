@@ -43,6 +43,17 @@ docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d
 
 Folder layout: `01-detection/` · `02-tracking/` · `03-reid/` · `04-attributes/` · `05-seg/` — see `models/pack/README.md`.
 
+## CLIP weights mount (YOLO-World text encoder)
+
+Host path `weights/clip/ViT-B-32.pt` (gitignored; ~350MB) is mounted into the edge container:
+
+| Host | Container | Compose |
+|------|-----------|---------|
+| `./weights` | `/app/weights:ro` | `docker-compose.yml` → `edge-analyzer` |
+| env | `CLIP_WEIGHTS_PATH` (default `/app/weights/clip/ViT-B-32.pt`) | same service |
+
+If `weights/` is missing on disk, create it and place `ViT-B-32.pt` before expecting in-container CLIP / YOLO-World class encoding. Pack overlay (`docker-compose.pack.yml`) is separate and optional.
+
 ## Run together
 
 ```bash

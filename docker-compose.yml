@@ -38,6 +38,8 @@ services:
       - ./data/sample_videos:/app/data/sample_videos:ro
       - ./data/storage:/app/data/storage
       - ./models:/app/models
+      # CLIP text encoder for YOLO-World (host: weights/clip/ViT-B-32.pt → /app/weights/clip/)
+      - ./weights:/app/weights:ro
     environment:
       - PYTHONUNBUFFERED=1
       - PIPELINE_CONFIG=/app/configs/pipeline.yaml
@@ -45,6 +47,8 @@ services:
       # Unset by default -- state-changing API calls stay unauthenticated (today's zero-config
       # behaviour) unless you set this to the same value on cloud-dashboard below.
       - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
+      # Optional override if CLIP lives elsewhere; default path matches the mount above.
+      - CLIP_WEIGHTS_PATH=${CLIP_WEIGHTS_PATH:-/app/weights/clip/ViT-B-32.pt}
     restart: unless-stopped
 
   # 3. Cloud Telemetry Ingestion & Web Analytics Dashboard
