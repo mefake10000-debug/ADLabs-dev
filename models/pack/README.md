@@ -25,14 +25,17 @@ pack/
 
 ---
 
-## Downloaded this pass
+## Required pack weights (checklist)
 
-| File | Role | Status |
-|------|------|--------|
-| `01-detection/yolo26n/yolo26n.pt` | Doorway-only fast detector | **Present** (~5.3MB) |
-| `03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt` | Soft ReID backbone | **Present** (~2.9MB) |
+| File | Role | Status | URL |
+|------|------|--------|-----|
+| `01-detection/yolo26n/yolo26n.pt` | Doorway-only fast detector | **Present** (~5.3MB) · not prod-wired | [ultralytics yolo26n](https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt) |
+| `03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt` | Soft ReID backbone | **Present** (~2.9MB) · default-off | [HF osnet_x0_25](https://huggingface.co/paulosantiago/osnet_x0_25_msmt17/resolve/main/osnet_x0_25_msmt17.pt) |
+| `02-tracking/` | OC-SORT / BoT-SORT | **Missing weight N/A** · code deps only | — |
+| `04-attributes/` | Demographics pointer | Use `models/onnx/` (Live) | via `download_models.py` |
+| `05-seg/` | Foot-mask salvage | Use prod `yolo26m-seg.pt` | [yolo26m-seg](https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m-seg.pt) |
 
-Production EdgeSight weights (already in `ADLabs-dev/models/`): yolo26s, yolo26m-pose, yolov8s-worldv2, YuNet, age/gender ViT (+INT8), CLIP ViT-B-32 — run `python scripts/download_models.py` in ADLabs-dev if missing.
+Production EdgeSight weights (`models/` + `models/onnx/`): **yolo26s** (required), yolo26m-pose, yolov8s-worldv2, YuNet, age/gender ViT (+INT8), CLIP ViT-B-32 — `python scripts/download_models.py`.
 
 ---
 

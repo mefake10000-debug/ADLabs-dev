@@ -75,7 +75,9 @@ Open `/dashboard` → chip **EdgeSight live** when Docker is healthy. Sidebar is
 2. **Model-backed intel** → Models & EdgeSight (best models from plans + pack weights)  
 3. Existing Live now / Intelligence / Performance screens — layout unchanged  
 
-Best-model names come from Desktop `models/` pack + Project store `docs/models-to-integrate-*` (Top 5 + existing 7). Pack downloads: yolo26n + OSNet-x0.25; production stack already under `models/` + `models/onnx/`.
+Best-model names come from Desktop `models/` pack + Project store `docs/models-to-integrate-*` + **`docs/full-scope-implementation-checklist.md`**. Pack downloads: yolo26n + OSNet-x0.25; production stack via `python scripts/download_models.py` (includes **yolo26s** + enrichment). Enrichment tier (pose / YuNet / age-gender / YOLO-World / groups) is on **`mefake/integration`**. Multi-cam ReID remains Future — see `docs/multicam-realtime-sync-plan.md` in the Project store.
+
+Calibration Studio (`:8000`) exposes multi-cam strip, tripwire/dwell/queue/staff draw, live queue KPIs, and a model-status HUD with Live / Partial / Future badges (no fake ReID numbers).
 
 ## Git rules
 
