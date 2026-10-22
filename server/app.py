@@ -906,8 +906,8 @@ class ZoneConfig(BaseModel):
     @field_validator("type")
     @classmethod
     def _type(cls, v):
-        if v not in ("dwell", "queue"):
-            raise ValueError("zone type must be 'dwell' or 'queue'")
+        if v not in ("dwell", "queue", "staff"):
+            raise ValueError("zone type must be 'dwell', 'queue', or 'staff'")
         return v
 
 class CalibrationUpdate(BaseModel):
