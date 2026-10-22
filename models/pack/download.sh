@@ -1,43 +1,6 @@
 #!/usr/bin/env bash
-# Download segregated pack weights into models/pack/ (idempotent).
+# Thin wrapper — verified pack downloader lives in scripts/download_pack_models.py
+# (sha256 / LFS-safe / core pack only; no --include-research by default).
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-
-download() {
-  local url="$1" dest="$2" min="${3:-1000000}"
-  mkdir -p "$(dirname "$dest")"
-  if [[ -f "$dest" ]] && [[ "$(stat -f%z "$dest" 2>/dev/null || stat -c%s "$dest")" -ge "$min" ]]; then
-    echo "present: $dest"
-    return 0
-  fi
-  echo "fetch: $dest"
-  curl -L --fail --retry 3 -o "${dest}.part" "$url"
-  mv "${dest}.part" "$dest"
-}
-
-download \
-  "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt" \
-  "$ROOT/01-detection/yolo26n/yolo26n.pt" \
-  4000000
-
-download \
-  "https://huggingface.co/paulosantiago/osnet_x0_25_msmt17/resolve/main/osnet_x0_25_msmt17.pt" \
-  "$ROOT/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt" \
-  2000000
-
-download \
-  "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_5_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth" \
-  "$ROOT/03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth" \
-  8000000
-
-download \
-  "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m-seg.pt" \
-  "$ROOT/05-seg/yolo26m-seg/yolo26m-seg.pt" \
-  40000000
-
-download \
-  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt" \
-  "$ROOT/07-openvocab/yolov8s-worldv2.pt" \
-  20000000
-
-echo "Pack download complete. CLIP stays at repos/ADLabs-dev/weights/clip/ViT-B-32.pt (see pack/06-clip/README.md)."
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+exec python3 "$ROOT/scripts/download_pack_models.py" --dest "$ROOT/models/pack" "$@"

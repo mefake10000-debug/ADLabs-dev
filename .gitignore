@@ -91,6 +91,10 @@ data/storage/footage_work/
 models/pack/**/*.pt
 models/pack/**/*.pth
 models/pack/**/*.onnx
+models/pack/**/*.bin
+models/pack/**/*.zip
+models/pack/**/*.part
+models/pack/**/*.msgpack
 
 # Frame-synced live KPI JSON (edge-analyzer → API)
 data/storage/live/

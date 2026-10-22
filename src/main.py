@@ -212,8 +212,13 @@ class EdgePipeline:
                 params={"device": self.enrichment_device},
             ))
         if face_cfg.get("enabled", True):
+            face_path = self._first_existing_weight(
+                face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx"),
+                "models/onnx/face_detection_yunet_2023mar.onnx",
+                "models/pack/04-face-attr/face_detection_yunet_2023mar.onnx",
+            ) or face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx")
             self.registry.register(ModelSpec(
-                key="face", kind="onnx", path=face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx"),
+                key="face", kind="onnx", path=face_path,
                 capability="face", tier=TIER_SLOW,
                 params={"intra_op_num_threads": self.enrichment_threads},
             ))
@@ -228,8 +233,14 @@ class EdgePipeline:
                 },
             ))
         if prod_cfg.get("enabled", True):
+            prod_path = self._first_existing_weight(
+                prod_cfg.get("weights", "models/yolov8s-worldv2.pt"),
+                "models/yolov8s-worldv2.pt",
+                "models/pack/05-open-vocab/yolov8s-worldv2.pt",
+                "models/pack/07-openvocab/yolov8s-worldv2.pt",
+            ) or prod_cfg.get("weights", "models/yolov8s-worldv2.pt")
             self.registry.register(ModelSpec(
-                key="products", kind="ultralytics", path=prod_cfg.get("weights", "models/yolov8s-worldv2.pt"),
+                key="products", kind="ultralytics", path=prod_path,
                 capability="product", tier=TIER_SLOW,
                 params={"device": self.enrichment_device},
             ))
@@ -247,7 +258,11 @@ class EdgePipeline:
                 self.model_errors["pose"] = self.registry.error("pose") or "unavailable"
 
         if face_cfg.get("enabled", True):
-            weights = face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx")
+            weights = self._first_existing_weight(
+                face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx"),
+                "models/onnx/face_detection_yunet_2023mar.onnx",
+                "models/pack/04-face-attr/face_detection_yunet_2023mar.onnx",
+            ) or face_cfg.get("weights", "models/onnx/face_detection_yunet_2023mar.onnx")
             path = weights if os.path.isabs(weights) else os.path.join(os.getcwd(), weights)
             try:
                 self.face_detector = FaceDetector(
@@ -291,6 +306,16 @@ class EdgePipeline:
             f"demographics={'yes' if self.age_gender else 'no'}, "
             f"products={'yes' if self.world_detector else 'no'}"
         )
+
+    def _first_existing_weight(self, *candidates: str) -> Optional[str]:
+        """Return the first relative/absolute weight path that exists on disk."""
+        for rel in candidates:
+            if not rel:
+                continue
+            path = rel if os.path.isabs(rel) else os.path.join(os.getcwd(), rel)
+            if os.path.isfile(path) and os.path.getsize(path) > 1000:
+                return rel if not os.path.isabs(rel) else path
+        return None
 
     def _resolve_demographics_weights(self, demo_cfg: Dict[str, Any]) -> str:
         """Picks the demographics checkpoint to load.

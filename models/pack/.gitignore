@@ -1,0 +1,12 @@
+# never commit model binaries
+**/*.pt
+**/*.pt.part
+**/*.pth
+**/*.pth.part
+**/*.onnx
+**/*.onnx.part
+**/*.zip
+**/*.zip.part
+**/*.bin
+**/*.bin.part
+**/*.msgpack

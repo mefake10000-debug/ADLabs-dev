@@ -28,13 +28,13 @@ The Next.js site (`~/Desktop/ad-labs-project/repos/adlabs`, branch `mefake/integ
 
 The site polls `/api/edgesight/status`, which server-side fetches EdgeSight `/health`, `/api/v1/live`, analytics, and device health. CORS on this API also allows direct browser GETs from `:3000` when needed.
 
-## Models pack (segregated)
+## Models pack (segregated, verified core)
 
-Next-integrate weights live under **`models/pack/`** (gitignored `.pt` files). Production `models/*.pt` paths are unchanged.
+Next-integrate weights live under **`models/pack/`** (gitignored binaries). Production `models/*.pt` paths are unchanged unless you explicitly swap config.
 
 ```bash
-# Download pack weights (idempotent)
-python scripts/download_pack_models.py
+# Download verified core pack (~1GB; idempotent; no buffalo_l)
+python3 scripts/download_pack_models.py
 # or: bash models/pack/download.sh
 
 # Optional Docker mount of pack inside edge-analyzer
@@ -42,7 +42,9 @@ docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d
 # → /app/models/pack/...
 ```
 
-Folder layout: `01-detection/` · `02-tracking/` · `03-reid/` · `04-attributes/` · `05-seg/` — see `models/pack/README.md`.
+Verified layout: `01-detection/` · `02-tracking/` (algorithms only) · `03-reid/` · `04-face-attr/` · `05-open-vocab/` · `06-shelf/` — see `models/pack/README.md`.
+
+Honest claims: YuNet = redaction/gating not ID; ReID = session-scoped soft body embeddings (default-off); shelf = YOLO-World / YOLOE prompts, not POS SKUs.
 
 ## CLIP weights mount (YOLO-World text encoder)
 

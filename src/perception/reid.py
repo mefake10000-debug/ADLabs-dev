@@ -17,8 +17,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Prefer smaller edge-viable weight first; x0.5 is stronger when present.
+# Prefer verified kaiyangzhou OSNet pack (download_pack_models.py), then legacy nested paths.
 DEFAULT_WEIGHT_CANDIDATES = (
+    "models/pack/03-reid/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth",
+    "models/pack/03-reid/osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth",
     "models/pack/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt",
     "models/pack/03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth",
 )

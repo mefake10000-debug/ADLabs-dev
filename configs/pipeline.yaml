@@ -6,6 +6,8 @@ edge:
   hardware_backend: "auto" # "auto", "coreml", "cuda", or "cpu"
 
 perception:
+  # Production detector stays yolo26s (benchmarked). Pack YOLO11n/s/m live under
+  # models/pack/01-detection/ for A/B — swap model_name only after a local soak.
   model_name: "models/yolo26s.pt"   # production small detector (docs/model-benchmark.md)   # cached in ./models (bind-mounted), so it is downloaded once, not per container
   confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
                                # real person" bar is tracking.track_thresh below; detections between
@@ -78,6 +80,8 @@ models:
 
   face:
     enabled: true
+    # YuNet = face boxes for redaction / attribute gating — NOT shopper identity.
+    # Pack mirror: models/pack/04-face-attr/face_detection_yunet_2023mar.onnx
     weights: "models/onnx/face_detection_yunet_2023mar.onnx"
     score_threshold: 0.55
     min_face_px: 30           # faces smaller than this are too noisy for the attribute model
@@ -104,6 +108,9 @@ models:
 
   products:
     enabled: true
+    # Category interest via YOLO-World prompts — not POS / closed-set grocery SKUs.
+    # Pack: models/pack/05-open-vocab/yolov8s-worldv2.pt (+ yolov8l-worldv2.pt offline).
+    # Shelf masks: models/pack/06-shelf/yoloe-v8s-seg-pf.pt (not wired yet — see pack README).
     weights: "models/yolov8s-worldv2.pt"
     confidence: 0.20
     max_person_overlap: 0.5   # drop detections that are really a shopper wearing the item
@@ -127,13 +134,14 @@ models:
 
 
   # Soft body ReID (OSNet). Default OFF — DPDP / no face ReID / no multi-day gallery.
-  # Pack weights: models/pack/03-reid/osnet-x0_25/ or osnet-x0_5/.
+  # Session-scoped embeddings only; SoftReIdExtractor also probes verified pack paths.
   # Cross-cam global_person_id still requires NTP + overlap + fusion (not shipped).
   reid:
     enabled: false
-    weights: "models/pack/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt"
-    # Prefer x0.5 when present by pointing weights at:
-    #   models/pack/03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth
+    weights: "models/pack/03-reid/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+    # Alternatives (same SoftReIdExtractor fallback chain):
+    #   models/pack/03-reid/osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth
+    #   models/pack/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt   # legacy nested
     device: "cpu"
     interval_frames: 16       # sample embeddings slower than pose/face enrichment
     max_crops_per_tick: 4

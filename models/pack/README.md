@@ -1,67 +1,53 @@
-# Models pack — segregated next-integrate weights
+# Models pack — verified EdgeSight core weights
 
 | | |
 |--|--|
-| **Branch** | **`mefake/integration`** on mefake fork (from `id-switch-detector-staff-zones`) |
-| **Purpose** | On-disk weights for next EdgeSight integrates — **not** mixed into production `models/*.pt` until wired |
-| **Download** | `python scripts/download_pack_models.py` or `bash models/pack/download.sh` |
+| **Branch** | **`mefake/integration`** on mefake fork only |
+| **Download** | `python3 scripts/download_pack_models.py` (default dest = this folder) |
 | **Docker** | `docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d` → `/app/models/pack/` |
-| **Docs** | Project store `docs/models-to-integrate-index.md` · `docs/website-integration.md` |
+| **Research** | Do **not** pass `--include-research` (buffalo_l NON-COMMERCIAL) unless gated license is documented |
 
 ---
 
-## Layout
+## Verified core layout (primary)
 
 ```
 pack/
-  README.md                          ← you are here
-  01-detection/yolo26n/              ← doorway fast-tier detector
-  02-tracking/README.md              ← OC-SORT / BoT-SORT (code deps; no weight yet)
-  03-reid/osnet-x0_25/               ← cross/intra soft ReID (privacy-gated)
-  04-attributes/README.md            ← demographics already in ADLabs-dev/models/onnx/
-  05-seg/README.md                   ← foot-mask salvage uses existing yolo26m-seg.pt
-  download.sh                        ← re-fetch missing files
+  01-detection/     yolo11n / yolo11s / yolo11m / yolo11n-pose
+  02-tracking/      algorithms only (ByteTrack / OC-SORT / BoT-SORT) — no fake binaries
+  03-reid/          OSNet x0.25 + x1.0 (.pth), OSNet ONNX P2, YouTu ReID ONNX P2
+  04-face-attr/     YuNet (redaction / gating — NOT identity), expression + SFace P2
+  05-open-vocab/    yolov8s/l-worldv2 + CLIP ViT-B/32 (HF)
+  06-shelf/         yoloe-v8s-seg-pf (prompt/taxonomy shelf — no POS SKUs)
 ```
 
----
-
-## Required pack weights (checklist)
-
-| File | Role | Status | URL |
-|------|------|--------|-----|
-| `01-detection/yolo26n/yolo26n.pt` | Doorway-only fast detector | **Present** (~5.3MB) · not prod-wired | [ultralytics yolo26n](https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt) |
-| `03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt` | Soft ReID backbone | **Present** (~2.9MB) · default-off | [HF osnet_x0_25](https://huggingface.co/paulosantiago/osnet_x0_25_msmt17/resolve/main/osnet_x0_25_msmt17.pt) |
-| `03-reid/osnet-x0_5/osnet_x0_5_msmt17.pth` | Stronger soft ReID | **Present** (~11MB) · default-off | [HF kaiyangzhou/osnet](https://huggingface.co/kaiyangzhou/osnet) |
-| `05-seg/yolo26m-seg/yolo26m-seg.pt` | Foot-mask salvage | **Present** (mirror) · not prod-wired | ultralytics |
-| `07-openvocab/yolov8s-worldv2.pt` | Shelf/category OV | **Present** (mirror of prod) | ultralytics |
-| `06-clip/` | CLIP ViT-B-32 pointer | Use `weights/clip/` | OpenAI CLIP |
-| `02-tracking/` | OC-SORT / BoT-SORT | **Missing weight N/A** · code deps only | — |
-| `04-attributes/` | Demographics pointer | Use `models/onnx/` (Live) | via `download_models.py` |
-| `05-seg/` | Foot-mask salvage | Use prod `yolo26m-seg.pt` | [yolo26m-seg](https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m-seg.pt) |
-
-Production EdgeSight weights (`models/` + `models/onnx/`): **yolo26s** (required), yolo26m-pose, yolov8s-worldv2, YuNet, age/gender ViT (+INT8), CLIP ViT-B-32 — `python scripts/download_models.py`.
+Legacy nested folders (`01-detection/yolo26n/`, `03-reid/osnet-x0_25/`, `05-seg/`, `07-openvocab/`) may still exist from earlier passes; SoftReId / products path resolution falls back to them when present.
 
 ---
 
-## Honest notes
+## Wiring status (honest)
 
-- Pack weights are **not** production-wired until config + code land (see to-integrate dossiers).  
-- OSNet stays **default-off** (DPDP / no face ReID).  
-- Marketing `/dashboard` remains simulated unless EdgeSight Docker is up and the site live-ops blend is used.
+| Weight | Wired into live pipeline? |
+|--------|---------------------------|
+| Production `models/yolo26s.pt` | **Yes** — person detect (unchanged) |
+| Pack `01-detection/yolo11*.pt` | **On disk only** — swap `perception.model_name` after soak |
+| Pack `yolo11n-pose.pt` | **On disk only** — prod pose stays `yolo26m-pose.pt` |
+| OSNet x0.25 verified `.pth` | **Path wired**, `models.reid.enabled: false` (session-scoped soft ReID) |
+| OSNet ONNX / YouTu | **Not hooked** — torch-free fallback TBD |
+| YuNet (prod onnx + pack mirror) | **Yes** — face boxes for redaction / attribute gating |
+| Expression / SFace | **Not hooked** — SFace only for consented staff if ever enabled |
+| `yolov8s-worldv2` (prod + pack) | **Yes** — category interest via prompts (not POS SKUs) |
+| `yolov8l-worldv2` / CLIP HF pack | **On disk** — prod CLIP still `weights/clip/ViT-B-32.pt` |
+| `yoloe-v8s-seg-pf` | **Not hooked** — shelf masks via YOLOE prompts future |
+
+## Mac ARM notes
+
+- Default Docker torch index is **CPU**. Enrichment on MPS is unsafe with dual-thread detect+enrich — config pins enrichment to CPU when fast tier owns MPS.
+- CLIP HF `pytorch_model.bin` (~605MB) is heavy on disk; prefer existing OpenAI CLIP `weights/clip/` for YOLO-World text encoder in Docker.
 
 ## Re-download
 
 ```bash
-bash ~/Desktop/ad-labs-project/models/pack/download.sh
-# or inside ADLabs-dev (mefake branch):
-python scripts/download_pack_models.py
+python3 scripts/download_pack_models.py
+# or: bash models/pack/download.sh
 ```
-
-## Docker (this repo)
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d
-python scripts/download_pack_models.py
-```
-
-Pack appears at `/app/models/pack/` inside `edge-analyzer`.

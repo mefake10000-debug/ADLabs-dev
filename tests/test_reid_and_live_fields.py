@@ -16,11 +16,22 @@ from src.perception.reid import SoftReIdExtractor
 
 class TestSoftReIdDefaultOff(unittest.TestCase):
     def test_default_off_reports_weights_without_loading(self):
-        pack = Path(__file__).resolve().parents[1] / "models" / "pack" / "03-reid" / "osnet-x0_25" / "osnet_x0_25_msmt17.pt"
+        root = Path(__file__).resolve().parents[1]
+        verified = (
+            root / "models" / "pack" / "03-reid"
+            / "osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+        )
+        legacy = root / "models" / "pack" / "03-reid" / "osnet-x0_25" / "osnet_x0_25_msmt17.pt"
+        if verified.is_file():
+            weights = str(verified)
+        elif legacy.is_file():
+            weights = str(legacy)
+        else:
+            weights = str(verified)
         extractor = SoftReIdExtractor(
-            weights=str(pack) if pack.is_file() else "models/pack/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt",
+            weights=weights,
             enabled=False,
-            base_dir=str(Path(__file__).resolve().parents[1]),
+            base_dir=str(root),
         )
         status = extractor.status()
         self.assertFalse(status["enabled"])

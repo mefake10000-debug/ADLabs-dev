@@ -4,9 +4,21 @@
 #   docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d
 #
 # Inside edge-analyzer: /app/models/pack/...
-# Desktop mirror: ~/Desktop/ad-labs-project/models/pack/
+# Host: ./models/pack/  (python3 scripts/download_pack_models.py)
+#
+# Verified layout (core, no buffalo_l):
+#   01-detection/   yolo11n/s/m + yolo11n-pose
+#   02-tracking/    algorithms only (README)
+#   03-reid/        OSNet x0.25/x1.0 + ONNX / YouTu
+#   04-face-attr/   YuNet (redaction) + expression/sface P2
+#   05-open-vocab/  yolov8s/l-worldv2 + CLIP HF
+#   06-shelf/       yoloe-v8s-seg-pf
+#
+# Main compose already mounts ./models and ./weights; this overlay is explicit
+# documentation + ensures pack is available even if models/ is remapped later.
 
 services:
   edge-analyzer:
     volumes:
       - ./models/pack:/app/models/pack:ro
+      - ./weights:/app/weights:ro
