@@ -1,8 +1,12 @@
-# Models pack — downloaded weights (segregated)
+# Models pack — segregated next-integrate weights
 
-**Purpose:** On-disk weights for next EdgeSight integrates, kept **out of** the production `ADLabs-dev/models/*.pt` root until wired.  
-**Docs index:** `../README.md` + Project store `docs/models-to-integrate-index.md`  
-**Runtime mount:** `repos/ADLabs-dev/models/pack/` (mirrors this tree for Docker)
+| | |
+|--|--|
+| **Branch** | `integration` / `mefake/integration` on mefake fork (from `id-switch-detector-staff-zones`) |
+| **Purpose** | On-disk weights for next EdgeSight integrates — **not** mixed into production `models/*.pt` until wired |
+| **Download** | `python scripts/download_pack_models.py` or `bash models/pack/download.sh` |
+| **Docker** | `docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d` → `/app/models/pack/` |
+| **Docs** | Project store `docs/models-to-integrate-index.md` · `docs/website-integration.md` |
 
 ---
 
