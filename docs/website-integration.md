@@ -17,13 +17,14 @@ The Next.js site (`~/Desktop/ad-labs-project/repos/adlabs`, branch `mefake/integ
 
 | Surface | URL |
 |---------|-----|
-| Site dashboard | http://localhost:3000/dashboard |
-| Models & EdgeSight | http://localhost:3000/dashboard → sidebar **Models & EdgeSight** |
+| **Portal (only user-facing)** | http://localhost:3000/dashboard |
 | Calibration / Live ops | http://localhost:3000/dashboard/live |
-| EdgeSight API / Calibration Studio | http://localhost:8000 |
-| Streamlit ops UI | http://localhost:8501 |
-| Site proxy (preferred) | http://localhost:3000/api/edgesight/status |
-| Health proxy | http://localhost:3000/api/edgesight/health |
+| Live video + KPIs | http://localhost:3000/dashboard/live?panel=video |
+| Calibration Studio (embedded) | http://localhost:3000/dashboard/live?panel=calib · rewrite `/dashboard/live/calibrate` → `:8000` |
+| Streamlit ops (embedded) | http://localhost:3000/dashboard/live?panel=ops · Streamlit `baseUrlPath=/dashboard/live/ops` |
+| Status proxy | http://localhost:3000/api/edgesight/status |
+| EdgeSight API proxy | http://localhost:3000/api/v1/* · http://localhost:3000/docs |
+| Docker backends (not primary UX) | `:8000` API/Calibration · `:8501` Streamlit |
 
 The site polls `/api/edgesight/status`, which server-side fetches EdgeSight `/health`, `/api/v1/live`, analytics, and device health. CORS on this API also allows direct browser GETs from `:3000` when needed.
 

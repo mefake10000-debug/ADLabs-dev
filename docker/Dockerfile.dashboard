@@ -18,6 +18,7 @@ RUN mkdir -p /app/data/storage
 
 EXPOSE 8000 8501
 
-# Entrypoint script that starts both FastAPI telemetry receiver and Streamlit dashboard
-CMD ["sh", "-c", "uvicorn server.app:app --host 0.0.0.0 --port 8000 & streamlit run server/dashboard.py --server.port 8501 --server.address 0.0.0.0"]
+# FastAPI (:8000) + Streamlit (:8501). baseUrlPath matches the website portal route
+# /dashboard/live/ops so the ops UI embeds under localhost:3000 without a separate tab.
+CMD ["sh", "-c", "uvicorn server.app:app --host 0.0.0.0 --port 8000 & streamlit run server/dashboard.py --server.port 8501 --server.address 0.0.0.0 --server.baseUrlPath=/dashboard/live/ops --browser.gatherUsageStats=false"]
 

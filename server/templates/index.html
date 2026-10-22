@@ -42,6 +42,22 @@
 </head>
 <body class="flex h-screen overflow-hidden text-sm">
 
+    <!-- Shown only when this page is opened directly on :8000 (not iframe'd from the :3000 portal). -->
+    <div id="portal-note" class="hidden fixed top-0 inset-x-0 z-[100] bg-emerald-900/95 border-b border-emerald-500/40 px-4 py-2 text-center text-xs text-emerald-100">
+        Prefer the AD Labs website portal —
+        <a class="font-semibold underline decoration-emerald-300/70 hover:text-white" href="http://localhost:3000/dashboard/live">localhost:3000/dashboard/live</a>
+        (Calibration Studio is embedded there). This :8000 surface stays available as API / backend.
+        <button type="button" onclick="document.getElementById('portal-note').classList.add('hidden')" class="ml-3 underline opacity-80 hover:opacity-100">Dismiss</button>
+    </div>
+    <script>
+        try {
+            if (window.top === window.self) {
+                document.getElementById('portal-note').classList.remove('hidden');
+                document.body.style.paddingTop = '36px';
+            }
+        } catch (e) { /* cross-origin iframe — treat as embedded */ }
+    </script>
+
     <!-- 1. LEFT NAVIGATION SIDEBAR -->
     <aside class="w-64 bg-[#0E1420] border-r border-surface-border flex flex-col justify-between shrink-0">
         <div>

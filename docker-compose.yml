@@ -60,6 +60,13 @@ services:
     ports:
       - "8000:8000"   # FastAPI Telemetry Ingestion Endpoint
       - "8501:8501"   # Streamlit Real-Time Operations UI
+    # baseUrlPath aligns Streamlit with portal route /dashboard/live/ops (website embeds this).
+    command:
+      [
+        "sh",
+        "-c",
+        "uvicorn server.app:app --host 0.0.0.0 --port 8000 & streamlit run server/dashboard.py --server.port 8501 --server.address 0.0.0.0 --server.baseUrlPath=/dashboard/live/ops --browser.gatherUsageStats=false",
+      ]
     volumes:
       - ./server:/app/server:ro
       - ./configs:/app/configs
@@ -69,6 +76,11 @@ services:
       - PYTHONUNBUFFERED=1
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
       - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
+      # Browser-facing API for Streamlit <img> tags — portal reverse-proxy on :3000
+      - PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-http://localhost:3000}
+      - PORTAL_LIVE_URL=${PORTAL_LIVE_URL:-http://localhost:3000/dashboard/live}
+      # In-container calls still hit local uvicorn
+      - API_BASE_URL=${API_BASE_URL:-http://127.0.0.1:8000}
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s

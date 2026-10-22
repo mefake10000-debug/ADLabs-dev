@@ -8,8 +8,10 @@ import requests
 import streamlit as st
 
 API_BASE = os.environ.get("API_BASE_URL", "http://localhost:8000")
-# Browser-facing address for the MJPEG stream / snapshot <img> tags (may differ from API_BASE inside Docker)
-PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE_URL", "http://localhost:8000")
+# Browser-facing address for the MJPEG stream / snapshot <img> tags (may differ from API_BASE inside Docker).
+# Prefer the :3000 portal reverse-proxy so operators stay on the website.
+PUBLIC_API_BASE = os.environ.get("PUBLIC_API_BASE_URL", "http://localhost:3000")
+PORTAL_LIVE_URL = os.environ.get("PORTAL_LIVE_URL", "http://localhost:3000/dashboard/live")
 AUTO_REFRESH_DEFAULT = os.environ.get("DASHBOARD_AUTO_REFRESH", "1") == "1"
 API_KEY = os.environ.get("EDGESIGHT_API_KEY")  # only needed if the API enforces it (see server/app.py)
 
@@ -149,7 +151,10 @@ with st.sidebar:
 
     auto_refresh = st.checkbox("Auto Refresh (every 5s)", value=AUTO_REFRESH_DEFAULT)
     st.markdown("---")
-    st.markdown(f"[🎯 Open Calibration Studio (click-to-draw)]({PUBLIC_API_BASE}/)")
+    st.markdown(
+        f"[🎯 Calibration Studio in portal]({PORTAL_LIVE_URL}?panel=calib) · "
+        f"[Live video + KPIs]({PORTAL_LIVE_URL}?panel=video)"
+    )
     st.info("Pure Vision-Based Analytics — No POS or external sensor integration required.")
 
 # Everything below the sidebar refreshes as a fragment. The old `time.sleep(5); st.rerun()` loop never
@@ -380,7 +385,7 @@ def page_body():
                 "and wait time. Draw and edit both with the click-to-draw **Calibration Studio** — it's the single place "
                 "these are created or removed, so this view and the Studio never disagree about what's live."
             )
-            st.link_button("🎯 Open Calibration Studio", f"{PUBLIC_API_BASE}/", use_container_width=False)
+            st.link_button("🎯 Calibration Studio (portal)", f"{PORTAL_LIVE_URL}?panel=calib", use_container_width=False)
 
             tripwires = list(cam_cfg.get("tripwires", []))
             zones = list(cam_cfg.get("zones", []))
