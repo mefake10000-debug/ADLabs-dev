@@ -17,7 +17,7 @@ default to **balanced**.
 
 | Knob | Fast | **Balanced (default)** | Quality |
 |------|------|------------------------|---------|
-| Detector | `models/yolo26n.pt` | `models/yolo26n.pt` | RF-DETR (or `yolo26s` if `DETECTOR_BACKEND=yolo26`) |
+| Detector | `models/yolo26n.pt` | `models/yolo26n.pt` | `models/yolo26s.pt` (Ultralytics; RF-DETR only if `DETECTOR_BACKEND=rfdetr`) |
 | `imgsz` | 320 | **416** | 640 (YOLO) |
 | `infer_every_n` | 3 | **2** | 1 |
 | Enrichment (pose/face/CLIP/world) | off | **off** | on (yaml gates) |

@@ -1,12 +1,15 @@
-"""Unit tests for parallel-box overlay geometry and OVERLAY_BOX_STYLE."""
+"""Unit tests for NVIDIA pallet overlay geometry and OVERLAY_BOX_STYLE."""
 import os
 import unittest
 
 from src.perception.tracker import Track
 from src.visualizer.debug_overlay import (
     heading_shear_px,
+    inset_parallel_quad,
+    object_label,
     parallel_body_quad,
     parallel_footprint_quad,
+    person_label,
     resolve_overlay_box_style,
 )
 
@@ -15,14 +18,18 @@ class OverlayBoxStyleTests(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("OVERLAY_BOX_STYLE", None)
 
-    def test_default_is_parallel(self):
-        self.assertEqual(resolve_overlay_box_style({}), "parallel")
+    def test_default_is_nvidia(self):
+        self.assertEqual(resolve_overlay_box_style({}), "nvidia")
+
+    def test_parallel_alias_maps_to_nvidia(self):
+        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "parallel"}), "nvidia")
+        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "pallet"}), "nvidia")
 
     def test_env_aabb(self):
         self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "aabb"}), "aabb")
 
     def test_unknown_falls_back(self):
-        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "obb"}), "parallel")
+        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "obb"}), "nvidia")
 
 
 class ParallelGeometryTests(unittest.TestCase):
@@ -60,6 +67,25 @@ class ParallelGeometryTests(unittest.TestCase):
     def test_footprint_quad_four_points(self):
         pts = parallel_footprint_quad([100, 50, 160, 220], 12.0)
         self.assertEqual(pts.shape, (4, 2))
+
+    def test_inset_stays_parallelogram(self):
+        body = parallel_body_quad([100.0, 50.0, 160.0, 220.0], 18.0)
+        inner = inset_parallel_quad(body, inset=4.0)
+        self.assertEqual(inner.shape, (4, 2))
+
+
+class LabelRulesTests(unittest.TestCase):
+    def test_person_label_priority(self):
+        t = Track(7, [10, 10, 40, 80], 0.9, 1.0)
+        self.assertEqual(person_label(t), "person ID:7")
+        t.dwell_s = 3.2
+        self.assertIn("person ID:7", person_label(t))
+        self.assertIn("3s", person_label(t))
+
+    def test_object_label_from_class_name(self):
+        self.assertEqual(object_label({"label": "handbag"}), "handbag")
+        self.assertEqual(object_label({"class_name": "bottle"}), "bottle")
+        self.assertEqual(object_label({"class_id": 39}), "class_39")
 
 
 if __name__ == "__main__":

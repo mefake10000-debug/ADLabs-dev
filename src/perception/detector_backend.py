@@ -1,14 +1,15 @@
-"""Detector backend selection (YOLO26 fast path vs RF-DETR SOTA/alternate).
+"""Detector backend selection (Ultralytics YOLO default; RF-DETR opt-in).
 
 Env (wins over yaml):
-  DETECTOR_BACKEND=yolo26|rfdetr
+  DETECTOR_BACKEND=yolo26|yolo11|rfdetr
   RFDETR_VARIANT=nano|small          # Apache-2.0 sizes only (not XL/2XL PML)
   RFDETR_WEIGHTS=<path|filename>     # optional; bare name uses RF_HOME cache
   RF_HOME / ROBOFLOW_HOME            # rfdetr weight cache (upstream)
 
 Defaults:
-  EDGE_PERF_MODE=fast|balanced → yolo26 (YOLO26n)
-  EDGE_PERF_MODE=quality       → rfdetr (SOTA Apache path) unless DETECTOR_BACKEND set
+  Always Ultralytics YOLO26 (or YOLO11 via EDGESIGHT_DETECT_MODEL / yolo11 alias)
+  unless DETECTOR_BACKEND=rfdetr is set explicitly. RF-DETR is never the default,
+  including EDGE_PERF_MODE=quality — accuracy path stays YOLO (yolo26s / imgsz 640).
 """
 from __future__ import annotations
 
@@ -16,8 +17,11 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 BACKEND_YOLO26 = "yolo26"
+BACKEND_YOLO11 = "yolo11"
 BACKEND_RFDETR = "rfdetr"
-_VALID_BACKENDS = (BACKEND_YOLO26, BACKEND_RFDETR)
+# yolo11 is an Ultralytics alias that resolves to the same YOLO path (weights via env/yaml).
+_VALID_BACKENDS = (BACKEND_YOLO26, BACKEND_YOLO11, BACKEND_RFDETR)
+_ULTRALYTICS_BACKENDS = (BACKEND_YOLO26, BACKEND_YOLO11)
 _VALID_VARIANTS = ("nano", "small")
 
 # Upstream published weight filenames (Apache-2.0 COCO checkpoints).
@@ -42,21 +46,22 @@ def resolve_detector_backend(
     pipeline_cfg: Optional[Dict[str, Any]] = None,
     perf_mode: Optional[str] = None,
 ) -> str:
-    """Pick yolo26 (fast/balanced default) or rfdetr (quality/SOTA default)."""
+    """Pick Ultralytics YOLO (default) or RF-DETR when explicitly requested.
+
+    ``perf_mode`` is accepted for call-site compatibility but does **not** switch
+    the backend — quality uses heavier YOLO weights, not RF-DETR, unless env/yaml
+    sets ``DETECTOR_BACKEND=rfdetr``.
+    """
+    del perf_mode  # unused: Ultralytics is always the default
     env = (os.environ.get("DETECTOR_BACKEND") or "").strip().lower()
     if env in _VALID_BACKENDS:
-        return env
+        return BACKEND_YOLO26 if env == BACKEND_YOLO11 else env
 
     cfg = (pipeline_cfg or {}).get("perception") or {}
     raw = str(cfg.get("detector_backend") or "").strip().lower()
     if raw in _VALID_BACKENDS:
-        return raw
+        return BACKEND_YOLO26 if raw == BACKEND_YOLO11 else raw
 
-    mode = (perf_mode or "").strip().lower()
-    if not mode:
-        mode = (os.environ.get("EDGE_PERF_MODE") or "").strip().lower()
-    if mode == "quality":
-        return BACKEND_RFDETR
     return BACKEND_YOLO26
 
 
@@ -98,7 +103,13 @@ def backend_label(backend: str, variant: Optional[str] = None) -> str:
     if backend == BACKEND_RFDETR:
         v = variant or resolve_rfdetr_variant()
         return f"rfdetr-{v}"
+    if backend == BACKEND_YOLO11:
+        return "yolo11"
     return "yolo26"
+
+
+def is_ultralytics_backend(backend: str) -> bool:
+    return (backend or "").strip().lower() in _ULTRALYTICS_BACKENDS
 
 
 def rfdetr_runtime_probe() -> Tuple[bool, str]:

@@ -9,8 +9,10 @@ except ImportError:
 
 from src.perception.detector_backend import (
     BACKEND_RFDETR,
+    BACKEND_YOLO11,
     BACKEND_YOLO26,
     RFDETR_RESOLUTIONS,
+    is_ultralytics_backend,
     resolve_rfdetr_variant,
     resolve_rfdetr_weights,
 )
@@ -20,17 +22,28 @@ logger = logging.getLogger(__name__)
 # COCO person class id (shared by YOLO26 and RF-DETR COCO checkpoints).
 _PERSON_CLASS_ID = 0
 
+# Retail-relevant COCO class ids drawn on the MJPEG overlay (not tracked).
+# Person (0) is handled separately with anthropometric filters + ByteTrack.
+_STORE_OBJECT_CLASS_IDS = (
+    24, 25, 26, 27, 28,  # backpack, umbrella, handbag, tie, suitcase
+    39, 41,  # bottle, cup
+    56, 57, 58, 59, 60,  # chair, couch, potted plant, bed, dining table
+    62, 63, 64, 65, 66, 67,  # tv, laptop, mouse, remote, keyboard, cell phone
+    73, 74, 76,  # book, clock, vase
+)
+
 
 class PersonDetector:
-    """Person detector with YOLO26 (default) or RF-DETR (Apache SOTA) backends.
+    """Person (+ optional store-object) detector via Ultralytics YOLO by default.
 
+    RF-DETR remains an opt-in Apache alternate (``DETECTOR_BACKEND=rfdetr``).
     There is deliberately no lower-accuracy classical fallback: HOG+SVM recovered only
     ~7-14% of people on real shop footage (docs/tracking-benchmark.md). With
     require_model=True a model that cannot load is a startup error. Without it the
     detector returns no detections and logs an error.
 
-    Both backends emit ``bbox`` as xyxy floats so ByteTrack / overlays stay unchanged.
-    Parallel-box overlays (OVERLAY_BOX_STYLE) consume the same xyxy AABB.
+    ``detect()`` returns person boxes for ByteTrack. ``detect_frame()`` also returns
+    store-object boxes (COCO class names) for the NVIDIA-style overlay labels.
     """
 
     def __init__(
@@ -49,10 +62,14 @@ class PersonDetector:
         rfdetr_variant: Optional[str] = None,
         rfdetr_weights: Optional[str] = None,
         pipeline_cfg: Optional[Dict[str, Any]] = None,
+        detect_store_objects: bool = True,
     ):
         self.backend = (backend or BACKEND_YOLO26).strip().lower()
+        if self.backend == BACKEND_YOLO11:
+            self.backend = BACKEND_YOLO26
         if self.backend not in (BACKEND_YOLO26, BACKEND_RFDETR):
-            raise ValueError(f"Unknown detector backend '{backend}' (use yolo26|rfdetr)")
+            raise ValueError(f"Unknown detector backend '{backend}' (use yolo26|yolo11|rfdetr)")
+        self.detect_store_objects = bool(detect_store_objects)
 
         self.model_name = model_name
         self.conf_thresh = conf_thresh
@@ -171,43 +188,76 @@ class PersonDetector:
 
     def detect(self, frame: Any) -> List[Dict[str, Any]]:
         """Detect people in frame. Returns list of bounding boxes with confidence scores."""
+        people, _objects = self.detect_frame(frame)
+        return people
+
+    def detect_frame(self, frame: Any) -> tuple:
+        """Return ``(people, store_objects)`` for track + overlay in one YOLO pass."""
         if self.model is None:
             if not self._warned_no_model:
                 logger.error("PersonDetector has no model loaded; returning no detections.")
                 self._warned_no_model = True
-            return []
+            return [], []
 
         if self.backend == BACKEND_RFDETR:
-            return self._detect_rfdetr(frame)
+            return self._detect_rfdetr(frame), []
         return self._detect_yolo(frame)
 
-    def _detect_yolo(self, frame: Any) -> List[Dict[str, Any]]:
+    def _class_name(self, cls: int) -> str:
+        names = getattr(self.model, "names", None) or {}
+        if isinstance(names, dict):
+            return str(names.get(cls, f"class_{cls}"))
+        if isinstance(names, (list, tuple)) and 0 <= cls < len(names):
+            return str(names[cls])
+        return f"class_{cls}"
+
+    def _detect_yolo(self, frame: Any) -> tuple:
         try:
-            # Run inference targeting class 0 ('person' in COCO dataset)
+            class_ids = [_PERSON_CLASS_ID]
+            if self.detect_store_objects and is_ultralytics_backend(self.backend):
+                class_ids = [_PERSON_CLASS_ID, *_STORE_OBJECT_CLASS_IDS]
+
             results = self.model.predict(
                 source=frame,
-                classes=[_PERSON_CLASS_ID],
+                classes=class_ids,
                 conf=self.conf_thresh,
                 iou=self.iou_thresh,
                 device=self.device,
                 imgsz=self.imgsz,
-                verbose=False
+                verbose=False,
             )
 
-            detections = []
+            people: List[Dict[str, Any]] = []
+            objects: List[Dict[str, Any]] = []
             if results and len(results) > 0:
                 boxes = results[0].boxes
                 for box in boxes:
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
                     conf = float(box.conf[0].item())
                     cls = int(box.cls[0].item())
-                    det = self._filter_box(x1, y1, x2, y2, conf, cls)
-                    if det:
-                        detections.append(det)
-            return self._suppress_contained_duplicates(detections)
+                    if cls == _PERSON_CLASS_ID:
+                        det = self._filter_box(x1, y1, x2, y2, conf, cls)
+                        if det:
+                            det["label"] = "person"
+                            det["class_name"] = "person"
+                            people.append(det)
+                    elif self.detect_store_objects:
+                        # Looser geometry for merchandising / fixtures (not anthropometric).
+                        w = x2 - x1
+                        h = y2 - y1
+                        if w < 12 or h < 12 or (w * h) < 400:
+                            continue
+                        objects.append({
+                            "bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+                            "confidence": round(conf, 3),
+                            "class_id": cls,
+                            "label": self._class_name(cls),
+                            "class_name": self._class_name(cls),
+                        })
+            return self._suppress_contained_duplicates(people), objects[:32]
         except Exception as e:
             logger.error(f"Detection error: {e}")
-            return []
+            return [], []
 
     def _detect_rfdetr(self, frame: Any) -> List[Dict[str, Any]]:
         """RF-DETR predict → xyxy person boxes (supervision.Detections)."""

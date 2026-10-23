@@ -32,12 +32,14 @@ class DetectorBackendTests(unittest.TestCase):
         resolved = resolve_performance({})
         self.assertEqual(resolved["detector_backend"], BACKEND_YOLO26)
 
-    def test_quality_defaults_to_rfdetr(self):
+    def test_quality_defaults_to_ultralytics_yolo26(self):
+        """Accuracy path stays Ultralytics; RF-DETR is opt-in only."""
         os.environ["EDGE_PERF_MODE"] = "quality"
-        self.assertEqual(resolve_detector_backend({}), BACKEND_RFDETR)
+        self.assertEqual(resolve_detector_backend({}), BACKEND_YOLO26)
         resolved = resolve_performance({})
-        self.assertEqual(resolved["detector_backend"], BACKEND_RFDETR)
-        self.assertEqual(resolved["rfdetr_variant"], "nano")
+        self.assertEqual(resolved["detector_backend"], BACKEND_YOLO26)
+        self.assertEqual(resolved["model_name"], "models/yolo26s.pt")
+        self.assertEqual(resolved["imgsz"], 640)
 
     def test_env_backend_wins(self):
         os.environ["EDGE_PERF_MODE"] = "quality"
@@ -47,6 +49,9 @@ class DetectorBackendTests(unittest.TestCase):
         os.environ["EDGE_PERF_MODE"] = "fast"
         os.environ["DETECTOR_BACKEND"] = "rfdetr"
         self.assertEqual(resolve_detector_backend({}), BACKEND_RFDETR)
+
+        os.environ["DETECTOR_BACKEND"] = "yolo11"
+        self.assertEqual(resolve_detector_backend({}), BACKEND_YOLO26)
 
     def test_variant_and_weight_ids(self):
         self.assertEqual(RFDETR_WEIGHT_IDS["nano"], "rf-detr-nano.pth")

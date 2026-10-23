@@ -90,8 +90,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             license="AGPL-3.0",
             status="LIVE",
             path_hint="models/yolo26n.pt",
-            env_flag="DETECTOR_BACKEND=yolo26 (default when EDGE_PERF_MODE=fast)",
-            notes="Jan 2026 edge-optimized; ~38.9 ms CPU-ONNX. Default fast path.",
+            env_flag="DETECTOR_BACKEND=yolo26 (Ultralytics default, all perf modes)",
+            notes="Jan 2026 edge-optimized; ~38.9 ms CPU-ONNX. Default person detector.",
         ),
         StackEntry(
             key="yoloe",
@@ -297,7 +297,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
                 e.status = "PACKED"
                 e.notes = (
                     f"Available (variant={variant}); not selected. "
-                    f"Set DETECTOR_BACKEND=rfdetr (quality default) to go LIVE. {import_detail}"
+                    f"Set DETECTOR_BACKEND=rfdetr to go LIVE (opt-in; Ultralytics is default). "
+                    f"{import_detail}"
                 )
             else:
                 e.status = "OFF"

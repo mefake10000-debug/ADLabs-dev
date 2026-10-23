@@ -155,19 +155,19 @@
                         <section id="view-live" class="tab-content active space-y-5">
                 <div class="grid grid-cols-2 xl:grid-cols-5 gap-4">
                     <div class="bg-surface-card border border-surface-border rounded-xl p-4">
-                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Net occupancy</div>
+                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Present</div>
                         <div class="text-2xl font-bold text-cyan-400" id="kpi-occupancy">0</div>
-                        <div class="text-[10px] text-gray-500 mt-1">Tripwire net or live tracks</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Active track IDs (ground point in frame)</div>
                     </div>
                     <div class="bg-surface-card border border-surface-border rounded-xl p-4">
-                        <div class="text-[11px] font-semibold text-gray-400 mb-1">Entries (tripwire)</div>
+                        <div class="text-[11px] font-semibold text-gray-400 mb-1">In <span class="text-gray-500 font-normal">/ Out</span></div>
                         <div class="text-2xl font-bold text-emerald-400" id="kpi-visitors">0</div>
-                        <div class="text-[10px] text-gray-500 mt-1">Exits <span id="kpi-exits">0</span></div>
+                        <div class="text-[10px] text-gray-500 mt-1">Out <span id="kpi-exits">0</span> · tripwire session</div>
                     </div>
                     <div class="bg-surface-card border border-surface-border rounded-xl p-4">
                         <div class="text-[11px] font-semibold text-gray-400 mb-1">Avg dwell</div>
                         <div class="text-2xl font-bold text-white" id="kpi-dwell">0.0s</div>
-                        <div class="text-[10px] text-gray-500 mt-1">Zone dwell or time-in-frame</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Zone dwell (incl. in-progress)</div>
                     </div>
                     <div class="bg-surface-card border border-surface-border rounded-xl p-4">
                         <div class="text-[11px] font-semibold text-gray-400 mb-1">Queue length</div>
@@ -475,9 +475,9 @@
                 if (!res.ok) return;
                 const d = await res.json();
                 const set = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
-                set('kpi-occupancy', d.net_occupancy ?? 0);
-                set('kpi-visitors', d.total_visitors ?? 0);
-                set('kpi-exits', d.total_exits ?? 0);
+                set('kpi-occupancy', d.people_now ?? d.net_occupancy ?? 0);
+                set('kpi-visitors', d.session_in ?? d.total_visitors ?? 0);
+                set('kpi-exits', d.session_out ?? d.total_exits ?? 0);
                 set('kpi-dwell', (d.avg_dwell_seconds || 0).toFixed(1) + 's');
                 set('kpi-queue', d.queue_length ?? 0);
                 set('kpi-wait', (d.avg_queue_wait_seconds || 0).toFixed(1) + 's');

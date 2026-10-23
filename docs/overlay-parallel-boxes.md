@@ -1,18 +1,69 @@
-# Live overlay: parallel boxes
+# Live overlay: NVIDIA parallel / pallet boxes
 
 ## What changed
 
-Person overlays on the annotated MJPEG stream default to **parallel boxes** instead of axis-aligned YOLO rectangles:
+Person (+ store-object) overlays on the annotated MJPEG stream default to
+**`nvidia`** — a LocateAnything Parallel Box *look-alike* drawn with OpenCV /
+Ultralytics boxes (visual only). **Do not download LocateAnything-3B** (NVIDIA NC).
 
-1. **Body parallelogram** — AABB sheared by track heading so opposite sides stay parallel (cheap oriented look).
-2. **Ground footprint** — small isometric parallelogram under the feet (occupancy cue on retail CCTV).
-3. **Track ID** — thin label at the top-left of the parallelogram; faded trajectory trail unchanged in spirit.
+Each person box:
+
+1. **Body parallelogram** — AABB sheared by track heading (opposite sides stay parallel).
+2. **Inset parallel rail** — inner pallet frame.
+3. **Corner caps** — short L-brackets at each corner (Metropolis / NVIDIA cue).
+4. **Ground footprint** — small isometric parallelogram under the feet.
+5. **Label bar** — `person ID:N` (+ dwell seconds when the track peer fills `dwell_s`).
+
+Store objects (COCO retail classes from the same Ultralytics pass, plus YOLOE /
+YOLO-World open-vocab when enrichment is on) use the same pallet frame with their
+**class name** on the label bar. People are always drawn on top (person priority).
 
 Zones / tripwires / queues keep the same geometry.
 
-This is a **visual-only** change. Detection, tracking, and KPIs are untouched. LocateAnything / open-vocab download stays **FUTURE** (NVIDIA NC).
+## Config
 
-## How shear is computed
+| Flag | Values | Default |
+|------|--------|---------|
+| `OVERLAY_BOX_STYLE` | `nvidia` \| `parallel` \| `pallet` \| `aabb` | `nvidia` |
+| `DETECTOR_BACKEND` | `yolo26` \| `yolo11` \| `rfdetr` | `yolo26` (Ultralytics) |
+
+Aliases: `parallel` and `pallet` resolve to `nvidia`.
+
+Compose (`edge-analyzer`):
+
+```yaml
+- OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-nvidia}
+- DETECTOR_BACKEND=${DETECTOR_BACKEND:-yolo26}
+- EDGE_PERF_MODE=${EDGE_PERF_MODE:-balanced}
+```
+
+Restore classic rectangles:
+
+```bash
+OVERLAY_BOX_STYLE=aabb docker compose up -d edge-analyzer
+```
+
+## Label rules
+
+| Source | Label text |
+|--------|------------|
+| Tracked person | `person ID:<id>` (+ `Ns` dwell, `STAFF`, `(still)`) |
+| COCO store object | YOLO `names[class_id]` (handbag, bottle, …) |
+| Open-vocab (YOLOE / World) | vocabulary / mapped class name |
+
+## API (read-only)
+
+- `GET /api/v1/overlay` — current style + options (no write path; restart edge to change).
+- Live snapshot / device health also report `overlay_box_style` when the edge is writing snapshots.
+
+## Check locally
+
+With Docker up (`EDGE_PERF_MODE=balanced`, `DETECTOR_BACKEND=yolo26`):
+
+- MJPEG: `http://localhost:8000/api/v1/stream/cam_entrance_01`
+- Overlay flags: `http://localhost:8000/api/v1/overlay`
+
+## Shear math (body parallelogram)
 
 ```
 speed = |velocity|  (from Track, ~last 5 history points)
@@ -24,37 +75,3 @@ else if recent history moved ≥ 4 px:
 else:
   shear_x = 0.18 * width   # mild isometric lean when still
 ```
-
-Body quad: bottom edge = AABB feet `(x1,y2)–(x2,y2)`; top edge = same width shifted by `shear_x`. That yields a parallelogram (`cv2.polylines`).
-
-## Config
-
-| Flag | Values | Default |
-|------|--------|---------|
-| `OVERLAY_BOX_STYLE` | `parallel` \| `aabb` | `parallel` |
-
-Compose (`edge-analyzer`):
-
-```yaml
-- OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-parallel}
-```
-
-Restore classic rectangles:
-
-```bash
-OVERLAY_BOX_STYLE=aabb docker compose up -d edge-analyzer
-```
-
-## API (read-only)
-
-- `GET /api/v1/overlay` — current style + options (no write path; restart edge to change).
-- Live snapshot / device health also report `overlay_box_style` when the edge is writing snapshots.
-
-## Check locally
-
-With Docker up (`EDGE_PERF_MODE=fast`):
-
-- MJPEG: `http://localhost:8000/api/v1/stream/cam_entrance_01`
-- Overlay flags: `http://localhost:8000/api/v1/overlay`
-
-Portal Live tab (guided flow) embeds the same stream; site tip may be `3fd81eb` — do not revert UX.

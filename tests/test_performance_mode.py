@@ -50,6 +50,12 @@ class PerformanceModeTests(unittest.TestCase):
         self.assertEqual(resolved["model_name"], QUALITY_PRESET["model_name"])
         self.assertEqual(resolved["imgsz"], 640)
         self.assertTrue(resolved["enrichment"])
+        self.assertEqual(resolved["detector_backend"], "yolo26")
+
+    def test_rfdetr_opt_in_only(self):
+        os.environ["EDGE_PERF_MODE"] = "quality"
+        os.environ["DETECTOR_BACKEND"] = "rfdetr"
+        resolved = resolve_performance({})
         self.assertEqual(resolved["detector_backend"], "rfdetr")
 
     def test_detect_model_env_override(self):

@@ -580,6 +580,10 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "field_status": snap.get("field_status"),
                 "journey": snap.get("journey"),
                 "tripwires": snap.get("tripwires"),
+                "tracks": snap.get("tracks"),
+                "track_ids": snap.get("track_ids"),
+                "session_in": _snap_int("session_in", _snap_int("total_visitors", 0)),
+                "session_out": _snap_int("session_out", _snap_int("total_exits", 0)),
             })
         elif snap and snap.get("_stale"):
             result["snapshot_stale"] = True
@@ -1463,13 +1467,17 @@ def update_camera_calibration(camera_id: str, body: CalibrationUpdate):
     return {"status": "success", "camera": _redact_camera(cam)}
 
 def _resolve_overlay_box_style(snap: Optional[Dict[str, Any]] = None) -> str:
-    """Read overlay style from live snapshot (edge) or local env; default parallel."""
+    """Read overlay style from live snapshot (edge) or local env; default nvidia."""
+    aliases = {"parallel": "nvidia", "pallet": "nvidia"}
+    valid = ("nvidia", "parallel", "pallet", "aabb")
     if snap:
         style = snap.get("overlay_box_style") or (snap.get("models") or {}).get("overlay_box_style")
-        if style in ("parallel", "aabb"):
-            return style
-    raw = (os.environ.get("OVERLAY_BOX_STYLE") or "parallel").strip().lower()
-    return raw if raw in ("parallel", "aabb") else "parallel"
+        if style in valid:
+            return aliases.get(style, style)
+    raw = (os.environ.get("OVERLAY_BOX_STYLE") or "nvidia").strip().lower()
+    if raw not in valid:
+        return "nvidia"
+    return aliases.get(raw, raw)
 
 
 @app.get("/api/v1/overlay")
@@ -1479,11 +1487,13 @@ def get_overlay_settings():
     style = _resolve_overlay_box_style(snap)
     return {
         "overlay_box_style": style,
-        "options": ["parallel", "aabb"],
-        "default": "parallel",
+        "options": ["nvidia", "parallel", "pallet", "aabb"],
+        "default": "nvidia",
+        "aliases": {"parallel": "nvidia", "pallet": "nvidia"},
         "note": (
-            "Set OVERLAY_BOX_STYLE=parallel|aabb on edge-analyzer (Compose) and restart. "
-            "Visual change only — detection/tracking unchanged."
+            "Set OVERLAY_BOX_STYLE=nvidia|parallel|pallet|aabb on edge-analyzer (Compose) "
+            "and restart. nvidia = LocateAnything-style parallel/pallet boxes (OpenCV; "
+            "no LocateAnything-3B download). Labels: person ID:* + COCO/open-vocab class names."
         ),
         "docs": "docs/overlay-parallel-boxes.md",
     }
