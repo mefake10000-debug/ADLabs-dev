@@ -1,7 +1,11 @@
-"""In-memory NFC tap buffer for fashion / apparel use-case modes.
+"""In-memory NFC tap buffer (optional hardware webhook).
 
 No synthetic taps. Readers (or a webhook proxy) POST to /api/v1/nfc/tap;
 GET /api/v1/live exposes recent_taps only when real events arrived this session.
+
+Industry vertical taxonomy (fashion / restaurant / manufacturing / jewelry)
+is retired from the Live IA — kept only as a deprecated alias for older clients.
+Primary honest map is retail_roles (floor roles).
 """
 
 from __future__ import annotations
@@ -84,19 +88,19 @@ def nfc_live_block(limit: int = 20) -> Dict[str, Any]:
             "{product_id, zone?, zone_id?, camera_id?, tapped_at?}"
         ),
         "note": (
-            "No synthetic taps. Wire an NFC reader webhook to this endpoint; "
-            "the Live fashion panel fills only after real events."
+            "Optional hardware stub. No synthetic taps. Not a Live hub segment — "
+            "wire a reader webhook if you need tagged product events."
             if not live
             else "Receiving real NFC tap events this session."
         ),
     }
 
 
-def industry_status_block(
+def retail_roles_block(
     snap: Optional[Dict[str, Any]],
     nfc: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Honest LIVE|PARTIAL|EMPTY|FUTURE|NEEDS-HARDWARE map — never invents rates."""
+    """Honest floor-role maturity map for Retail intelligence — never invents rates."""
     snap = snap or {}
     zones = snap.get("zones") or []
     dwell = [z for z in zones if (z.get("type") or "dwell") == "dwell"]
@@ -105,53 +109,92 @@ def industry_status_block(
     models = snap.get("models") or {}
     queues = snap.get("queues") or []
     staff_now = snap.get("staff_now")
-    pose_on = bool(models.get("pose"))
+    entrance = snap.get("entrance") or {}
+    journey = snap.get("journey") or {}
+    jsum = journey.get("summary") or {}
     products_on = bool(models.get("products")) or bool(products)
-
-    occupied_tables = sum(1 for z in dwell if int(z.get("occupancy") or 0) > 0)
     has_dwell = len(dwell) > 0
-    has_queue_wait = any(
+    has_queue = any(
         (q.get("avg_wait_seconds") is not None) or (q.get("queue_length") is not None)
         for q in queues
-    )
+    ) or snap.get("queue_length") is not None
+
+    stop = entrance.get("stop_rate") if isinstance(entrance, dict) else None
 
     return {
-        "fashion": {
-            "nfc_taps": nfc.get("status", "NEEDS-HARDWARE"),
-            "note": "Person tap → product_id · time · zone via NFC webhook only.",
+        "schema": "floor_roles_v1",
+        "entrance": {
+            "entries": "LIVE" if snap.get("total_visitors") is not None else "EMPTY",
+            "stop_rate": "LIVE" if stop is not None else "FUTURE",
+            "note": "Glass stop-rate stays FUTURE until a glass ROI is calibrated.",
         },
-        "restaurant": {
-            "tables": "LIVE" if has_dwell else "EMPTY",
-            "staff": (
+        "path": {
+            "journey": "LIVE" if jsum else ("PARTIAL" if journey.get("stages") else "EMPTY"),
+            "dead_aisles": "LIVE" if jsum else "EMPTY",
+            "note": "Journey stages from zone tags; cold marked stages → dead_zone.",
+        },
+        "dwell": {
+            "hotspots": "LIVE" if has_dwell else "EMPTY",
+            "note": "Rank dwell polygons by occupancy × dwell — never invent visits.",
+        },
+        "queue": {
+            "length_wait": "LIVE" if has_queue else "EMPTY",
+            "p95": "PARTIAL",
+            "note": "p95 unlocks after settled episode sample size; never a fake percentile.",
+        },
+        "staff": {
+            "coverage": (
                 "LIVE"
                 if staff_now is not None or staff_zones
-                else ("EMPTY" if has_dwell else "EMPTY")
+                else "EMPTY"
             ),
-            "service_timestamps": "PARTIAL" if has_queue_wait else "EMPTY",
+            "response_time_to_queue": "PARTIAL",
+            "note": "Geometry staff tags only — no facial identity.",
+        },
+        "shelf": {
+            "open_vocab": "LIVE" if products_on and products else ("PARTIAL" if products_on else "EMPTY"),
+            "shelf_qa_moondream": "FUTURE",
+            "accounting_join": "FUTURE",
+            "nfc_optional": nfc.get("status", "NEEDS-HARDWARE"),
+            "note": "Open-vocab interest when products model on; NFC webhook optional, not a tab.",
+        },
+    }
+
+
+def industry_status_block(
+    snap: Optional[Dict[str, Any]],
+    nfc: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Deprecated alias — old fashion/restaurant/manufacturing/jewelry map.
+
+    Kept so older clients do not 500; Live hub no longer features these as tabs.
+    Prefer retail_roles_block.
+    """
+    roles = retail_roles_block(snap, nfc)
+    return {
+        "_deprecated": True,
+        "_replaced_by": "retail_roles",
+        "fashion": {
+            "nfc_taps": nfc.get("status", "NEEDS-HARDWARE"),
+            "note": "Deprecated industry tab — use retail_roles.shelf.nfc_optional.",
+        },
+        "restaurant": {
+            "tables": roles["dwell"]["hotspots"],
+            "staff": roles["staff"]["coverage"],
+            "service_timestamps": roles["queue"]["length_wait"],
             "food_served": "FUTURE",
-            "tables_occupied": occupied_tables if has_dwell else None,
-            "tables_calibrated": len(dwell) if has_dwell else None,
-            "note": (
-                "Dwell polygons act as table proxies when calibrated; "
-                "food-served POS link is FUTURE."
-            ),
+            "note": "Deprecated — use dwell / queue / staff floor roles.",
         },
         "manufacturing": {
-            "line_activity": "LIVE" if has_dwell else "EMPTY",
-            "boxes": "LIVE" if products_on and products else ("PARTIAL" if products_on else "EMPTY"),
+            "line_activity": roles["dwell"]["hotspots"],
+            "boxes": roles["shelf"]["open_vocab"],
             "defects": "FUTURE",
-            "note": (
-                "Box/object classes from YOLO/RF-DETR/open-vocab when loaded; "
-                "defect rates stay FUTURE until a defect model is present — never fake %."
-            ),
+            "note": "Deprecated — use shelf open-vocab; defects stay FUTURE.",
         },
         "jewelry": {
-            "high_interaction_zones": "LIVE" if has_dwell else "EMPTY",
-            "touch_proxy_zone_revisits": "PARTIAL" if has_dwell else "EMPTY",
-            "hand_near_shelf_pose": "PARTIAL" if pose_on else "FUTURE",
-            "note": (
-                "Rank zones by dwell/occupancy as interaction proxy; "
-                "hand-near-shelf needs pose enrichment."
-            ),
+            "high_interaction_zones": roles["dwell"]["hotspots"],
+            "touch_proxy_zone_revisits": "PARTIAL" if (snap or {}).get("zones") else "EMPTY",
+            "hand_near_shelf_pose": "FUTURE",
+            "note": "Deprecated — use dwell hotspots.",
         },
     }
