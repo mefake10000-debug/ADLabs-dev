@@ -450,6 +450,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "queue_alert_active": bool(snap.get("queue_alert_active", result["queue_alert_active"])),
                 "infer_fps": snap.get("infer_fps"),
                 "decode_fps": snap.get("decode_fps"),
+                "display_fps": snap.get("display_fps"),
                 "perf_mode": snap.get("perf_mode") or (snap.get("models") or {}).get("perf_mode"),
                 "last_updated": snap.get("timestamp") or result["last_updated"],
                 "source": "live_snapshot",

@@ -21,7 +21,7 @@ class PerformanceModeTests(unittest.TestCase):
         resolved = resolve_performance({})
         self.assertEqual(resolved["mode"], "fast")
         self.assertEqual(resolved["model_name"], FAST_PRESET["model_name"])
-        self.assertEqual(resolved["imgsz"], 416)
+        self.assertEqual(resolved["imgsz"], 320)
         self.assertFalse(resolved["enrichment"])
 
     def test_env_quality_wins(self):

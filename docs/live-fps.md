@@ -14,7 +14,7 @@ only updates when annotated JPEGs are written, so the live wall looked frozen.
 | Knob | Fast | Quality |
 |------|------|---------|
 | Detector | `models/yolo26n.pt` | `models/yolo26s.pt` |
-| `imgsz` | 416 | 640 |
+| `imgsz` | 320 | 640 |
 | `infer_every_n` | 2 | 1 |
 | Enrichment (pose/face/CLIP/world) | **off** | on |
 | Soft ReID | off | opt-in (`models.reid.enabled`) |
@@ -50,32 +50,38 @@ Or edit `configs/pipeline.yaml` → `performance.mode` / `models.enabled`.
 The main loop still runs cameras **sequentially** on one thread. Rough budget on
 Docker CPU (fast tier, M-series host):
 
-| Cameras | Expected infer FPS (per cam, rough) |
-|---------|--------------------------------------|
-| 1 | ~10–15+ |
-| 2 | ~5–10 each (shared CPU) |
-| 3+ | often below demo target — use `EDGE_MAX_CAMERAS=1` or `2` |
+Measured on this Mac (2026-10-23), honest `/api/v1/live` + edge logs:
 
-Portal `/api/v1/live` reports **measured** `infer_fps` / `decode_fps` / `perf_mode`
-from live snapshots — do not trust hardcoded health numbers.
+| Setup | Infer FPS | Display FPS |
+|-------|-----------|-------------|
+| **Before** Docker + enrichment (pose/YuNet/World) 2 cams | **~0.3–1** | boxes stalled |
+| **After** Docker CPU fast, 1 cam | **~1–3** (log) | MJPEG follows JPEG writes |
+| **After** native macOS MPS fast, 1–2 cams | **~6–8** | **~12–14** (last-track overlay) |
+| quality / enrichment on Docker CPU | **~0.3–2** | tracks infer |
+
+Portal `/api/v1/live` reports **measured** `infer_fps` / `display_fps` / `decode_fps` /
+`perf_mode` — do not trust hardcoded health numbers. Boxes update at `infer_fps`;
+the video wall can feel faster when `display_fps` is higher.
 
 ## Native macOS MPS (optional)
 
-Compose stays CPU for a reproducible demo. For higher FPS without Docker GPU:
+Compose stays CPU for a reproducible demo. For demo-target FPS on Apple Silicon:
 
 ```bash
-# Host Python with torch MPS (outside Compose)
-EDGE_PERF_MODE=fast python -m src.main
+# Stop Compose edge first (host + Docker fight over data/storage/live/*.json)
+docker compose stop edge-analyzer
+EDGE_PERF_MODE=fast EDGE_MAX_CAMERAS=1 \
+  TELEMETRY_LOCAL_ENDPOINT=http://localhost:8000/api/v1/telemetry \
+  .venv/bin/python -m src.main
 ```
 
 MPS accelerates the person detector; enrichment still prefers CPU when the fast
-tier owns MPS (thread-safety). Do **not** point Compose at host MPS — the
-container cannot see it.
+tier owns MPS (thread-safety). Do **not** run host edge and Compose edge together.
 
 ## Verify
 
 ```bash
 curl -s http://localhost:8000/api/v1/live | python3 -m json.tool | head -40
-# Look for infer_fps, decode_fps, models.perf_mode, models.person_detector
+# Look for infer_fps, display_fps, decode_fps, models.perf_mode, models.person_detector
 docker logs adlabs-edge-analyzer 2>&1 | grep -E 'Performance mode|Inference FPS'
 ```

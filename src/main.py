@@ -471,8 +471,11 @@ class EdgePipeline:
             "rollup_start_time": time.time(),
             "frames_processed": 0,
             "processed_fps": 0.0,
+            "display_fps": 0.0,
             "fps_window_start": time.time(),
             "fps_window_frames": 0,
+            "display_window_start": time.time(),
+            "display_window_frames": 0,
             "last_in_count": 0,
             "last_out_count": 0,
             # --- Enrichment tier state ---
@@ -617,8 +620,14 @@ class EdgePipeline:
                                 annotated = DebugOverlay.draw_pipeline(**draw_kwargs)
                             frame_path = os.path.join(self.frames_dir, f"{cam_id}.jpg")
                             tmp_path = os.path.join(self.frames_dir, f"{cam_id}.tmp.jpg")
-                            cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                            cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                             os.replace(tmp_path, frame_path)
+                            ctx["display_window_frames"] = int(ctx.get("display_window_frames", 0) or 0) + 1
+                            dwin = time.time() - float(ctx.get("display_window_start", time.time()))
+                            if dwin >= 2.0:
+                                ctx["display_fps"] = round(ctx["display_window_frames"] / dwin, 1)
+                                ctx["display_window_start"] = time.time()
+                                ctx["display_window_frames"] = 0
                         except Exception as e:
                             logger.debug(f"Frame export error for {cam_id}: {e}")
 
@@ -1004,6 +1013,7 @@ class EdgePipeline:
             "queue_alert_active": alert_active,
             "decode_fps": round(float(getattr(ctx.get("reader"), "fps_actual", 0.0) or 0.0), 1),
             "infer_fps": round(float(ctx.get("processed_fps", 0.0) or 0.0), 1),
+            "display_fps": round(float(ctx.get("display_fps", 0.0) or 0.0), 1),
             "tripwires": [
                 {
                     "id": getattr(tw, "wire_id", None) or getattr(tw, "id", "tw"),
@@ -1068,6 +1078,7 @@ class EdgePipeline:
             "avg_dwell_seconds": 0.0,
             "decode_fps": payload["decode_fps"],
             "infer_fps": payload["infer_fps"],
+            "display_fps": payload.get("display_fps"),
             "source": "live_snapshot",
             "models": payload.get("models"),
             "perf_mode": payload.get("perf_mode"),
@@ -1098,6 +1109,10 @@ class EdgePipeline:
                 dwell_acc.append(float(row["avg_dwell_seconds"]))
             store["infer_fps"] = max(store["infer_fps"], float(row.get("infer_fps", 0) or 0))
             store["decode_fps"] = max(store["decode_fps"], float(row.get("decode_fps", 0) or 0))
+            store["display_fps"] = max(
+                float(store.get("display_fps") or 0),
+                float(row.get("display_fps", 0) or 0),
+            )
             if row.get("models"):
                 store["models"] = row["models"]
             if row.get("engagement"):
