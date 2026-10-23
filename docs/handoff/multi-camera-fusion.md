@@ -14,6 +14,8 @@ The detector/tracker remain per camera (YOLO26n/RF-DETR + ByteTrack). OSNet (cur
 
 Each camera zone may include a `store_zone_id`; the same value means the zones overlap in the *physical store*, not merely that they share a label. The camera config may include `floor_homography` mapping pixels to the same floor coordinates. The operator calibrates these values through `/api/v1/config/cameras/{camera_id}/calibration`.
 
+Pixel-space tripwires, zones, glass ROIs, and floor homographies are now saved in a local calibration table under a one-way hash of the source URL/path. Switching a camera to a different video clears those pixel geometries; switching back restores only that source's own geometry. RTSP credentials are not copied into this calibration table.
+
 `configs/pipeline.yaml` has `cross_camera_fusion.enabled: false` by default. Fusion remains gated unless:
 
 - fusion is explicitly enabled;

@@ -6,6 +6,7 @@ import sys
 import time
 import json
 import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -183,6 +184,15 @@ def init_db():
             state TEXT,
             last_change_at TEXT,
             PRIMARY KEY (rule_id, camera_id)
+        )
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS camera_source_calibrations (
+            camera_id TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            calibration_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (camera_id, source_key)
         )
         """)
         conn.execute("""
@@ -910,6 +920,11 @@ def get_live_staff(store_id: str = "store_mumbai_001", camera_id: Optional[str] 
 @app.get("/api/v1/floor-view")
 def get_floor_view(store_id: str = "store_mumbai_001"):
     """Camera coverage/zone map contract; never invents floor coordinates or fusion."""
+    try:
+        from src.analytics.cross_camera_fusion import CrossCameraFusion, project_homography
+    except Exception:
+        CrossCameraFusion = None
+        project_homography = None
     config = _read_config()
     live_dir = _live_dir()
     store_snap = _read_live_snapshot()
@@ -946,7 +961,10 @@ def get_floor_view(store_id: str = "store_mumbai_001"):
             ),
             "source_available": row is not None,
             "frame_age_s": frame_age_s,
-            "floor_homography_ready": bool(camera.get("floor_homography")),
+            "floor_homography_ready": bool(
+                CrossCameraFusion
+                and CrossCameraFusion._valid_homography(camera.get("floor_homography"))
+            ),
         })
         if row is None:
             continue
@@ -958,12 +976,20 @@ def get_floor_view(store_id: str = "store_mumbai_001"):
                 "store_zone_id": str(store_zone_id),
                 "camera_views": [],
             })
+            polygon_pixels = zone.get("polygon")
+            homography = camera.get("floor_homography")
+            polygon_floor = None
+            if polygon_pixels and homography and project_homography:
+                projected = [project_homography(point, homography) for point in polygon_pixels]
+                if all(point is not None for point in projected):
+                    polygon_floor = projected
             entry["camera_views"].append({
                 "camera_id": camera_id,
                 "zone_id": zone.get("id"),
                 "name": zone.get("name"),
                 "type": zone.get("type", "queue" if "queue_length" in zone else "zone"),
-                "polygon_pixels": zone.get("polygon"),
+                "polygon_pixels": polygon_pixels,
+                "polygon_floor_m": polygon_floor,
                 "occupancy_per_camera": zone.get("occupancy", zone.get("queue_length")),
             })
 
@@ -1416,6 +1442,50 @@ def _write_config(config: Dict[str, Any]):
         yaml.safe_dump(config, f, sort_keys=False)
     os.replace(tmp_path, CONFIG_PATH)  # atomic, so the edge never reads a half-written file
 
+
+_CAMERA_CALIBRATION_FIELDS = ("tripwires", "zones", "glass_views", "floor_homography")
+
+
+def _source_key(source: str) -> str:
+    """Stable per-source key without storing or returning RTSP credentials."""
+    return hashlib.sha256(str(source).encode("utf-8")).hexdigest()
+
+
+def _store_source_calibration(camera_id: str, source: str, camera: Dict[str, Any]) -> None:
+    calibration = {field: camera.get(field, []) for field in _CAMERA_CALIBRATION_FIELDS if field != "floor_homography"}
+    if camera.get("floor_homography") is not None:
+        calibration["floor_homography"] = camera["floor_homography"]
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """INSERT INTO camera_source_calibrations (camera_id, source_key, calibration_json, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(camera_id, source_key) DO UPDATE SET
+                 calibration_json = excluded.calibration_json,
+                 updated_at = excluded.updated_at""",
+            (
+                camera_id,
+                _source_key(source),
+                json.dumps(calibration),
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
+
+
+def _load_source_calibration(camera_id: str, source: str) -> Optional[Dict[str, Any]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT calibration_json FROM camera_source_calibrations WHERE camera_id = ? AND source_key = ?",
+            (camera_id, _source_key(source)),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        value = json.loads(row[0])
+        return value if isinstance(value, dict) else None
+    except (TypeError, ValueError):
+        return None
+
 def _find_camera(config: Dict[str, Any], camera_id: str) -> Dict[str, Any]:
     for cam in config.get("cameras", []):
         if cam.get("id") == camera_id:
@@ -1546,12 +1616,28 @@ def list_video_sources():
     videos = sorted(f for f in os.listdir(VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS))
     return {"video_dir": VIDEO_DIR, "videos": [f"{VIDEO_DIR}/{f}" for f in videos]}
 
-# Switch one camera's input source without touching its calibration or other cameras
+# Switch one camera's input; pixel calibration is namespaced by a hash of its source and restored on return.
 @app.post("/api/v1/config/cameras/{camera_id}/source")
 def update_camera_source(camera_id: str, body: SourceUpdate):
     source = _validate_source(body.source)
     config = _read_config()
     cam = _find_camera(config, camera_id)
+    old_source = str(cam.get("source", ""))
+    if old_source != source:
+        # Pixel-space ROIs belong to one camera view/source. Park them under a hash
+        # (never the raw RTSP URL) and restore only when switching back to that source.
+        _store_source_calibration(camera_id, old_source, cam)
+        calibration = _load_source_calibration(camera_id, source) or {
+            "tripwires": [],
+            "zones": [],
+            "glass_views": [],
+        }
+        for field in ("tripwires", "zones", "glass_views"):
+            cam[field] = calibration.get(field, [])
+        if calibration.get("floor_homography") is not None:
+            cam["floor_homography"] = calibration["floor_homography"]
+        else:
+            cam.pop("floor_homography", None)
     cam["source"] = source
     if body.name:
         cam["name"] = body.name

@@ -17,7 +17,12 @@ os.environ["DASHBOARD_AUTO_REFRESH"] = "0"   # the app's sleep+rerun loop would 
 import yaml
 from PIL import Image
 from fastapi.testclient import TestClient
-from streamlit.testing.v1 import AppTest
+try:
+    from streamlit.testing.v1 import AppTest
+except ModuleNotFoundError as exc:
+    if exc.name and exc.name.startswith("streamlit"):
+        raise unittest.SkipTest("Streamlit AppTest requires the optional dashboard dependency")
+    raise
 
 import server.app as server_app
 
