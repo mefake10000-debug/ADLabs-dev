@@ -139,8 +139,17 @@ def retail_roles_block(
         },
         "queue": {
             "length_wait": "LIVE" if has_queue else "EMPTY",
-            "p95": "PARTIAL",
-            "note": "p95 unlocks after settled episode sample size; never a fake percentile.",
+            "p95": (
+                "LIVE"
+                if any((q.get("kpi") or {}).get("p95_available") for q in queues)
+                else "EMPTY"
+            ),
+            "service_rate": (
+                "LIVE"
+                if any((q.get("kpi") or {}).get("service_rate") is not None for q in queues)
+                else ("PARTIAL" if any(q.get("abandon_status") == "PARTIAL" for q in queues) else "EMPTY")
+            ),
+            "note": "p95/service_rate from episodes when samples exist; else empty 0/null — never fake.",
         },
         "staff": {
             "coverage": (
@@ -148,8 +157,13 @@ def retail_roles_block(
                 if staff_now is not None or staff_zones
                 else "EMPTY"
             ),
-            "response_time_to_queue": "PARTIAL",
-            "note": "Geometry staff tags only — no facial identity.",
+            "response_time_to_queue": (
+                (snap.get("staff") or {}).get("status")
+                if isinstance(snap.get("staff"), dict)
+                else "EMPTY"
+            )
+            or "EMPTY",
+            "note": "Geometry staff tags only — no facial identity. Response null until linked zone + arrival.",
         },
         "shelf": {
             "open_vocab": "LIVE" if products_on and products else ("PARTIAL" if products_on else "EMPTY"),

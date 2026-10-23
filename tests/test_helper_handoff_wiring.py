@@ -33,6 +33,22 @@ def test_queue_episodes_abandon_null_without_service_point():
     assert ep["abandon"] is None
     assert m2["abandon_status"] == "PARTIAL"
     assert m2["kpi"]["p95_wait_ms"] is None  # below sample threshold
+    assert m2["kpi"]["p95_empty"] is True
+    assert m2["kpi"]["service_rate"] is None  # no service_point
+
+
+def test_queue_service_rate_zero_when_calibrated_but_empty():
+    q = QueueAnalyzer(
+        "q1", "Checkout",
+        polygon=[[0, 0], [200, 0], [200, 200], [0, 200]],
+        service_point=[100, 100],
+        exit_grace_seconds=0.1,
+    )
+    kpi = q.get_metrics()["kpi"]
+    assert kpi["empty"] is True
+    assert kpi["service_rate"] == 0.0
+    assert kpi["abandon_rate"] == 0.0
+    assert kpi["service_rate_basis"] == "service_point"
 
 
 def test_glass_block_none_when_uncalibrated():

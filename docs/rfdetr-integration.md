@@ -84,12 +84,14 @@ python3 -c "from rfdetr import RFDETRNano; print('ok', RFDETRNano)"
 python3 -c "from src.perception.detector_backend import resolve_detector_backend; \
   import os; os.environ['EDGE_PERF_MODE']='quality'; print(resolve_detector_backend())"
 python3 scripts/download_pack_models_phase2.py --only rfdetr-nano   # dry-run
-# Optional fetch (disk check + HEAD):
-python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano
+# Optional fetch (disk-gated; nano ~350 MB — skip if disk tight; demos stay on YOLO26n):
+python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
 
 # Stack API (with API up)
 curl -s localhost:8000/api/v1/models/stack | python3 -m json.tool | head
 ```
+
+Compose documents the same one-liner on `edge-analyzer` (weights stay out of the image).
 
 `rfdetr` is **commented optional** in `requirements-edge.txt` so the default Docker CPU image stays YOLO-lean. Bake it into a quality image only when needed.
 

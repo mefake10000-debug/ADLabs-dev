@@ -35,6 +35,7 @@ from src.analytics.floor_analytics import FloorAnalytics
 from src.analytics.alerts_engine import AlertsEngine
 from src.analytics.safety_analytics import SafetyAnalytics
 from src.analytics.journey import build_journey_block
+from src.analytics.staff_response import StaffQueueResponseTracker, build_staff_block
 from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
@@ -61,6 +62,11 @@ class EdgePipeline:
         self.store_id = self.pipeline_cfg.get("edge", {}).get("store_id", "store_default")
         self.device_id = self.pipeline_cfg.get("edge", {}).get("device_id", "edge_01")
         self.alerts_engine = AlertsEngine()
+        self.staff_response = StaffQueueResponseTracker(
+            response_timeout_seconds=float(
+                self.pipeline_cfg.get("analytics", {}).get("staff_response_timeout_seconds", 600.0)
+            )
+        )
         self.rollup_interval = self.pipeline_cfg.get("storage", {}).get("rollup_interval_seconds", 30)
 
         # Storage & Telemetry
@@ -1329,10 +1335,12 @@ class EdgePipeline:
             entrance_block = {
                 "glass": None,
                 "stop_rate": None,
+                "conversion_glass_to_entry": None,
+                "glass_entrants": None,
                 "status": "FUTURE",
                 "badge_copy": (
-                    "Stop-rate unlocks once entrance-zone dwell thresholds are exposed. "
-                    "The tracker already computes stationary seconds — we show nothing rather than estimate."
+                    "Mark glass: Set up zones → draw polygon → type glass "
+                    "(or add glass_views in cameras.yaml). Null until then — nothing invented."
                 ),
                 "settling": False,
             }
@@ -1341,19 +1349,24 @@ class EdgePipeline:
                 "glass": glass_block,
                 "stop_rate": glass_block.get("stop_rate"),
                 "conversion_glass_to_entry": glass_block.get("conversion_glass_to_entry"),
+                "glass_entrants": glass_block.get("glass_entrants"),
                 "status": "LIVE",
-                "badge_copy": None,
+                "badge_copy": (
+                    "Measured 0 — glass ROI live, no glass entrants yet."
+                    if (glass_block.get("glass_entrants") or 0) == 0
+                    else None
+                ),
                 "settling": glass_block.get("settling"),
             }
         floor_block = ctx["floor"].snapshot(list(ctx.get("zones") or []), frame_time) if ctx.get("floor") else None
         safety_block = ctx["safety"].snapshot() if ctx.get("safety") else {"active": [], "note": "no safety evaluator"}
-        staff_block = {
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "zones": staff_block_zones,
-            "queue_response": [],
-            "status": "LIVE",
-            "note": "Geometry-based sticky staff tag; no facial ID. response_time_to_queue PARTIAL.",
-        }
+        staff_block = build_staff_block(
+            staff_block_zones,
+            self.staff_response,
+            queues_out,
+            list(ctx.get("staff_zones") or []),
+            frame_time,
+        )
         alerts_block = self.alerts_engine.evaluate({
             "queues": queues_out,
             "queue_length": queue_len,
@@ -1416,8 +1429,6 @@ class EdgePipeline:
             "queues": queues_out,
             "zones": zones_out,
             "staff_zones": staff_zones,
-            "staff": {"zones": staff_zones},
-            "alerts": alerts_block,
             "journey": build_journey_block(zones_out),
             "products_top": products_top,
             "entrance": entrance_block,
@@ -1443,7 +1454,13 @@ class EdgePipeline:
                 "floor_paths": (floor_block or {}).get("status", "LIVE"),
                 "queue_episodes": "LIVE",
                 "queue_abandon": "PARTIAL" if any(q.get("abandon_status") == "PARTIAL" for q in queues_out) else "LIVE",
-                "staff": "LIVE",
+                "queue_p95": (
+                    "LIVE"
+                    if any((q.get("kpi") or {}).get("p95_available") for q in queues_out)
+                    else "EMPTY"
+                ),
+                "staff": staff_block.get("status") or "LIVE",
+                "staff_response_time": staff_block.get("status") or "EMPTY",
                 "safety": "LIVE",
                 "alerts": "LIVE",
                 "multi_store": "FUTURE",

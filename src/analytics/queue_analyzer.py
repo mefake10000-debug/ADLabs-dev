@@ -201,20 +201,36 @@ class QueueAnalyzer:
             p95_available = True
         service_rate = None
         basis = None
-        if self.service_point is not None and (served + abandoned) > 0:
-            service_rate = round(served / (served + abandoned), 3)
+        abandon_rate = None
+        empty = len(completed) == 0
+        if self.service_point is not None:
             basis = "service_point"
+            if (served + abandoned) > 0:
+                service_rate = round(served / (served + abandoned), 3)
+                abandon_rate = round(abandoned / (served + abandoned), 3)
+            else:
+                # Calibrated service point, no settled outcomes yet — measured empty 0
+                service_rate = 0.0
+                abandon_rate = 0.0
         return {
             "completed": len(completed),
             "served": served,
             "abandoned": abandoned,
             "unknown_outcome": unknown,
-            "avg_wait_ms": avg_wait_ms,
+            "avg_wait_ms": avg_wait_ms if waits else (0 if empty else avg_wait_ms),
             "p95_wait_ms": p95,
             "p95_available": p95_available,
             "p95_sample_count": len(waits),
+            "p95_empty": (not p95_available),
+            "p95_note": (
+                None
+                if p95_available
+                else f"p95 unlocks after {self.min_samples_p95} settled waits (have {len(waits)})"
+            ),
             "service_rate": service_rate,
             "service_rate_basis": basis,
+            "abandon_rate": abandon_rate,
+            "empty": empty,
             "waiting_now": self.queue_length,
         }
 

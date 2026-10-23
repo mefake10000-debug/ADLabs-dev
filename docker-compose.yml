@@ -54,6 +54,10 @@ services:
       - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}
       # Detector backend: yolo26 (fast default) | rfdetr (SOTA Apache; quality default).
       # See docs/rfdetr-integration.md. Optional: pip install rfdetr in the edge image.
+      # RF-DETR weights are NOT baked (~350 MB nano). One-command optional pull (disk-gated):
+      #   python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
+      # Dry-run (default): python3 scripts/download_pack_models_phase2.py --only rfdetr-nano
+      # Until weights land, stack reports rfdetr OFF/PACKED; YOLO26n stays the live fast path.
       - DETECTOR_BACKEND=${DETECTOR_BACKEND:-}
       - RFDETR_VARIANT=${RFDETR_VARIANT:-nano}
       - RFDETR_WEIGHTS=${RFDETR_WEIGHTS:-}

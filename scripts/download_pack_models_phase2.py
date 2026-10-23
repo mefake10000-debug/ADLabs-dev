@@ -407,7 +407,9 @@ def main() -> int:
     print("\n==== PHASE2 SUMMARY ====")
     print("SKU-110K: SKIP  |  LocateAnything-3B: FUTURE (no download)  |  P2PNet: SKIP commercial")
     print("MiVOLO: GATED (ENABLE_DEMOGRAPHICS=0 default)  |  Moondream: FUTURE nightly stub")
-    print("See docs/model-stack-policy.md")
+    print("RF-DETR one-command (optional, ~350MB, disk-gated):")
+    print("  python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1")
+    print("See docs/model-stack-policy.md · docs/rfdetr-integration.md")
     return 0 if ok else 1
 
 

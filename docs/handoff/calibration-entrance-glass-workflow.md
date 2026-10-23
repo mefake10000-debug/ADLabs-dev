@@ -1,7 +1,14 @@
 # Calibration Studio Workflow — Store Entrance (Glass View, Stop-Rate, Entry Tripwire)
 
 Design spec, built on the verified EdgeSight pipeline (foot-point tripwires & zone membership, session-scoped ByteTrack IDs, `POST /api/v1/config/cameras` save + ~3 s hot reload, `POST /api/v1/telemetry/events` durable event channel).
-**Status: FUTURE/design until implemented** — glass ROI and stop-rate fields don't exist in rollups today; this document is the implementation contract. No facial recognition anywhere. No accuracy percentages are claimed anywhere in this design — failure modes are badge-stated qualitatively.
+**Status: LIVE compute path** — `GlassROIAnalyzer` + `build_glass_block` on `/api/v1/live.entrance`. Without a calibrated glass ROI → `stop_rate=null`, `status=FUTURE`. With ROI but no entrants yet → measured `stop_rate=0` LIVE. No facial recognition. No invented rates.
+
+### How to mark glass (operator)
+
+1. Portal: `/dashboard/live` → **Set up zones** / calibrate embed.
+2. Draw polygon over facade glass (≥3 points) → set zone **type: `glass`** (or add `glass_views[]` in `cameras.yaml`).
+3. Save → edge hot-reloads (~3 s). Entrance segment shows stop-rate once ROI is present.
+4. Pair with an entry tripwire for glass→entry conversion.
 
 Terms (per the brief):
 - **Glass view (glass ROI)** — polygon over the storefront glass/window as seen by the camera.
