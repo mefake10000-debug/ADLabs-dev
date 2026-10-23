@@ -44,6 +44,11 @@ services:
       - PYTHONUNBUFFERED=1
       - PIPELINE_CONFIG=/app/configs/pipeline.yaml
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
+      # Live FPS preset: fast (default, Docker Mac ARM demos) | quality (enrichment on).
+      # See docs/live-fps.md. Optional: EDGE_MAX_CAMERAS=1 for max single-cam FPS.
+      - EDGE_PERF_MODE=${EDGE_PERF_MODE:-fast}
+      - EDGE_MAX_CAMERAS=${EDGE_MAX_CAMERAS:-}
+      - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}
       # Unset by default -- state-changing API calls stay unauthenticated (today's zero-config
       # behaviour) unless you set this to the same value on cloud-dashboard below.
       - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}

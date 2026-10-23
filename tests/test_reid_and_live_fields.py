@@ -15,7 +15,8 @@ from src.perception.reid import SoftReIdExtractor
 
 
 class TestSoftReIdDefaultOff(unittest.TestCase):
-    def test_default_off_reports_weights_without_loading(self):
+    def test_explicit_off_reports_weights_without_loading(self):
+        """models.reid.enabled: false keeps extractor inactive even when weights exist."""
         root = Path(__file__).resolve().parents[1]
         verified = (
             root / "models" / "pack" / "03-reid"
@@ -37,6 +38,7 @@ class TestSoftReIdDefaultOff(unittest.TestCase):
         self.assertFalse(status["enabled"])
         self.assertFalse(status["active"])
         self.assertFalse(status["cross_cam_fusion"])
+        self.assertTrue(status.get("session_scoped", True))
         self.assertIn("no face id", status["note"].lower())
 
 

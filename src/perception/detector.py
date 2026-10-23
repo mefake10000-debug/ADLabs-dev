@@ -29,7 +29,8 @@ class PersonDetector:
         min_aspect_ratio: float = 1.0,
         max_aspect_ratio: float = 4.2,
         min_area: float = 3000.0,
-        require_model: bool = False
+        require_model: bool = False,
+        imgsz: int = 640,
     ):
         self.model_name = model_name
         self.conf_thresh = conf_thresh
@@ -39,6 +40,9 @@ class PersonDetector:
         self.min_aspect_ratio = min_aspect_ratio
         self.max_aspect_ratio = max_aspect_ratio
         self.min_area = min_area
+        # Ultralytics letterbox size. 416 is the live-demo sweet spot on Docker CPU;
+        # 640 is the quality/accuracy default.
+        self.imgsz = int(imgsz) if imgsz else 640
         self.model = None
         self.require_model = require_model
         self._warned_no_model = False
@@ -90,6 +94,7 @@ class PersonDetector:
                 conf=self.conf_thresh,
                 iou=self.iou_thresh,
                 device=self.device,
+                imgsz=self.imgsz,
                 verbose=False
             )
 

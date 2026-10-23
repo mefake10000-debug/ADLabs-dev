@@ -27,16 +27,13 @@ DEFAULT_PRODUCT_VOCABULARY = [
 
 
 class OpenVocabProductDetector:
-    """Detects retail product categories using an open-vocabulary (YOLO-World) model.
+    """Detects retail product categories using an open-vocabulary model.
 
-    The closed COCO detector the person pipeline uses knows about "person" and 79 other
-    everyday objects. It does not know what a shop sells. An open-vocabulary detector
-    takes the category list at runtime instead of baking it into the weights, so the
-    same checkpoint serves a clothing store, a pharmacy or a electronics shop by
-    changing the vocabulary in the config -- no retraining.
+    Supports YOLO-World (``set_classes`` + CLIP text encoder via ``weights/clip``)
+    and YOLOE prompt-free (``yoloe-*-seg-pf``) where CLIP is unavailable: built-in
+    names are filtered down to the configured vocabulary by substring match.
 
-    This is what turns "12 people in the store" into "4 people browsing footwear and
-    3 browsing bags".
+    Categories are merchandising prompts — **not** POS / closed-set grocery SKUs.
     """
 
     def __init__(
@@ -45,19 +42,55 @@ class OpenVocabProductDetector:
         vocabulary: Optional[List[str]] = None,
         conf_threshold: float = 0.30,
         device: str = "auto",
+        mode: str = "auto",
     ):
         self.model = model
         self.vocabulary = list(vocabulary or DEFAULT_PRODUCT_VOCABULARY)
         self.conf_threshold = conf_threshold
         self.device = device
         self._classes_set = False
+        self._prompt_free = False
+        self._mode = (mode or "auto").lower()
+        # Detect YOLOE / prompt-free early so we never call set_classes (needs CLIP).
+        model_name = str(getattr(model, "__class__", type(model)).__name__).lower()
+        task = str(getattr(model, "task", "") or "").lower()
+        if self._mode in ("yoloe", "prompt_free") or "yoloe" in model_name or task == "segment":
+            # Only force prompt-free when it looks like YOLOE; YOLO-World stays class-set.
+            if self._mode in ("yoloe", "prompt_free") or "yoloe" in model_name:
+                self._prompt_free = True
+                logger.info(
+                    "Open-vocab detector using YOLOE prompt-free path "
+                    "(filter %d vocabulary terms against built-in names)",
+                    len(self.vocabulary),
+                )
 
     def _ensure_classes(self):
-        if self._classes_set:
+        if self._classes_set or self._prompt_free:
             return
-        self.model.set_classes(self.vocabulary)
-        self._classes_set = True
-        logger.info(f"Open-vocabulary detector set to {len(self.vocabulary)} categories")
+        try:
+            self.model.set_classes(self.vocabulary)
+            self._classes_set = True
+            logger.info(f"Open-vocabulary detector set to {len(self.vocabulary)} categories")
+        except Exception as e:
+            # YOLOE / missing CLIP — fall back to prompt-free name filtering.
+            logger.warning(
+                "set_classes failed (%s); falling back to prompt-free name filter", e
+            )
+            self._prompt_free = True
+            self._classes_set = True
+
+    @staticmethod
+    def _map_prompt_free_label(raw_name: str, vocabulary: List[str]) -> Optional[str]:
+        """Map a YOLOE built-in class name onto our short retail vocabulary."""
+        raw = (raw_name or "").strip().lower()
+        if not raw:
+            return None
+        # Exact / contained matches prefer the configured vocab term.
+        for term in vocabulary:
+            t = term.lower()
+            if raw == t or t in raw or raw in t:
+                return term
+        return None
 
     def detect(self, frame: Any) -> List[Dict[str, Any]]:
         """Returns product detections: bbox, confidence and the category label."""
@@ -79,15 +112,22 @@ class OpenVocabProductDetector:
         if not results or len(results) == 0:
             return []
 
+        names = getattr(self.model, "names", None) or {}
         out: List[Dict[str, Any]] = []
         boxes = results[0].boxes
         for i in range(len(boxes)):
             cls_idx = int(boxes[i].cls[0].item())
-            label = (
-                self.vocabulary[cls_idx]
-                if 0 <= cls_idx < len(self.vocabulary)
-                else f"class_{cls_idx}"
-            )
+            if self._prompt_free:
+                raw = names.get(cls_idx, "") if isinstance(names, dict) else str(cls_idx)
+                label = self._map_prompt_free_label(str(raw), self.vocabulary)
+                if not label:
+                    continue
+            else:
+                label = (
+                    self.vocabulary[cls_idx]
+                    if 0 <= cls_idx < len(self.vocabulary)
+                    else f"class_{cls_idx}"
+                )
             out.append({
                 "bbox": [round(v, 1) for v in boxes[i].xyxy[0].tolist()],
                 "confidence": round(float(boxes[i].conf[0].item()), 3),

@@ -5,10 +5,31 @@ edge:
   device_id: "edge_node_macmini_01"
   hardware_backend: "auto" # "auto", "coreml", "cuda", or "cpu"
 
+# --- Live FPS / demo performance ----------------------------------------------
+# Docker on Mac ARM is CPU-only: pose + YuNet + YOLO-World/CLIP on every stream
+# collapses infer FPS to ~0.3–1. Default is therefore the fast tier for demos.
+#
+# Switch modes (either works):
+#   EDGE_PERF_MODE=fast|quality          # compose / shell env (wins over yaml)
+#   performance.mode: fast|quality       # this file
+#   EDGE_MAX_CAMERAS=1                   # optional: one cam ≈ 2× FPS vs two cams
+#   EDGESIGHT_DETECT_MODEL=…             # optional weight override
+#
+# See docs/live-fps.md for measured tradeoffs and native-macOS MPS notes.
+performance:
+  mode: "fast"                # fast (demo) | quality (enrichment on)
+  imgsz: 416                  # Ultralytics letterbox; quality uses 640
+  infer_every_n: 2            # run detect+track every Nth decoded frame
+  display_every_n: 1          # refresh MJPEG JPEG every Nth frame (uses last tracks)
+  max_cameras: null           # null = all cameras.yaml entries; or set 1 for max FPS
+
 perception:
-  # Production detector stays yolo26s (benchmarked). Pack YOLO11n/s/m live under
-  # models/pack/01-detection/ for A/B — swap model_name only after a local soak.
-  model_name: "models/yolo26s.pt"   # production small detector (docs/model-benchmark.md)   # cached in ./models (bind-mounted), so it is downloaded once, not per container
+  # Fast-tier default: nano detector. Quality mode (EDGE_PERF_MODE=quality) swaps to
+  # yolo26s. Pack A/B: EDGESIGHT_DETECT_MODEL=models/pack/01-detection/yolo11n.pt
+  model_name: "models/yolo26n.pt"
+  imgsz: 416
+  infer_every_n: 2
+  display_every_n: 1
   confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
                                # real person" bar is tracking.track_thresh below; detections between
                                # this floor and track_thresh can only extend a track that already
@@ -45,14 +66,17 @@ analytics:
 
 # --- Perception model tier ------------------------------------------------------
 # Everything above this line is the "fast tier": person detection + tracking +
-# tripwire/zone/queue analytics, run on every frame. The block below adds the
-# enrichment models (pose, face, demographics, open-vocabulary products) on a slower
-# cadence, so adding them does not degrade the core footfall numbers.
+# tripwire/zone/queue analytics. The block below adds enrichment models (pose, face,
+# demographics, open-vocabulary products) on a slower cadence.
+#
+# Fast mode (default) keeps models.enabled: false so Docker CPU demos stay at usable FPS.
+# Quality mode (EDGE_PERF_MODE=quality) turns enrichment back on — expect ~0.3–2 FPS in Docker.
 #
 # Weights are not committed (see .gitignore). Run `python scripts/download_models.py`
 # once after cloning.
 models:
-  enabled: true
+  # Master switch for the enrichment tier. Fast mode forces this off even if true.
+  enabled: false
   device: "auto"              # auto (CUDA -> MPS -> CPU) | cuda | mps | cpu
   # The enrichment tier runs on its own thread while the fast tier keeps inferring.
   # PyTorch's MPS backend is not thread-safe, so when the fast tier owns MPS the
@@ -68,18 +92,19 @@ models:
     #   pose 189ms + face 42ms + open-vocab 91ms + 67ms per demographic face.
     # At interval_frames=8 and 3 faces per pass a pass costs ~520ms, which leaves the
     # fast tier (MPS, ~14 FPS) enough headroom to stay at full rate.
-    interval_frames: 8        # run the enrichment pass every N processed frames
-    max_faces_per_tick: 3     # cap face-model inferences per pass (keeps the tick bounded)
-    max_products_per_tick: 24 # cap open-vocabulary detections fed to the interest model
+    # In Docker CPU, prefer interval_frames >= 16 or keep models.enabled: false.
+    interval_frames: 16       # run the enrichment pass every N processed frames
+    max_faces_per_tick: 2     # cap face-model inferences per pass (keeps the tick bounded)
+    max_products_per_tick: 12 # cap open-vocabulary detections fed to the interest model
 
   pose:
-    enabled: true
+    enabled: false            # quality mode re-enables; yolo26m-pose is expensive on CPU
     weights: "models/yolo26m-pose.pt"
     confidence: 0.30
     match_iou: 0.30           # min IoU to bind a pose to an existing track
 
   face:
-    enabled: true
+    enabled: false
     # YuNet = face boxes for redaction / attribute gating — NOT shopper identity.
     # Pack mirror: models/pack/04-face-attr/face_detection_yunet_2023mar.onnx
     weights: "models/onnx/face_detection_yunet_2023mar.onnx"
@@ -89,7 +114,7 @@ models:
     align: true               # warp the face onto the canonical 5-point template before inference
 
   demographics:
-    enabled: true
+    enabled: false
     weights: "models/onnx/age_gender_vit.onnx"
     # INT8 copy of the same network: 1.7x faster on CPU with predictions within ~0.5y
     # of the FP32 model on the sample footage. Used automatically when present.
@@ -103,11 +128,11 @@ models:
                                # counted as aggregates only; per-person state is deleted)
 
   head_pose:
-    enabled: true
+    enabled: false
     focal_scale: 1.0          # 1.0 => focal length equals frame width
 
   products:
-    enabled: true
+    enabled: false            # YOLO-World+CLIP thrash on Docker CPU (pip git+clip retries)
     # Category interest via YOLO-World prompts — not POS / closed-set grocery SKUs.
     # Pack: models/pack/05-open-vocab/yolov8s-worldv2.pt (+ yolov8l-worldv2.pt offline).
     # Shelf masks: models/pack/06-shelf/yoloe-v8s-seg-pf.pt (not wired yet — see pack README).
@@ -166,4 +191,3 @@ telemetry:
   local_endpoint: "http://localhost:8000/api/v1/telemetry"
   push_interval_seconds: 5
   retry_backoff_seconds: 3
-

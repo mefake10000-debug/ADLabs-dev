@@ -11,6 +11,7 @@ from typing import Dict, List, Any, Optional
 from src.ingestion.stream_reader import StreamReader
 from src.perception.detector import PersonDetector
 from src.perception.tracker import SimpleByteTracker
+from src.perception.performance import limit_cameras, resolve_performance
 from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_SLOW
 from src.perception.pose_estimator import PoseEstimator, match_pose_to_track
 from src.perception.face_detector import FaceDetector, face_inside_box, crop_face, align_face
@@ -82,9 +83,21 @@ class EdgePipeline:
         self.live_dir = os.path.join(os.path.dirname(db_path), "live")
         os.makedirs(self.live_dir, exist_ok=True)
 
+        # Performance preset (EDGE_PERF_MODE / performance.mode). Fast is the Docker
+        # Mac ARM demo default — see docs/live-fps.md.
+        self.perf = resolve_performance(self.pipeline_cfg)
+        self.perf_mode = self.perf["mode"]
+        self.infer_every_n = int(self.perf["infer_every_n"])
+        self.display_every_n = int(self.perf["display_every_n"])
+
         # Perception model (shared across cameras to optimize memory)
         p_cfg = self.pipeline_cfg.get("perception", {})
-        model_name = p_cfg.get("model_name", "yolov8n.pt")
+        model_name = (
+            os.environ.get("EDGESIGHT_DETECT_MODEL")
+            or self.perf.get("model_name")
+            or p_cfg.get("model_name")
+            or "yolov8n.pt"
+        )
         conf_thresh = p_cfg.get("confidence_threshold", 0.50)
         iou_thresh = p_cfg.get("iou_threshold", 0.45)
         min_height = p_cfg.get("min_height", 85.0)
@@ -92,6 +105,7 @@ class EdgePipeline:
         min_aspect_ratio = p_cfg.get("min_aspect_ratio", 1.0)
         max_aspect_ratio = p_cfg.get("max_aspect_ratio", 4.2)
         min_area = p_cfg.get("min_area", 3000.0)
+        imgsz = int(self.perf.get("imgsz") or p_cfg.get("imgsz") or 640)
 
         self.detector = PersonDetector(
             model_name=model_name,
@@ -103,7 +117,8 @@ class EdgePipeline:
             max_aspect_ratio=max_aspect_ratio,
             min_area=min_area,
             # a pipeline running without a working detector would report plausible-looking zeros
-            require_model=p_cfg.get("require_model", True)
+            require_model=p_cfg.get("require_model", True),
+            imgsz=imgsz,
         )
 
         self.cameras_cfg_path = cameras_config_path
@@ -115,7 +130,22 @@ class EdgePipeline:
         # untouched. These models add the retail-analytics detail the fast tier cannot
         # see: body behaviour, head orientation, population cohorts and products.
         self.models_cfg = self.pipeline_cfg.get("models", {}) or {}
-        self.models_enabled = bool(self.models_cfg.get("enabled", True))
+        # Fast mode forces enrichment off. Quality turns the tier on and, if every
+        # sub-block is still at the fast-tier false default, enables the common set.
+        if self.perf_mode == "fast":
+            self.models_enabled = False
+        else:
+            self.models_enabled = bool(self.models_cfg.get("enabled", True))
+            if self.models_enabled:
+                sub_on = any(
+                    bool((self.models_cfg.get(k) or {}).get("enabled"))
+                    for k in ("pose", "face", "demographics", "head_pose", "products")
+                )
+                if not sub_on:
+                    for key in ("pose", "face", "demographics", "head_pose", "products"):
+                        self.models_cfg.setdefault(key, {})["enabled"] = True
+                    self.models_cfg["enabled"] = True
+
         self.device = select_device(self.models_cfg.get("device", "auto"))
         self.enrichment_device = self._resolve_enrichment_device()
         self.enrichment_threads = int(self.models_cfg.get("enrichment_threads", 3))
@@ -141,14 +171,28 @@ class EdgePipeline:
             self._init_enrichment_models()
 
         reid_cfg = (self.models_cfg.get("reid") or {}) if getattr(self, "models_cfg", None) is not None else {}
+        # Fast mode keeps ReID off; quality still requires models.reid.enabled: true.
+        reid_enabled = bool(reid_cfg.get("enabled", False)) and self.perf_mode == "quality"
         self.reid_extractor = SoftReIdExtractor(
             weights=reid_cfg.get("weights"),
             device=str(reid_cfg.get("device", "cpu")),
-            enabled=bool(reid_cfg.get("enabled", False)),
+            enabled=reid_enabled,
             base_dir=os.getcwd(),
         )
         self.reid_gallery = SoftReIdGallery(
             max_age_seconds=float(reid_cfg.get("gallery_ttl_seconds", 3600)),
+        )
+
+        logger.info(
+            "Performance mode=%s detector=%s imgsz=%s infer_every_n=%s display_every_n=%s "
+            "enrichment=%s max_cameras=%s",
+            self.perf_mode,
+            model_name,
+            imgsz,
+            self.infer_every_n,
+            self.display_every_n,
+            self.models_enabled,
+            self.perf.get("max_cameras"),
         )
 
         # Camera context pipelines
@@ -452,7 +496,16 @@ class EdgePipeline:
         }
 
     def _init_cameras(self):
-        for cam in self.cameras_cfg.get("cameras", []):
+        cams = list(self.cameras_cfg.get("cameras", []))
+        limited = limit_cameras(cams, self.perf.get("max_cameras"))
+        if len(limited) < len(cams):
+            logger.info(
+                "EDGE_MAX_CAMERAS / performance.max_cameras=%s — using %s of %s cameras for FPS budget",
+                self.perf.get("max_cameras"),
+                len(limited),
+                len(cams),
+            )
+        for cam in limited:
             self.camera_contexts[cam["id"]] = self._build_camera_context(cam)
             logger.info(f"Initialized pipeline for camera: {cam.get('name', cam['id'])} ({cam['id']})")
 
@@ -481,59 +534,68 @@ class EdgePipeline:
                     ctx["last_capture_ts_utc"] = frame_time
                     ctx["last_capture_ts_mono"] = getattr(stamp, "mono", frame_time)
 
-                    # Publish the frame for the enrichment tier. The slow worker runs
-                    # in its own thread, so it gets its own copy: the debug overlay
-                    # draws on this buffer in place and a half-drawn frame would be
-                    # nonsense to a face model.
-                    with ctx["frame_lock"]:
-                        ctx["latest_frame"] = (frame_idx, frame_time, frame.copy())
+                    # Display vs analytics cadence: decode every frame for a smooth MJPEG
+                    # path; run detect+track only every infer_every_n frames.
+                    do_infer = (ctx["frames_processed"] % self.infer_every_n) == 0
 
-                    # Inference throughput (frames actually run through detect+track), as opposed to
-                    # the reader's decode rate: the ring buffer silently drops frames when inference lags.
-                    ctx["fps_window_frames"] += 1
-                    window = time.time() - ctx["fps_window_start"]
-                    if window >= 2.0:
-                        ctx["processed_fps"] = round(ctx["fps_window_frames"] / window, 1)
-                        ctx["fps_window_start"] = time.time()
-                        ctx["fps_window_frames"] = 0
+                    if self.models_enabled:
+                        # Publish the frame for the enrichment tier. The slow worker runs
+                        # in its own thread, so it gets its own copy: the debug overlay
+                        # draws on this buffer in place and a half-drawn frame would be
+                        # nonsense to a face model.
+                        with ctx["frame_lock"]:
+                            ctx["latest_frame"] = (frame_idx, frame_time, frame.copy())
 
-                    # 1. Perception
-                    detections = self.detector.detect(frame)
+                    if do_infer:
+                        # Inference throughput (frames actually run through detect+track).
+                        ctx["fps_window_frames"] += 1
+                        window = time.time() - ctx["fps_window_start"]
+                        if window >= 2.0:
+                            ctx["processed_fps"] = round(ctx["fps_window_frames"] / window, 1)
+                            ctx["fps_window_start"] = time.time()
+                            ctx["fps_window_frames"] = 0
 
-                    # 2. Tracking
-                    active_tracks = ctx["tracker"].update(detections, frame_time)
-                    # Staff polygons first — sticky tags, then customer-only analytics (HEAD id-switch staff zones)
-                    for staff_zone in ctx.get("staff_zones", []):
-                        staff_zone.update(active_tracks, frame_time)
-                        for tid, entered in staff_zone.active_tracks_in_zone.items():
-                            if frame_time - entered >= self.staff_min_seconds:
-                                ctx["staff_ids"].add(tid)
-                    customers = [t for t in active_tracks if t.track_id not in ctx["staff_ids"]]
-                    ctx["current_active_tracks"] = customers
-                    ctx["staff_visible"] = len(active_tracks) - len(customers)
-                    ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
+                        # 1. Perception
+                        detections = self.detector.detect(frame)
 
-                    # 3. Spatial Analytics (customers only)
-                    crossing_events: List[Dict[str, Any]] = []
-                    for tw in ctx["tripwires"]:
-                        crossing_events.extend(tw.update(customers, frame_time))
-                    if crossing_events:
-                        self._persist_crossing_events(cam_id, crossing_events)
+                        # 2. Tracking
+                        active_tracks = ctx["tracker"].update(detections, frame_time)
+                        # Staff polygons first — sticky tags, then customer-only analytics
+                        for staff_zone in ctx.get("staff_zones", []):
+                            staff_zone.update(active_tracks, frame_time)
+                            for tid, entered in staff_zone.active_tracks_in_zone.items():
+                                if frame_time - entered >= self.staff_min_seconds:
+                                    ctx["staff_ids"].add(tid)
+                        customers = [t for t in active_tracks if t.track_id not in ctx["staff_ids"]]
+                        ctx["current_active_tracks"] = customers
+                        ctx["last_overlay_tracks"] = active_tracks
+                        ctx["staff_visible"] = len(active_tracks) - len(customers)
+                        ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
 
-                    for zone in ctx["zones"]:
-                        zone.update(customers, frame_time)
+                        # 3. Spatial Analytics (customers only)
+                        crossing_events: List[Dict[str, Any]] = []
+                        for tw in ctx["tripwires"]:
+                            crossing_events.extend(tw.update(customers, frame_time))
+                        if crossing_events:
+                            self._persist_crossing_events(cam_id, crossing_events)
 
-                    for q in ctx["queues"]:
-                        q.update(customers, frame_time)
+                        for zone in ctx["zones"]:
+                            zone.update(customers, frame_time)
 
-                    if ctx.get("heatmap") is None:
-                        ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
-                    ctx["heatmap"].add(customers, frame_time)
-                    if cv2 is not None and frame_time - ctx.get("last_heatmap_write", 0.0) >= self.heatmap_write_seconds:
-                        self._write_heatmap(cam_id, ctx, frame, frame_time)
+                        for q in ctx["queues"]:
+                            q.update(customers, frame_time)
 
-                    # 4. Render and Save Live Vision Feed with Model Outputs (~8-10 FPS)
-                    if cv2 is not None and ctx["frames_processed"] % 2 == 0:
+                        if ctx.get("heatmap") is None:
+                            ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
+                        ctx["heatmap"].add(customers, frame_time)
+                        if cv2 is not None and frame_time - ctx.get("last_heatmap_write", 0.0) >= self.heatmap_write_seconds:
+                            self._write_heatmap(cam_id, ctx, frame, frame_time)
+                    else:
+                        active_tracks = list(ctx.get("last_overlay_tracks") or [])
+
+                    # 4. Display stream — refresh MJPEG from latest decode + last tracks
+                    # even when this frame skipped inference (smoother portal video).
+                    if cv2 is not None and (ctx["frames_processed"] % self.display_every_n) == 0:
                         try:
                             draw_kwargs = dict(
                                 frame=frame,
@@ -545,7 +607,6 @@ class EdgePipeline:
                                 fps=ctx["reader"].fps_actual,
                                 infer_fps=ctx["processed_fps"],
                             )
-                            # Optional kwargs if DebugOverlay supports staff overlays
                             try:
                                 annotated = DebugOverlay.draw_pipeline(
                                     **draw_kwargs,
@@ -556,20 +617,20 @@ class EdgePipeline:
                                 annotated = DebugOverlay.draw_pipeline(**draw_kwargs)
                             frame_path = os.path.join(self.frames_dir, f"{cam_id}.jpg")
                             tmp_path = os.path.join(self.frames_dir, f"{cam_id}.tmp.jpg")
-                            cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                            cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                             os.replace(tmp_path, frame_path)
                         except Exception as e:
                             logger.debug(f"Frame export error for {cam_id}: {e}")
 
                     # 4b. Frame-synced live JSON (portal KPIs tick with the YOLO overlay)
-                    if ctx["frames_processed"] % 2 == 0:
+                    if do_infer or (ctx["frames_processed"] % max(2, self.display_every_n * 2)) == 0:
                         try:
                             self._write_live_snapshot(cam_id, ctx, frame_time)
                         except Exception as e:
                             logger.debug(f"Live snapshot error for {cam_id}: {e}")
 
                     # 5. Check for Periodic Rollup Export
-                    if frame_time - ctx["last_rollup_time"] >= self.rollup_interval:
+                    if do_infer and frame_time - ctx["last_rollup_time"] >= self.rollup_interval:
                         self._generate_and_save_rollup(cam_id, ctx, frame_time)
 
                 # 6. Check for dynamic configuration hot-reload every 3 seconds
@@ -962,13 +1023,25 @@ class EdgePipeline:
                 "group_count": groups.get("group_count", 0),
             },
             "models": {
-                "person_detector": "yolo26s",
+                "person_detector": os.path.basename(
+                    getattr(self.detector, "model_name", "") or "unknown"
+                ).replace(".pt", ""),
+                "imgsz": int(getattr(self.detector, "imgsz", 0) or 0) or None,
                 "tracker": "bytetrack",
+                "perf_mode": getattr(self, "perf_mode", "fast"),
+                "infer_every_n": int(getattr(self, "infer_every_n", 1) or 1),
+                "enrichment": bool(getattr(self, "models_enabled", False)),
                 "pose": bool(getattr(self, "pose_estimator", None)),
                 "face_boxes": bool(getattr(self, "face_detector", None)),
                 "face_identity": False,
-                "note": "Face boxes used for k-anon age/gender only — no face ID product",
+                "note": (
+                    f"perf={getattr(self, 'perf_mode', 'fast')}: "
+                    "person detect+track+zones"
+                    + ("; enrichment on" if getattr(self, "models_enabled", False) else "; enrichment off")
+                    + ". Face boxes (if on) = k-anon age/gender only — no face ID."
+                ),
             },
+            "perf_mode": getattr(self, "perf_mode", "fast"),
             "track_ids": [t.track_id for t in customers[:40]],
         }
 
@@ -997,6 +1070,7 @@ class EdgePipeline:
             "infer_fps": payload["infer_fps"],
             "source": "live_snapshot",
             "models": payload.get("models"),
+            "perf_mode": payload.get("perf_mode"),
             "engagement": payload.get("engagement"),
         }
         dwell_acc = []

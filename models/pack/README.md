@@ -29,16 +29,44 @@ Legacy nested folders (`01-detection/yolo26n/`, `03-reid/osnet-x0_25/`, `05-seg/
 
 | Weight | Wired into live pipeline? |
 |--------|---------------------------|
-| Production `models/yolo26s.pt` | **Yes** — person detect (unchanged) |
-| Pack `01-detection/yolo11*.pt` | **On disk only** — swap `perception.model_name` after soak |
-| Pack `yolo11n-pose.pt` | **On disk only** — prod pose stays `yolo26m-pose.pt` |
-| OSNet x0.25 verified `.pth` | **Path wired**, `models.reid.enabled: false` (session-scoped soft ReID) |
-| OSNet ONNX / YouTu | **Not hooked** — torch-free fallback TBD |
+| Production `models/yolo26s.pt` | **Yes** — person detect (default) |
+| Pack `01-detection/yolo11n.pt` | **Documented switch** — `perception.model_name` or `EDGESIGHT_DETECT_MODEL=models/pack/01-detection/yolo11n.pt` |
+| Pack `yolo11s/m` + `yolo11n-pose` | **On disk** — soak before swapping pose (`models/yolo26m-pose.pt` stays default) |
+| OSNet x0.25 `.pth` | **Path wired** — used when `torchreid` installed |
+| OSNet ONNX / YouTu | **Yes** — torch-free SoftReID backend (Docker default) |
+| Soft ReID flag | **`models.reid.enabled: true`** (session-scoped gallery; set `false` to disable) |
 | YuNet (prod onnx + pack mirror) | **Yes** — face boxes for redaction / attribute gating |
-| Expression / SFace | **Not hooked** — SFace only for consented staff if ever enabled |
-| `yolov8s-worldv2` (prod + pack) | **Yes** — category interest via prompts (not POS SKUs) |
-| `yolov8l-worldv2` / CLIP HF pack | **On disk** — prod CLIP still `weights/clip/ViT-B-32.pt` |
-| `yoloe-v8s-seg-pf` | **Not hooked** — shelf masks via YOLOE prompts future |
+| Expression / SFace | **Not hooked** — expression = Future aggregate-only; SFace = consented staff only (never shopper face-ID) |
+| `yolov8s-worldv2` (prod + pack) | **Yes** — `models.products.backend: world` (default) |
+| `yoloe-v8s-seg-pf` | **Yes** — set `models.products.backend: yoloe` (prompt-free name filter; no POS SKUs) |
+| CLIP HF pack | **On disk** — live YOLO-World text encoder is `weights/clip/ViT-B-32.pt` (`CLIP_WEIGHTS_PATH`) |
+
+### Soft ReID (privacy)
+
+- Body crops only → session gallery (TTL `gallery_ttl_seconds`, default 1h)
+- **No** face embeddings, **no** multi-day persistence, **no** CRM identity
+- `cross_cam_fusion` / `global_person_id` remain **Future** (NTP + overlap + fusion)
+
+### YOLO11 detect switch
+
+```yaml
+# configs/pipeline.yaml
+perception:
+  model_name: "models/pack/01-detection/yolo11n.pt"  # preferred pack A/B default
+```
+
+```bash
+# Docker / host env override (does not rewrite yaml)
+EDGESIGHT_DETECT_MODEL=models/pack/01-detection/yolo11n.pt
+```
+
+Keep `yolo26s` until a local soak compares FPS / recall.
+
+### Shelf / products LIVE
+
+- Live badge reads `products_top` on `/api/v1/live/snapshot`
+- 24h rollup remains `/api/v1/analytics/products`
+- Categories = open-vocab prompts, **not** POS SKUs
 
 ## Mac ARM notes
 
