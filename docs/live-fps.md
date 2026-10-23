@@ -18,7 +18,7 @@ default to **balanced**.
 | Knob | Fast | **Balanced (default)** | Quality |
 |------|------|------------------------|---------|
 | Detector | `models/yolo26n.pt` | `models/yolo26n.pt` | `models/yolo26s.pt` (Ultralytics; RF-DETR only if `DETECTOR_BACKEND=rfdetr`) |
-| `imgsz` | 320 | **416** | 640 (YOLO) |
+| `imgsz` | 320 | **512** | 640 (YOLO) |
 | `infer_every_n` | 3 | **2** | 1 |
 | Enrichment (pose/face/CLIP/world) | off | **off** | on (yaml gates) |
 | Soft ReID | off | off | opt-in (`models.reid.enabled`) |
@@ -63,7 +63,8 @@ Docker CPU (balanced tier, M-series host):
 |-------|-----------|-------------|---------------|
 | Docker + enrichment 2 cams | ~0.3–1 | boxes stalled | — |
 | Docker CPU **fast**, 1 cam (`n=3`, 320) | ~3–5 | ~9–12 | misses more |
-| Docker CPU **balanced**, 1 cam (`n=2`, 416) | ~2–4 | ~7–11 | denser boxes |
+| Docker CPU **balanced**, 1 cam (`n=2`, 416) measured solo 2026-10-23 | median infer **5.9** (dips to 1.9) | median **11.6** | people_now 2–8; hand-count recall **25/65** |
+| Docker CPU **balanced**, 1 cam (`n=2`, 512) | solo not isolated; dual-load infer **~2** while a 416 edge also ran | decode stayed ~11 | hand-count recall **39/65**; live people_now **7–11** |
 | Native macOS MPS balanced, 1–2 cams | ~6–8 | ~12–14 | best demo feel |
 | quality / enrichment on Docker CPU | ~0.3–2 | tracks infer | — |
 
@@ -90,7 +91,7 @@ tier owns MPS (thread-safety). Do **not** run host edge and Compose edge togethe
 
 ```bash
 curl -s http://localhost:8000/api/v1/live | python3 -m json.tool | head -40
-# Look for perf_mode=balanced, imgsz=416, infer_every_n=2, person_detector=yolo26n
+# Look for perf_mode=balanced, imgsz=512, infer_every_n=2, person_detector=yolo26n
 # people_now should move with people visible on the MJPEG
 open http://localhost:8000/api/v1/stream/cam_entrance_01
 docker logs adlabs-edge-analyzer 2>&1 | grep -E 'Performance mode|Inference FPS'

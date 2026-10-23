@@ -25,11 +25,13 @@ class PerformanceModeTests(unittest.TestCase):
             os.environ.pop(key, None)
 
     def test_default_is_balanced(self):
+        # Image/compose may export EDGE_PERF_MODE; default means unset.
+        os.environ.pop("EDGE_PERF_MODE", None)
         self.assertEqual(resolve_perf_mode({}), "balanced")
         resolved = resolve_performance({})
         self.assertEqual(resolved["mode"], "balanced")
         self.assertEqual(resolved["model_name"], BALANCED_PRESET["model_name"])
-        self.assertEqual(resolved["imgsz"], 416)
+        self.assertEqual(resolved["imgsz"], 512)
         self.assertEqual(resolved["infer_every_n"], 2)
         self.assertFalse(resolved["enrichment"])
         self.assertEqual(resolved["detector_backend"], "yolo26")

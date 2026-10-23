@@ -23,7 +23,7 @@ edge:
 # See docs/live-fps.md, docs/foot-tracking-retail-models.md, docs/rfdetr-integration.md.
 performance:
   mode: "balanced"            # balanced (local demo default) | fast | quality
-  imgsz: 416                  # Ultralytics letterbox; fast=320, quality YOLO=640; RF-DETR fixed
+  imgsz: 512                  # Ultralytics letterbox; fast=320, balanced=512, quality YOLO=640; RF-DETR fixed
   infer_every_n: 2            # denser tracks than fast(3); quality uses 1
   display_every_n: 1          # smooth MJPEG from last tracks between infer frames
   # Docker CPU demo: 1 cam. Peer fusion can raise EDGE_MAX_CAMERAS after measuring KPI floor.
@@ -35,7 +35,7 @@ perception:
   # detector_backend: "yolo26"   # optional hard pin: yolo26 | rfdetr
   rfdetr_variant: "nano"         # nano | small (Apache-2.0 only; not XL/2XL)
   model_name: "models/yolo26n.pt"
-  imgsz: 416
+  imgsz: 512
   infer_every_n: 2
   display_every_n: 1
   confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a

@@ -43,11 +43,12 @@ FAST_PRESET: Dict[str, Any] = {
     "detector_backend": BACKEND_YOLO26,
 }
 
-# Local demo default: denser tracks + mid letterbox so people in frame are not missed.
+# Local demo default: denser tracks. 512 letterbox — 416 missed crowded shop
+# people on entrance_sample checkpoints (about 38% of the hand count; 512 ~60%).
 BALANCED_PRESET: Dict[str, Any] = {
     "mode": "balanced",
     "model_name": "models/yolo26n.pt",
-    "imgsz": 416,
+    "imgsz": 512,
     "infer_every_n": 2,
     "display_every_n": 1,
     "enrichment": False,
