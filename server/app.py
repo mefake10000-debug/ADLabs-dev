@@ -6,6 +6,7 @@ import sys
 import time
 import json
 import logging
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 try:
@@ -681,11 +682,13 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
 
         # Frame-synced provenance for the portal (ISO timestamp + sample-loop state).
         result["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        result["video_loop"] = (snap or {}).get("video_loop")
-        result["loop_count"] = ((snap or {}).get("video_loop") or {}).get("loop_count")
-        result["is_simulated"] = ((snap or {}).get("video_loop") or {}).get("is_simulated")
-        result["unique_this_pass"] = ((snap or {}).get("video_loop") or {}).get("unique_this_pass")
-        result["unique_total_all_passes"] = ((snap or {}).get("video_loop") or {}).get("unique_total_all_passes")
+        if result.get("video_loop") is None:
+            result["video_loop"] = (snap or {}).get("video_loop")
+        selected_loop = result.get("video_loop") or {}
+        result["loop_count"] = selected_loop.get("loop_count")
+        result["is_simulated"] = selected_loop.get("is_simulated")
+        result["unique_this_pass"] = selected_loop.get("unique_this_pass")
+        result["unique_total_all_passes"] = selected_loop.get("unique_total_all_passes")
 
         return result
 
@@ -901,6 +904,97 @@ def get_live_staff(store_id: str = "store_mumbai_001", camera_id: Optional[str] 
         "queue_response": queue_response[-20:],
         "response_time_to_queue": median,
         "note": note,
+    }
+
+
+@app.get("/api/v1/floor-view")
+def get_floor_view(store_id: str = "store_mumbai_001"):
+    """Camera coverage/zone map contract; never invents floor coordinates or fusion."""
+    config = _read_config()
+    live_dir = _live_dir()
+    store_snap = _read_live_snapshot()
+    fusion = (store_snap or {}).get("fusion") or {}
+    camera_rows = []
+    shared_zones: Dict[str, Dict[str, Any]] = {}
+
+    for camera in config.get("cameras", []) or []:
+        camera_id = camera.get("id")
+        if not camera_id:
+            continue
+        row = None
+        try:
+            with open(os.path.join(live_dir, f"{camera_id}.json")) as f:
+                row = json.load(f)
+        except Exception:
+            pass
+
+        frame_age_s = None
+        generated_at = (row or {}).get("generated_at")
+        if generated_at:
+            try:
+                frame_at = datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                frame_age_s = max(0.0, round(time.time() - frame_at.timestamp(), 1))
+            except (TypeError, ValueError):
+                pass
+        camera_rows.append({
+            "camera_id": camera_id,
+            "name": camera.get("name", camera_id),
+            "source_kind": (
+                "file_simulation"
+                if str(camera.get("source", "")).lower().endswith((".mp4", ".mov", ".mkv", ".avi"))
+                else "stream"
+            ),
+            "source_available": row is not None,
+            "frame_age_s": frame_age_s,
+            "floor_homography_ready": bool(camera.get("floor_homography")),
+        })
+        if row is None:
+            continue
+        for zone in list(row.get("zones") or []) + list(row.get("queues") or []):
+            store_zone_id = zone.get("store_zone_id")
+            if not store_zone_id:
+                continue
+            entry = shared_zones.setdefault(str(store_zone_id), {
+                "store_zone_id": str(store_zone_id),
+                "camera_views": [],
+            })
+            entry["camera_views"].append({
+                "camera_id": camera_id,
+                "zone_id": zone.get("id"),
+                "name": zone.get("name"),
+                "type": zone.get("type", "queue" if "queue_length" in zone else "zone"),
+                "polygon_pixels": zone.get("polygon"),
+                "occupancy_per_camera": zone.get("occupancy", zone.get("queue_length")),
+            })
+
+    zone_counts = fusion.get("deduplicated_count_by_zone") or {}
+    shared_zone_rows = []
+    for store_zone_id, entry in sorted(shared_zones.items()):
+        camera_ids = sorted({item["camera_id"] for item in entry["camera_views"]})
+        is_fused = bool(fusion.get("enabled")) and store_zone_id in zone_counts
+        shared_zone_rows.append({
+            **entry,
+            "camera_ids": camera_ids,
+            "coverage_count": len(camera_ids),
+            "deduplicated_occupancy": zone_counts.get(store_zone_id) if is_fused else None,
+            "status": "FUSED" if is_fused else "MAPPED_NOT_FUSED",
+        })
+
+    mapped_groups = [zone for zone in shared_zone_rows if zone["coverage_count"] >= 2]
+    ready = bool(fusion.get("enabled")) and fusion.get("deduplicated_active_count") is not None
+    return {
+        "store_id": store_id,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "status": "FUSED" if ready else ("CALIBRATION_REQUIRED" if mapped_groups else "PER_CAMERA_ONLY"),
+        "camera_count": len(camera_rows),
+        "mapped_shared_zone_count": len(mapped_groups),
+        "fusion": fusion,
+        "cameras": camera_rows,
+        "shared_zones": shared_zone_rows,
+        "note": (
+            "Fused counts appear only after shared store_zone_id mapping, floor homographies, and active session ReID pass their gates. "
+            "Otherwise each camera angle and pixel polygon remains separate; streams are not phase-locked at exposure time."
+        ),
     }
 
 

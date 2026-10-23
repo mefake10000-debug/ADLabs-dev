@@ -57,6 +57,9 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
         from server.app import app, init_db
 
         cls.server_app = server_app
+        # Other unittest modules may have imported the singleton FastAPI module first.
+        server_app.DB_PATH = cls.db_path
+        server_app.CONFIG_PATH = cls.config_path
         init_db()
         cls.client = TestClient(app)
 
@@ -136,6 +139,40 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
 
         live = self.client.get("/api/v1/live?camera_id=sim_cam").json()
         self.assertEqual(live.get("total_visitors"), 3)
+
+    def test_floor_view_groups_same_store_zone_without_claiming_fusion(self):
+        live_dir = os.path.join(self._tmpdir.name, "floor-live")
+        os.makedirs(live_dir, exist_ok=True)
+        config = {
+            "cameras": [
+                {"id": "cam_a", "name": "Angle A", "source": "rtsp://a", "floor_homography": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+                {"id": "cam_b", "name": "Angle B", "source": "rtsp://b", "floor_homography": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+            ]
+        }
+        generated_at = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+        for camera_id, zone_id in (("cam_a", "pixel_zone_a"), ("cam_b", "pixel_zone_b")):
+            with open(os.path.join(live_dir, f"{camera_id}.json"), "w") as f:
+                json.dump({
+                    "camera_id": camera_id,
+                    "generated_at": generated_at,
+                    "zones": [{
+                        "id": zone_id,
+                        "name": "Checkout overlap",
+                        "store_zone_id": "checkout_overlap",
+                        "occupancy": 2,
+                        "polygon": [[0, 0], [20, 0], [20, 20]],
+                    }],
+                }, f)
+
+        with patch.object(self.server_app, "_read_config", return_value=config), patch.object(
+            self.server_app, "_live_dir", return_value=live_dir
+        ):
+            floor = self.server_app.get_floor_view()
+
+        self.assertEqual(floor["status"], "CALIBRATION_REQUIRED")
+        self.assertEqual(floor["mapped_shared_zone_count"], 1)
+        self.assertEqual(floor["shared_zones"][0]["camera_ids"], ["cam_a", "cam_b"])
+        self.assertIsNone(floor["shared_zones"][0]["deduplicated_occupancy"])
 
     def test_live_zero_tripwire_not_replaced_by_db_rollup(self):
         """Fresh snap with IN=0 must win — never `0 or day_SUM` (~200 fake In)."""

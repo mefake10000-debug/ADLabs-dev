@@ -17,11 +17,14 @@ Point = Tuple[float, float]
 
 
 def _vector(values: Any) -> Tuple[float, ...]:
-    if hasattr(values, "tolist"):
-        values = values.tolist()
-    if len(values) and isinstance(values[0], (list, tuple)):
-        values = values[0]
-    return tuple(float(v) for v in values)
+    try:
+        if hasattr(values, "tolist"):
+            values = values.tolist()
+        if len(values) and isinstance(values[0], (list, tuple)):
+            values = values[0]
+        return tuple(float(v) for v in values)
+    except (TypeError, ValueError, IndexError):
+        return ()
 
 
 def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
@@ -94,6 +97,7 @@ class CrossCameraFusion:
         self._observations: List[_Observation] = []
         self._track_to_global: Dict[Tuple[str, int], str] = {}
         self._track_seen_at: Dict[Tuple[str, int], float] = {}
+        self._fused_global_ids: Set[str] = set()
         self._next_global_id = 1
         self._cross_camera_matches = 0
         self._last_match_similarity: Optional[float] = None
@@ -143,10 +147,15 @@ class CrossCameraFusion:
         """Return an ephemeral global ID when gates pass; otherwise return None."""
         if not self.enabled or floor_xy is None:
             return None
-        zones = set(store_zone_ids) & set(self.shared_zone_cameras)
+        camera_id = str(camera_id)
+        zones = {
+            str(zone_id)
+            for zone_id in store_zone_ids
+            if str(zone_id) in self.shared_zone_cameras
+            and camera_id in self.shared_zone_cameras[str(zone_id)]
+        }
         if not zones:
             return None
-        camera_id = str(camera_id)
         track_id = int(track_id)
         timestamp_mono = float(timestamp_mono)
         key = (camera_id, track_id)
@@ -186,6 +195,7 @@ class CrossCameraFusion:
         elif best is not None:
             global_id = best.global_id
             self._track_to_global[key] = global_id
+            self._fused_global_ids.add(global_id)
             self._cross_camera_matches += 1
             self._last_match_similarity = round(best_similarity, 4)
         else:
@@ -214,12 +224,15 @@ class CrossCameraFusion:
         active_keys = {(obs.camera_id, obs.track_id) for obs in self._observations}
         self._track_to_global = {key: value for key, value in self._track_to_global.items() if key in active_keys}
         self._track_seen_at = {key: value for key, value in self._track_seen_at.items() if key in active_keys}
+        current_global_ids = {obs.global_id for obs in self._observations}
+        self._fused_global_ids.intersection_update(current_global_ids)
 
     def reset(self) -> None:
         """Forget the current session gallery (e.g. on sample-video pass boundary)."""
         self._observations.clear()
         self._track_to_global.clear()
         self._track_seen_at.clear()
+        self._fused_global_ids.clear()
 
     def global_id_for(self, camera_id: str, track_id: int) -> Optional[str]:
         """Internal-only lookup. Never serialize the returned ID to the API or disk."""
@@ -261,7 +274,7 @@ class CrossCameraFusion:
         for camera_id, track_ids in active.items():
             for track_id in track_ids:
                 global_id = self.global_id_for(camera_id, int(track_id))
-                if global_id:
+                if global_id and global_id in self._fused_global_ids:
                     identity_keys.add(global_id)
                     matched += 1
                     local_identity = global_id

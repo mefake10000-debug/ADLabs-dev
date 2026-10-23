@@ -47,6 +47,8 @@ class ReIdEmbedding:
     embedding: Any  # numpy vector when available
     capture_ts_utc: float
     foot_xy: Optional[Tuple[float, float]] = None
+    # Same-edge monotonic receive timestamp; association never relies on unsynced camera clocks.
+    capture_ts_mono: Optional[float] = None
 
 
 @dataclass

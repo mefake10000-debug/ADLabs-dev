@@ -27,6 +27,9 @@ class TestCrossCameraFusion(unittest.TestCase):
     def test_matches_same_person_across_cameras_and_counts_union(self):
         engine = fusion()
         a = engine.observe("cam_a", 11, [1.0, 0.0], 10.0, ["checkout"], [2.0, 4.0])
+        waiting = engine.snapshot({"cam_a": [11]})
+        self.assertEqual(waiting["status"], "READY_NO_MATCHES_YET")
+        self.assertEqual(waiting["matched_active_tracks"], 0)
         b = engine.observe("cam_b", 39, [0.98, 0.02], 10.5, ["checkout"], [2.2, 4.1])
         self.assertEqual(a, b)
         snap = engine.snapshot({"cam_a": [11], "cam_b": [39]})
