@@ -7,8 +7,8 @@ cameras:
   - 1270
   - 720
   tripwires:
-  # Horizontal entrance line across the walk path (1270x720 sample). Re-draw in
-  # Set up zones if your real camera FOV differs. Peer dwell_welcome_e2e kept below.
+  # Sample entrance line for 1270x720. Client owns all zone polygons below —
+  # Apply entrance template (Calibration Studio) only sets this tripwire, never queue/staff/dwell.
   - id: entrance_tripwire
     name: Entrance
     line:
@@ -18,17 +18,22 @@ cameras:
       - 520.0
     in_direction: bottom_to_top
   zones:
-  - id: queue_zone_entrance
+  # Restored client queue polygon (pre-61e79b7 template overwrite). Do not auto-rewrite.
+  - id: queue_zone_1790217226558
     name: Checkout Queue
     polygon:
-    - - 420.0
-      - 360.0
-    - - 780.0
-      - 360.0
-    - - 820.0
-      - 620.0
-    - - 380.0
-      - 620.0
+    - - 295.0
+      - 328.0
+    - - 433.0
+      - 277.0
+    - - 354.0
+      - 169.0
+    - - 254.0
+      - 133.0
+    - - 191.0
+      - 157.0
+    - - 295.0
+      - 325.0
     type: queue
   - id: staff_zone_1790733394769
     name: Staff Area

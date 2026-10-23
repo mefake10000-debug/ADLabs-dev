@@ -15,6 +15,11 @@ Retail intelligence pack expands with license-clean phase-2 downloads.
 
 Alias: `pallet` → `nvidia`.
 
+**Scope:** models + overlay = **people vs store objects** only. Queue / staff /
+territory / dwell polygons stay **client-owned calibration** (cameras.yaml /
+portal calib). Edge draws them as configured; it does **not** auto-mark or rewrite
+those zones.
+
 Primary position for tripwire IN/OUT, zone dwell, and trajectories is always
 `track.foot_point` (pose ankles when available, else bbox bottom-center).
 

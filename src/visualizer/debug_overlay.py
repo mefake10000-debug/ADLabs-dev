@@ -6,6 +6,11 @@ Optional heavy styles: ``nvidia`` (LocateAnything pallet look-alike), ``parallel
 
 ``OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb`` (default **foot**).
 ``pallet`` aliases to ``nvidia``.
+
+Models / overlay own **people vs store objects** only. Queue / staff / territory /
+dwell polygons are **client-owned calibration** — this module draws whatever the
+edge already loaded from cameras.yaml; it must never invent, auto-mark, or rewrite
+those polygons.
 """
 from __future__ import annotations
 
