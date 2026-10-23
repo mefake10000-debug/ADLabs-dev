@@ -629,6 +629,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                     _snap_int("people_now", int(result["net_occupancy"] or 0)),
                 ),
                 "people_now": _snap_int("people_now", 0),
+                "objects_now": _snap_int("objects_now", 0),
                 "staff_now": _snap_int("staff_now", 0),
                 "avg_dwell_seconds": _snap_float("avg_dwell_seconds", float(result["avg_dwell_seconds"] or 0)),
                 "queue_length": _snap_int("queue_length", int(result["queue_length"] or 0)),
@@ -645,7 +646,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "source": "live_snapshot",
                 "occupancy_mode": "active_tracks",
                 "occupancy_note": (
-                    "people_now = active customer tracks (matches YOLO overlay). "
+                    "people_now = active person tracks only (objects are objects_now, not IDs). "
                     "Tripwire IN/OUT are session/pass totals from the live snapshot "
                     "(0 is real — not a day rollup). Multi-cam still sums cameras."
                 ),
