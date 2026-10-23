@@ -52,6 +52,12 @@ services:
       # Visual only — see docs/overlay-parallel-boxes.md.
       - OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-parallel}
       - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}
+      # Detector backend: yolo26 (fast default) | rfdetr (SOTA Apache; quality default).
+      # See docs/rfdetr-integration.md. Optional: pip install rfdetr in the edge image.
+      - DETECTOR_BACKEND=${DETECTOR_BACKEND:-}
+      - RFDETR_VARIANT=${RFDETR_VARIANT:-nano}
+      - RFDETR_WEIGHTS=${RFDETR_WEIGHTS:-}
+      - RF_HOME=${RF_HOME:-/app/models/pack/01-detection/rfdetr}
       # Block Ultralytics `pip install git+CLIP` thrash (needs git; kills Docker CPU FPS).
       # openai-clip baked via requirements-edge.txt + Dockerfile ENV YOLO_AUTOINSTALL=false.
       - YOLO_AUTOINSTALL=false

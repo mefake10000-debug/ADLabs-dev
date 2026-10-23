@@ -12,7 +12,8 @@ from src.ingestion.stream_reader import StreamReader
 from src.perception.detector import PersonDetector
 from src.perception.tracker import SimpleByteTracker
 from src.perception.performance import limit_cameras, resolve_performance
-from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_SLOW
+from src.perception.detector_backend import BACKEND_RFDETR, backend_label
+from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_FAST, TIER_SLOW
 from src.perception.model_stack import demographics_env_enabled
 from src.perception.pose_estimator import PoseEstimator, match_pose_to_track
 from src.analytics.pose_fall_candidate import status as pose_fall_status
@@ -109,6 +110,7 @@ class EdgePipeline:
         max_aspect_ratio = p_cfg.get("max_aspect_ratio", 4.2)
         min_area = p_cfg.get("min_area", 3000.0)
         imgsz = int(self.perf.get("imgsz") or p_cfg.get("imgsz") or 640)
+        detector_backend = self.perf.get("detector_backend") or "yolo26"
 
         self.detector = PersonDetector(
             model_name=model_name,
@@ -122,7 +124,52 @@ class EdgePipeline:
             # a pipeline running without a working detector would report plausible-looking zeros
             require_model=p_cfg.get("require_model", True),
             imgsz=imgsz,
+            backend=detector_backend,
+            rfdetr_variant=self.perf.get("rfdetr_variant"),
+            rfdetr_weights=self.perf.get("rfdetr_weights"),
+            pipeline_cfg=self.pipeline_cfg,
         )
+
+        # Mirror person detector into the registry (ultralytics or rfdetr kind).
+        self.registry = ModelRegistry(os.getcwd())
+        if detector_backend == BACKEND_RFDETR:
+            self.registry.register(
+                ModelSpec(
+                    key="person",
+                    kind="rfdetr",
+                    path=str(self.perf.get("rfdetr_weights") or "rf-detr-nano.pth"),
+                    capability="person",
+                    tier=TIER_FAST,
+                    task="detect",
+                    enabled=True,
+                    required=bool(p_cfg.get("require_model", True)),
+                    params={
+                        "variant": self.perf.get("rfdetr_variant") or "nano",
+                        "device": self.detector.device,
+                    },
+                )
+            )
+            # Mark already-loaded instance so status() reports loaded without double-init.
+            if self.detector.is_loaded:
+                self.registry._loaded["person"] = self.detector.model
+                os.environ["RFDETR_RUNTIME_LOADED"] = "1"
+        else:
+            self.registry.register(
+                ModelSpec(
+                    key="person",
+                    kind="ultralytics",
+                    path=model_name,
+                    capability="person",
+                    tier=TIER_FAST,
+                    task="detect",
+                    enabled=True,
+                    required=bool(p_cfg.get("require_model", True)),
+                    params={"device": self.detector.device},
+                )
+            )
+            if self.detector.is_loaded:
+                self.registry._loaded["person"] = self.detector.model
+            os.environ.pop("RFDETR_RUNTIME_LOADED", None)
 
         self.cameras_cfg_path = cameras_config_path
         self.last_config_mtime = os.path.getmtime(cameras_config_path) if os.path.exists(cameras_config_path) else 0
@@ -162,7 +209,7 @@ class EdgePipeline:
                 torch.set_num_threads(max(4, int(os.environ.get("EDGE_TORCH_THREADS", "6") or 6)))
         except Exception:
             pass
-        self.registry = ModelRegistry(os.getcwd())
+        # self.registry already created with the person detector entry above.
         self.pose_estimator = None
         self.face_detector = None
         self.age_gender = None
@@ -1164,9 +1211,19 @@ class EdgePipeline:
                 "group_count": groups.get("group_count", 0),
             },
             "models": {
-                "person_detector": os.path.basename(
+                "person_detector": backend_label(
+                    getattr(self.detector, "backend", "yolo26"),
+                    getattr(self.detector, "rfdetr_variant", None),
+                )
+                if getattr(self.detector, "backend", "") == BACKEND_RFDETR
+                else os.path.basename(
                     getattr(self.detector, "model_name", "") or "unknown"
                 ).replace(".pt", ""),
+                "detector_backend": getattr(self.detector, "backend", "yolo26"),
+                "rfdetr_variant": getattr(self.detector, "rfdetr_variant", None)
+                if getattr(self.detector, "backend", "") == BACKEND_RFDETR
+                else None,
+                "detector_loaded": bool(getattr(self.detector, "is_loaded", False)),
                 "imgsz": int(getattr(self.detector, "imgsz", 0) or 0) or None,
                 "tracker": "bytetrack",
                 "perf_mode": getattr(self, "perf_mode", "fast"),
@@ -1181,6 +1238,7 @@ class EdgePipeline:
                 "stack_policy": "docs/model-stack-policy.md",
                 "note": (
                     f"perf={getattr(self, 'perf_mode', 'fast')}: "
+                    f"backend={getattr(self.detector, 'backend', 'yolo26')}; "
                     "person detect+track+zones"
                     + ("; enrichment on" if getattr(self, "models_enabled", False) else "; enrichment off")
                     + ". Face boxes (if on) = k-anon age/gender only — no face ID. "

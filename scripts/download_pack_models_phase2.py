@@ -6,6 +6,7 @@ DEFAULT = dry-run. Prints planned URLs, licenses, sizes, and disk check.
 Only fetches when --download is set AND free disk ≥ --min-free-gb AND URL HEAD OK.
 
 Pulls (when enabled):
+  - RF-DETR Nano/Small COCO checkpoints (Apache-2.0) → models/pack/01-detection/rfdetr/
   - RTMPose-t/s/m ONNX SDK zips (rtmlib / Tau-J HF + OpenMMLab mirror) → models/pack/07-pose/
   - MiVOLO v2 (Apache-2.0) → models/pack/08-demographics/  [GATED — ENABLE_DEMOGRAPHICS]
   - Moondream2 config stub only by default (full weights huge; nightly shelf QA)
@@ -14,6 +15,7 @@ Pulls (when enabled):
 Never downloads:
   - SKU-110K shelf weights (non-commercial)
   - LocateAnything-3B (NVIDIA non-commercial)
+  - RF-DETR XL/2XL (PML 1.0 Plus — not Apache)
 
 Std-lib + optional certifi. Mirror of phase-1 pack loader patterns.
 """
@@ -66,6 +68,58 @@ def _opener() -> urllib.request.OpenerDirector:
 
 # status: PACKED candidate | GATED | FUTURE | SKIP
 ITEMS = [
+    dict(
+        id="rfdetr-nano",
+        key="rf-detr-nano.pth",
+        folder="01-detection/rfdetr",
+        size=350_000_000,  # ~349 MB published nano COCO checkpoint (GCS Content-Length)
+        sources=[
+            "https://storage.googleapis.com/rfdetr/nano_coco/checkpoint_best_regular.pth",
+        ],
+        license="Apache-2.0 (Roboflow RF-DETR; code+COCO weights)",
+        status="PACKED",
+        purpose=(
+            "RF-DETR-N — Roboflow SOTA real-time DETR (48.4 COCO AP50:95 @ 2.3 ms T4 TRT). "
+            "Selectable via DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=nano. Prefer nano first."
+        ),
+    ),
+    dict(
+        id="rfdetr-small",
+        key="rf-detr-small.pth",
+        folder="01-detection/rfdetr",
+        size=370_000_000,  # ~368 MB published small COCO checkpoint (GCS Content-Length)
+        sources=[
+            "https://storage.googleapis.com/rfdetr/small_coco/checkpoint_best_regular.pth",
+        ],
+        license="Apache-2.0 (Roboflow RF-DETR; code+COCO weights)",
+        status="PACKED",
+        purpose=(
+            "RF-DETR-S — 53.0 COCO AP50:95 @ 3.5 ms T4. "
+            "DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=small."
+        ),
+    ),
+    dict(
+        id="rfdetr-readme",
+        key="RFDETR-PACKED.txt",
+        folder="01-detection/rfdetr",
+        size=0,
+        sources=[],
+        license="Apache-2.0",
+        status="PACKED",
+        purpose="Stub marker so stack API can report PACKED before weights land.",
+        skip=True,
+        stub_text=(
+            "RF-DETR (Roboflow) — Apache-2.0 SOTA object detector for EdgeSight.\n"
+            "Package: pip install 'rfdetr>=1.3,<2'  (Python>=3.10)\n"
+            "Weights: rf-detr-nano.pth / rf-detr-small.pth\n"
+            "  GCS nano:  https://storage.googleapis.com/rfdetr/nano_coco/checkpoint_best_regular.pth\n"
+            "  GCS small: https://storage.googleapis.com/rfdetr/small_coco/checkpoint_best_regular.pth\n"
+            "Env: DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=nano|small\n"
+            "    EDGE_PERF_MODE=quality defaults to rfdetr; fast keeps yolo26n.\n"
+            "Do NOT fetch XL/2XL (PML 1.0 Plus).\n"
+            "See docs/rfdetr-integration.md\n"
+        ),
+    ),
     dict(
         id="rtmpose-t",
         key="rtmpose-t_simcc-body7_pt-body7_420e-256x192-026a1439_20230504.zip",

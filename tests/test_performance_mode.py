@@ -13,7 +13,14 @@ from src.perception.performance import (
 
 class PerformanceModeTests(unittest.TestCase):
     def tearDown(self):
-        for key in ("EDGE_PERF_MODE", "EDGE_MAX_CAMERAS", "EDGESIGHT_DETECT_MODEL"):
+        for key in (
+            "EDGE_PERF_MODE",
+            "EDGE_MAX_CAMERAS",
+            "EDGESIGHT_DETECT_MODEL",
+            "DETECTOR_BACKEND",
+            "RFDETR_VARIANT",
+            "RFDETR_WEIGHTS",
+        ):
             os.environ.pop(key, None)
 
     def test_default_is_fast(self):
@@ -31,6 +38,7 @@ class PerformanceModeTests(unittest.TestCase):
         self.assertEqual(resolved["model_name"], QUALITY_PRESET["model_name"])
         self.assertEqual(resolved["imgsz"], 640)
         self.assertTrue(resolved["enrichment"])
+        self.assertEqual(resolved["detector_backend"], "rfdetr")
 
     def test_detect_model_env_override(self):
         os.environ["EDGESIGHT_DETECT_MODEL"] = "models/pack/01-detection/yolo11n.pt"

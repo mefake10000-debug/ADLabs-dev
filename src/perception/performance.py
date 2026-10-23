@@ -7,12 +7,24 @@ detect + ByteTrack + tripwire/zones only; quality restores the enrichment tier.
 Env (wins over yaml):
   EDGE_PERF_MODE=fast|quality
   EDGE_MAX_CAMERAS=<int>
-  EDGESIGHT_DETECT_MODEL=<path>   # optional weight override
+  EDGESIGHT_DETECT_MODEL=<path>   # optional YOLO weight override
+  DETECTOR_BACKEND=yolo26|rfdetr  # fast→yolo26; quality→rfdetr (SOTA) unless set
+  RFDETR_VARIANT=nano|small
+  RFDETR_WEIGHTS=<path|filename>
+  OVERLAY_BOX_STYLE=parallel|aabb # peer overlay; visual-only, orthogonal to backend
 """
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional
+
+from src.perception.detector_backend import (
+    BACKEND_RFDETR,
+    BACKEND_YOLO26,
+    resolve_detector_backend,
+    resolve_rfdetr_variant,
+    resolve_rfdetr_weights,
+)
 
 
 FAST_PRESET: Dict[str, Any] = {
@@ -23,16 +35,18 @@ FAST_PRESET: Dict[str, Any] = {
     "display_every_n": 1,   # smooth MJPEG from last tracks between infer frames
     "enrichment": False,
     "reid": False,
+    "detector_backend": BACKEND_YOLO26,
 }
 
 QUALITY_PRESET: Dict[str, Any] = {
     "mode": "quality",
-    "model_name": "models/yolo26s.pt",
+    "model_name": "models/yolo26s.pt",  # used when DETECTOR_BACKEND=yolo26
     "imgsz": 640,
     "infer_every_n": 1,
     "display_every_n": 2,
     "enrichment": True,
     "reid": False,  # still opt-in via models.reid.enabled
+    "detector_backend": BACKEND_RFDETR,  # Apache SOTA default for quality
 }
 
 
@@ -60,7 +74,14 @@ def resolve_performance(pipeline_cfg: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
 
+    backend = resolve_detector_backend(pipeline_cfg, perf_mode=mode)
+    preset["detector_backend"] = backend
+    variant = resolve_rfdetr_variant(pipeline_cfg)
+    preset["rfdetr_variant"] = variant
+    preset["rfdetr_weights"] = resolve_rfdetr_weights(variant, pipeline_cfg)
+
     # Detector weight: env > perception.model_name when set in quality, else preset
+    # (YOLO path only — RF-DETR uses rfdetr_weights / published bare filenames.)
     env_model = (os.environ.get("EDGESIGHT_DETECT_MODEL") or "").strip()
     if env_model:
         preset["model_name"] = env_model

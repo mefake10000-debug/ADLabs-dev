@@ -14,7 +14,8 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 
 | Model | Role | License | Notes |
 |-------|------|---------|-------|
-| **YOLO26n** | Person detector (fast / edge) | AGPL-3.0 | Jan 2026 edge-optimized; ~**38.9 ms CPU-ONNX** (Ultralytics compare). Do **not** swap this pass. |
+| **YOLO26n** | Person detector (fast / edge) | AGPL-3.0 | Jan 2026 edge-optimized; ~**38.9 ms CPU-ONNX**. **Default fast path** (`DETECTOR_BACKEND=yolo26`). |
+| **RF-DETR-N/S** | Person detector (SOTA / Apache) | Apache-2.0 | Roboflow SOTA via `rfdetr`. Selectable; **quality mode default**. See `docs/rfdetr-integration.md`. |
 | **YOLOE** (`yoloe-v8s-seg-pf`) | Open-vocab shelf / products | AGPL-3.0 | Prompt-free pack weights under `models/pack/06-shelf/`. |
 | **OSNet** ReID | Session-scoped cross-cam soft ID | MIT (code + weights) | ONNX SoftReID in quality mode. No multi-day gallery. |
 | **CLIP ViT-B/32** | Text / zero-shot shelf interest | MIT | Prod: `weights/clip/ViT-B-32.pt`; pack HF mirror under `05-open-vocab/`. |
@@ -49,24 +50,21 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 ### 1. Ultralytics + YOLOE = AGPL-3.0
 
 - **OK for pilot.**
-- Commercial path needs **Ultralytics Enterprise** OR an **Apache detector swap**: RF-DETR-N/S, D-FINE-S, LW-DETR-S.
-- **This pass:** keep YOLO26n / YOLOE. Do **not** switch detectors unless a trivial stub. Decision documented here.
+- Commercial path needs **Ultralytics Enterprise** OR the **Apache detector path**: **RF-DETR-N/S** (wired; prefer over D-FINE / LW-DETR unless re-bench says otherwise).
+- **Fast default:** YOLO26n. **SOTA/alternate:** `DETECTOR_BACKEND=rfdetr` (also the `EDGE_PERF_MODE=quality` default).
 
-### Phase-2 Apache swap — bench protocol (do not run yet)
+### Apache SOTA path — RF-DETR (selectable)
 
-When AGPL becomes blocking, re-bench candidates with the **same** protocol as today’s EdgeSight baselines:
+| Environment | Reference baseline (YOLO26n) | RF-DETR note |
+|-------------|------------------------------|--------------|
+| Docker (Mac ARM CPU, Compose edge) | **4.7–6.4 s/frame** | Prefer YOLO for demos; RF-DETR is heavier on CPU |
+| Native Apple MPS | **~7 fps** YOLO26n | Prefer native MPS for RF-DETR quality runs |
 
-| Environment | Reference baseline |
-|-------------|-------------------|
-| Docker (Mac ARM CPU, Compose edge) | **4.7–6.4 s/frame** (person detect path under load) |
-| Native Apple MPS | **~7 fps** YOLO26n |
+Protocol when comparing:
 
-Protocol outline:
-
-1. Fixed footage set + identical ByteTrack / zone config.
+1. Fixed footage + identical ByteTrack / zone config; boxes stay **xyxy**.
 2. Report decode_fps, infer_fps, people_now parity vs YOLO26n tip.
-3. MOT-style HOTA optional (see survey arXiv 2610.19369) — registry head change only; tracker untouched.
-4. Decide AGPL-vs-Enterprise vs Apache adapter on measured numbers, not brochure FPS.
+3. `GET /api/v1/models/stack` must show `rfdetr` as LIVE only when selected+loaded.
 
 ### 2. Demographics / MiVOLO — DPIA gate
 
@@ -80,7 +78,8 @@ Protocol outline:
 
 | Key | Status | Env / notes |
 |-----|--------|-------------|
-| `yolo26n` | LIVE | `EDGE_PERF_MODE=fast` default |
+| `yolo26n` | LIVE | `EDGE_PERF_MODE=fast` + `DETECTOR_BACKEND=yolo26` default |
+| `rfdetr` | LIVE / PACKED / OFF | LIVE when `DETECTOR_BACKEND=rfdetr` + loaded; else PACKED/OFF |
 | `yoloe` / YOLO-World | LIVE / PACKED | products path |
 | `osnet_reid` | LIVE (quality) / PACKED | session-scoped |
 | `clip_vit_b32` | LIVE / PACKED | |

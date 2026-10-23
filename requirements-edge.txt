@@ -23,3 +23,8 @@ onnx>=1.16.0
 # YOLO-World open-vocab class encoding (weights still under weights/clip/; avoids git+CLIP in Docker).
 openai-clip==1.0.1
 ftfy>=6.1.0
+# Optional SOTA Apache detector (DETECTOR_BACKEND=rfdetr). Not installed by default so
+# Docker fast-tier YOLO26n images stay lean. Install on the edge host / quality image:
+#   pip install 'rfdetr>=1.3.0,<2'   # Python>=3.10; pulls torch if missing
+# Weights: scripts/download_pack_models_phase2.py --download --only rfdetr-nano
+# rfdetr>=1.3.0,<2

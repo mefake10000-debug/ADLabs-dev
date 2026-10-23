@@ -1,4 +1,4 @@
-"""Declarative EdgeSight model-stack catalog (LIVE|PACKED|PARTIAL|GATED|FUTURE|SKIP).
+"""Declarative EdgeSight model-stack catalog (LIVE|PACKED|PARTIAL|GATED|FUTURE|SKIP|OFF).
 
 Honest statuses for health / dashboard. Does not invent LIVE demographics.
 See docs/model-stack-policy.md.
@@ -9,6 +9,14 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from src.perception.detector_backend import (
+    BACKEND_RFDETR,
+    RFDETR_WEIGHT_IDS,
+    resolve_detector_backend,
+    resolve_rfdetr_variant,
+    rfdetr_runtime_probe,
+)
 
 
 def demographics_env_enabled() -> bool:
@@ -27,7 +35,7 @@ class StackEntry:
     name: str
     role: str
     license: str
-    status: str  # LIVE | PACKED | PARTIAL | GATED | FUTURE | SKIP
+    status: str  # LIVE | PACKED | PARTIAL | GATED | FUTURE | SKIP | OFF
     path_hint: str = ""
     env_flag: Optional[str] = None
     notes: str = ""
@@ -64,7 +72,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             license="AGPL-3.0",
             status="LIVE",
             path_hint="models/yolo26n.pt",
-            notes="Jan 2026 edge-optimized; ~38.9 ms CPU-ONNX. Keep this pass — no detector swap.",
+            env_flag="DETECTOR_BACKEND=yolo26 (default when EDGE_PERF_MODE=fast)",
+            notes="Jan 2026 edge-optimized; ~38.9 ms CPU-ONNX. Default fast path.",
         ),
         StackEntry(
             key="yoloe",
@@ -156,14 +165,17 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             notes="Do not download. Stay FUTURE.",
         ),
         StackEntry(
-            key="apache_detector_swap",
-            name="RF-DETR / D-FINE / LW-DETR",
-            role="Phase-2 AGPL→Apache detector option",
+            key="rfdetr",
+            name="RF-DETR-N/S (Roboflow)",
+            role="Person detect (SOTA / Apache alternate)",
             license="Apache-2.0",
-            status="FUTURE",
+            status="PACKED",
+            path_hint="models/pack/01-detection/rfdetr/",
+            env_flag="DETECTOR_BACKEND=rfdetr · RFDETR_VARIANT=nano|small",
             notes=(
-                "Bench vs Docker 4.7–6.4 s/frame baseline + ~7 fps native MPS YOLO26n. "
-                "Do not switch detectors in this pass."
+                "Roboflow SOTA real-time DETR. Package `rfdetr` (PyPI). "
+                "Weights rf-detr-nano.pth / rf-detr-small.pth. "
+                "LIVE when selected+loaded; PACKED when available but not selected; OFF if missing."
             ),
         ),
     ]
@@ -207,6 +219,65 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             e.on_disk = _any_exists(base, "models/pack/09-vlm/moondream2/config.json")
         elif e.key == "shelf_gap_geometry":
             e.on_disk = (base / "src/analytics/shelf_gap_geometry.py").is_file()
+        elif e.key == "rfdetr":
+            variant = resolve_rfdetr_variant()
+            weight_name = RFDETR_WEIGHT_IDS.get(variant, RFDETR_WEIGHT_IDS["nano"])
+            pack_path = base / "models/pack/01-detection/rfdetr" / weight_name
+            rf_home = Path(
+                os.path.expanduser(
+                    os.environ.get("RF_HOME")
+                    or os.environ.get("ROBOFLOW_HOME")
+                    or "~/.roboflow/models"
+                )
+            )
+            cache_path = rf_home / weight_name
+            stub = base / "models/pack/01-detection/rfdetr/RFDETR-PACKED.txt"
+            e.on_disk = _exists(base, str(pack_path)) or (
+                cache_path.is_file() and cache_path.stat().st_size > 1000
+            )
+            import_ok, import_detail = rfdetr_runtime_probe()
+            selected = resolve_detector_backend() == BACKEND_RFDETR
+            runtime_loaded = os.environ.get("RFDETR_RUNTIME_LOADED", "").strip() in (
+                "1", "true", "yes", "on",
+            )
+            if selected and (runtime_loaded or (import_ok and e.on_disk)):
+                e.status = "LIVE"
+                e.notes = (
+                    f"Selected DETECTOR_BACKEND=rfdetr ({variant}). "
+                    f"{import_detail}. xyxy → ByteTrack; overlays unchanged."
+                )
+            elif selected and import_ok and not e.on_disk:
+                e.status = "PACKED"
+                e.notes = (
+                    f"Selected but weights not on disk yet — "
+                    f"`pip install rfdetr` then instantiate (auto-fetch) or "
+                    f"`--download --only rfdetr-{variant}`. {import_detail}"
+                )
+            elif e.on_disk or stub.is_file() or import_ok:
+                e.status = "PACKED"
+                e.notes = (
+                    f"Available (variant={variant}); not selected. "
+                    f"Set DETECTOR_BACKEND=rfdetr (quality default) to go LIVE. {import_detail}"
+                )
+            else:
+                e.status = "OFF"
+                e.notes = (
+                    "Package/weights missing. "
+                    "`pip install 'rfdetr>=1.3,<2'` + phase2 download stub. "
+                    f"{import_detail}"
+                )
+            e.path_hint = str(pack_path.relative_to(base)) if pack_path.exists() else (
+                f"models/pack/01-detection/rfdetr/{weight_name}"
+            )
+
+    # Honest YOLO LIVE only when yolo backend is active (RF-DETR selected → yolo stays LIVE as fast default available)
+    backend = resolve_detector_backend()
+    for e in entries:
+        if e.key == "yolo26n" and backend == BACKEND_RFDETR:
+            e.notes = (
+                "Fast-path YOLO26n kept as selectable alternate "
+                "(DETECTOR_BACKEND=yolo26). RF-DETR currently selected."
+            )
 
     return {
         "policy": "docs/model-stack-policy.md",
@@ -215,6 +286,9 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             "DEMOGRAPHICS_DPIA_OK": os.environ.get("DEMOGRAPHICS_DPIA_OK", "0"),
             "demographics_runtime_allowed": demo_on,
             "EDGE_PERF_MODE": os.environ.get("EDGE_PERF_MODE", "fast"),
+            "DETECTOR_BACKEND": resolve_detector_backend(),
+            "RFDETR_VARIANT": resolve_rfdetr_variant(),
+            "RFDETR_RUNTIME_LOADED": os.environ.get("RFDETR_RUNTIME_LOADED", "0"),
         },
         "models": [e.to_dict() for e in entries],
         "phase2": {

@@ -24,7 +24,7 @@ class ModelSpec:
     """
 
     key: str
-    kind: str                    # "ultralytics" | "onnx"
+    kind: str                    # "ultralytics" | "onnx" | "rfdetr"
     path: str
     capability: str              # "person" | "pose" | "face" | "demographics" | "product"
     tier: str = TIER_SLOW
@@ -106,6 +106,8 @@ class ModelRegistry:
                 model = self._load_ultralytics(spec, path)
             elif spec.kind == "onnx":
                 model = self._load_onnx(spec, path)
+            elif spec.kind == "rfdetr":
+                model = self._load_rfdetr(spec, path)
             else:
                 raise ValueError(f"unknown model kind '{spec.kind}'")
         except Exception as e:
@@ -163,6 +165,24 @@ class ModelRegistry:
         else:
             session = ort.InferenceSession(path, providers=providers)
         return session
+
+    @staticmethod
+    def _load_rfdetr(spec: ModelSpec, path: str):
+        """Load RF-DETR Nano/Small (Apache-2.0). Bare filenames auto-fetch via RF_HOME."""
+        from rfdetr import RFDETRNano, RFDETRSmall
+
+        variant = str(spec.params.get("variant") or "nano").strip().lower()
+        weights = path
+        # Bare published name (no directory) — rfdetr resolves via RF_HOME cache.
+        if os.path.sep not in weights and not os.path.isabs(weights):
+            pass  # allow auto-download
+        elif not os.path.exists(weights):
+            raise FileNotFoundError(
+                f"RF-DETR weights not found at {weights} "
+                f"(pip install rfdetr; or phase2 --download --only rfdetr-{variant})"
+            )
+        cls = RFDETRNano if variant == "nano" else RFDETRSmall
+        return cls(pretrain_weights=weights)
 
     def status(self) -> List[Dict[str, Any]]:
         """Machine-readable status for every registered model (health endpoint / dashboard)."""

@@ -13,21 +13,25 @@ edge:
 #   EDGE_PERF_MODE=fast|quality          # compose / shell env (wins over yaml)
 #   performance.mode: fast|quality       # this file
 #   EDGE_MAX_CAMERAS=1                   # optional: one cam ≈ 2× FPS vs two cams
-#   EDGESIGHT_DETECT_MODEL=…             # optional weight override
+#   EDGESIGHT_DETECT_MODEL=…             # optional YOLO weight override
+#   DETECTOR_BACKEND=yolo26|rfdetr       # fast→yolo26; quality→rfdetr (SOTA) unless set
+#   RFDETR_VARIANT=nano|small            # Apache-2.0 sizes only
 #   OVERLAY_BOX_STYLE=parallel|aabb      # MJPEG person boxes (default parallel); visual only
 #
-# See docs/live-fps.md and docs/overlay-parallel-boxes.md.
+# See docs/live-fps.md, docs/overlay-parallel-boxes.md, docs/rfdetr-integration.md.
 performance:
-  mode: "fast"                # fast (demo) | quality (enrichment on)
-  imgsz: 320                  # Ultralytics letterbox; quality uses 640
+  mode: "fast"                # fast (demo) | quality (enrichment on + RF-DETR default)
+  imgsz: 320                  # Ultralytics letterbox; quality YOLO uses 640; RF-DETR is fixed
   infer_every_n: 2            # run detect+track every Nth decoded frame
   display_every_n: 1          # smooth MJPEG from last tracks between infer frames
   # Docker CPU + 2 cams ≈ 0.5 infer FPS; one cam ≈ 3–8. Override EDGE_MAX_CAMERAS=.
   max_cameras: 1
 
 perception:
-  # Fast-tier default: nano detector. Quality mode (EDGE_PERF_MODE=quality) swaps to
-  # yolo26s. Pack A/B: EDGESIGHT_DETECT_MODEL=models/pack/01-detection/yolo11n.pt
+  # Fast-tier default: YOLO26n. Quality defaults to RF-DETR (Apache SOTA) unless
+  # DETECTOR_BACKEND=yolo26. Leave detector_backend unset to honor EDGE_PERF_MODE defaults.
+  # detector_backend: "yolo26"   # optional hard pin: yolo26 | rfdetr
+  rfdetr_variant: "nano"         # nano | small (Apache-2.0 only; not XL/2XL)
   model_name: "models/yolo26n.pt"
   imgsz: 320
   infer_every_n: 2

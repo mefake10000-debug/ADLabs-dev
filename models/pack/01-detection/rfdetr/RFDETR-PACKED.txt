@@ -1,0 +1,9 @@
+RF-DETR (Roboflow) — Apache-2.0 SOTA object detector for EdgeSight.
+Package: pip install 'rfdetr>=1.3,<2'  (Python>=3.10)
+Weights: rf-detr-nano.pth / rf-detr-small.pth
+  GCS nano:  https://storage.googleapis.com/rfdetr/nano_coco/checkpoint_best_regular.pth
+  GCS small: https://storage.googleapis.com/rfdetr/small_coco/checkpoint_best_regular.pth
+Env: DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=nano|small
+    EDGE_PERF_MODE=quality defaults to rfdetr; fast keeps yolo26n.
+Do NOT fetch XL/2XL (PML 1.0 Plus).
+See docs/rfdetr-integration.md
