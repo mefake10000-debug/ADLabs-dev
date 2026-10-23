@@ -21,7 +21,8 @@ performance:
   imgsz: 416                  # Ultralytics letterbox; quality uses 640
   infer_every_n: 2            # run detect+track every Nth decoded frame
   display_every_n: 1          # refresh MJPEG JPEG every Nth frame (uses last tracks)
-  max_cameras: null           # null = all cameras.yaml entries; or set 1 for max FPS
+  # Docker CPU + 2 cams ≈ 0.5 infer FPS; one cam ≈ 3–8. Override EDGE_MAX_CAMERAS=.
+  max_cameras: 1
 
 perception:
   # Fast-tier default: nano detector. Quality mode (EDGE_PERF_MODE=quality) swaps to

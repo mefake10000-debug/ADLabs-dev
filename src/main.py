@@ -149,16 +149,16 @@ class EdgePipeline:
         self.device = select_device(self.models_cfg.get("device", "auto"))
         self.enrichment_device = self._resolve_enrichment_device()
         self.enrichment_threads = int(self.models_cfg.get("enrichment_threads", 3))
-        if self.models_enabled and self.enrichment_device == "cpu":
-            # The enrichment tier's torch models (pose, open-vocab products) run on the
-            # CPU alongside the fast tier's detector. Letting torch spawn a worker per
-            # core oversubscribes the machine and slows the fast tier down; capping the
-            # pool keeps both tiers responsive.
-            try:
-                import torch
+        try:
+            import torch
+            if self.models_enabled and self.enrichment_device == "cpu":
+                # Enrichment shares the machine with the detector — cap threads.
                 torch.set_num_threads(self.enrichment_threads)
-            except Exception:
-                pass
+            elif self.perf_mode == "fast" and self.detector.device == "cpu":
+                # Fast tier alone: give YOLO more CPU (Docker Mac ARM).
+                torch.set_num_threads(max(4, int(os.environ.get("EDGE_TORCH_THREADS", "6") or 6)))
+        except Exception:
+            pass
         self.registry = ModelRegistry(os.getcwd())
         self.pose_estimator = None
         self.face_detector = None

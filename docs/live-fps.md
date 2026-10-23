@@ -18,10 +18,13 @@ only updates when annotated JPEGs are written, so the live wall looked frozen.
 | `infer_every_n` | 2 | 1 |
 | Enrichment (pose/face/CLIP/world) | **off** | on |
 | Soft ReID | off | opt-in (`models.reid.enabled`) |
+| `max_cameras` | **1** (demo default) | null = all yaml cams |
 
 Display stream is separate from analytics cadence: MJPEG JPEGs refresh every
 `display_every_n` decoded frames using the **last** tracks, so the portal stays
-smooth even when inference skips frames.
+smooth even when inference skips frames. Dual-cam Docker CPU still works if you
+set `performance.max_cameras: null` or `EDGE_MAX_CAMERAS=` empty — expect ~0.5
+infer FPS.
 
 ## How to switch
 
