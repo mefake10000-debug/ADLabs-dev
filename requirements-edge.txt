@@ -17,6 +17,8 @@ requests>=2.31.0,<3.0.0
 # Runtime for the ONNX enrichment models (YuNet face detection, age/gender ViT).
 # On Apple Silicon this picks up the CoreML execution provider automatically.
 onnxruntime==1.31.0
+# RTMPose ankle / foot estimator (Apache-2.0). Optional — ORT SimCC fallback if missing.
+rtmlib>=0.0.13
 # Build-time only: scripts/download_models.py uses it to quantize the demographic model to INT8.
 # Not imported by the running pipeline.
 onnx>=1.16.0

@@ -16,6 +16,7 @@ from src.perception.detector_backend import BACKEND_RFDETR, backend_label
 from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_FAST, TIER_SLOW
 from src.perception.model_stack import demographics_env_enabled
 from src.perception.pose_estimator import PoseEstimator, match_pose_to_track
+from src.perception.rtmpose_estimator import RTMPoseFootEstimator, resolve_rtmpose_onnx
 from src.analytics.pose_fall_candidate import status as pose_fall_status
 from src.analytics.shelf_gap_geometry import snapshot as shelf_gap_snapshot
 from src.perception.face_detector import FaceDetector, face_inside_box, crop_face, align_face
@@ -230,6 +231,7 @@ class EdgePipeline:
             pass
         # self.registry already created with the person detector entry above.
         self.pose_estimator = None
+        self.rtmpose = None
         self.face_detector = None
         self.age_gender = None
         self.head_pose = None
@@ -238,6 +240,7 @@ class EdgePipeline:
 
         if self.models_enabled:
             self._init_enrichment_models()
+        self._init_rtmpose()
 
         reid_cfg = (self.models_cfg.get("reid") or {}) if getattr(self, "models_cfg", None) is not None else {}
         # Fast/balanced keep ReID off; quality still requires models.reid.enabled: true.
@@ -475,10 +478,60 @@ class EdgePipeline:
 
     @staticmethod
     def _rtmpose_on_disk() -> bool:
-        pose_dir = os.path.join(os.getcwd(), "models", "pack", "07-pose")
-        if not os.path.isdir(pose_dir):
-            return False
-        return any(name.endswith(".onnx") for name in os.listdir(pose_dir))
+        return resolve_rtmpose_onnx() is not None
+
+    def _init_rtmpose(self) -> None:
+        """Load RTMPose-t/s ONNX for ankle feet (rtmlib preferred)."""
+        flag = (os.environ.get("ENABLE_RTMPOSE") or "1").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            logger.info("RTMPose disabled (ENABLE_RTMPOSE=%s).", flag)
+            return
+        if not self._rtmpose_on_disk():
+            logger.info("RTMPose ONNX missing — foot=bbox bottom-center.")
+            return
+        prefer = (os.environ.get("RTMPOSE_VARIANT") or "t").strip().lower()
+        try:
+            every = int(os.environ.get("RTMPOSE_EVERY_N") or "4")
+        except ValueError:
+            every = 4
+        self.rtmpose_every_n = max(1, every)
+        self.rtmpose = RTMPoseFootEstimator(
+            prefer=prefer if prefer in ("t", "s", "tiny", "small") else "t",
+            device="cpu",
+        )
+        if not self.rtmpose.active:
+            self.rtmpose = None
+            self.model_errors["rtmpose"] = "load_failed"
+            os.environ.pop("RTMPOSE_RUNTIME_LOADED", None)
+            return
+        os.environ["RTMPOSE_RUNTIME_LOADED"] = "1"
+        logger.info(
+            "RTMPose foot estimator ON (%s, every %d frames).",
+            self.rtmpose.backend,
+            self.rtmpose_every_n,
+        )
+
+    def _apply_rtmpose_feet(self, tracks: List[Any], frame: Any, ctx: Dict[str, Any]) -> None:
+        if self.rtmpose is None or not tracks or frame is None:
+            return
+        every = int(getattr(self, "rtmpose_every_n", 4) or 4)
+        tick = int(ctx.get("rtmpose_tick", 0) or 0) + 1
+        ctx["rtmpose_tick"] = tick
+        if tick % every != 0:
+            return
+        try:
+            poses = self.rtmpose.estimate_on_bboxes(frame, [t.bbox for t in tracks])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("RTMPose pass failed: %s", e)
+            return
+        for track, pose in zip(tracks, poses):
+            foot = pose.get("foot_point")
+            if foot:
+                track.set_pose(
+                    foot=(float(foot[0]), float(foot[1])),
+                    keypoints=pose.get("keypoints"),
+                    keypoints_xy=pose.get("keypoints_xy"),
+                )
 
     def _resolve_demographics_weights(self, demo_cfg: Dict[str, Any]) -> str:
         """Picks the demographics checkpoint to load.
@@ -777,6 +830,8 @@ class EdgePipeline:
 
                         # 2. Tracking (people only — store objects are visual labels)
                         active_tracks = ctx["tracker"].update(detections, frame_time)
+                        # 2b. RTMPose ankle feet (red mark / tripwire / dwell) when ONNX present
+                        self._apply_rtmpose_feet(active_tracks, frame, ctx)
                         # Early tracks (≥2 hits): tripwire needs ground-point history during
                         # min_hits confirmation or entrance crossings are lost forever.
                         early_tracks = ctx["tracker"].early_tracks()
@@ -1484,14 +1539,14 @@ class EdgePipeline:
             "shelf_gap": shelf_gap_snapshot([]),
             "pose_fall": pose_fall_status(
                 pose_weights_on_disk=self._rtmpose_on_disk(),
-                wired=bool(self.pose_estimator),
+                wired=bool(getattr(self, "rtmpose", None)) or bool(self.pose_estimator),
             ),
             "field_status": {
                 "demographics": "GATED" if not demographics_env_enabled() else "PARTIAL",
                 "shelf_gap_geometry": "PARTIAL",
                 "pose_fall_candidate": pose_fall_status(
                     pose_weights_on_disk=self._rtmpose_on_disk(),
-                    wired=bool(self.pose_estimator),
+                    wired=bool(getattr(self, "rtmpose", None)) or bool(self.pose_estimator),
                 ).get("status", "FUTURE"),
                 "locateanything_3b": "FUTURE",
                 "entrance_stop_rate": entrance_block.get("status", "FUTURE"),
@@ -1536,7 +1591,9 @@ class EdgePipeline:
                 "infer_every_n": int(getattr(self, "infer_every_n", 1) or 1),
                 "overlay_box_style": resolve_overlay_box_style(),
                 "enrichment": bool(getattr(self, "models_enabled", False)),
-                "pose": bool(getattr(self, "pose_estimator", None)),
+                "pose": bool(getattr(self, "rtmpose", None)) or bool(getattr(self, "pose_estimator", None)),
+                "rtmpose": bool(getattr(self, "rtmpose", None)),
+                "rtmpose_backend": getattr(getattr(self, "rtmpose", None), "backend", None),
                 "face_boxes": bool(getattr(self, "face_detector", None)),
                 "products": bool(getattr(self, "world_detector", None)) or bool(products_top),
                 "demographics_enabled": demographics_env_enabled(),
@@ -1545,10 +1602,13 @@ class EdgePipeline:
                 "note": (
                     f"perf={getattr(self, 'perf_mode', 'balanced')}: "
                     f"backend={getattr(self.detector, 'backend', 'yolo26')}; "
-                    "person detect+track+zones"
+                    f"overlay={resolve_overlay_box_style()}; "
+                    "person detect+track+foot zones"
+                    + ("; rtmpose on" if getattr(self, "rtmpose", None) else "; foot=bbox")
                     + ("; enrichment on" if getattr(self, "models_enabled", False) else "; enrichment off")
                     + ". Face boxes (if on) = k-anon age/gender only — no face ID. "
-                    "Soft ReID session-scoped only. products_top = open-vocab categories, not POS SKUs."
+                    "Soft ReID session-scoped only. products_top = open-vocab categories, not POS SKUs. "
+                    "MiVOLO demographics stay GATED."
                 ),
             },
             "perf_mode": getattr(self, "perf_mode", "balanced"),

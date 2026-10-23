@@ -26,7 +26,7 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 
 | Model | Role | License | Status | Gate |
 |-------|------|---------|--------|------|
-| **RTMPose-t/s/m ONNX** via **rtmlib** (no mmcv) | Pose → fall-candidate tier | Apache-2.0 (HF `Tau-J/RTMPose`) | PACKED stub / PARTIAL when weights on disk + slow-tier wire | Phase-2 download (dry-run default) |
+| **RTMPose-t/s ONNX** via **rtmlib** (no mmcv) | Ankle / foot pose → overlay + tripwire/dwell; fall-candidate | Apache-2.0 (HF `Tau-J/RTMPose`) | **LIVE** when ONNX on disk + edge load (`ENABLE_RTMPOSE=1`); else PARTIAL/PACKED | Phase-2 `--download --only rtmpose-t rtmpose-s`. See `docs/foot-tracking-retail-models.md`. Default overlay `OVERLAY_BOX_STYLE=foot`. |
 | **MiVOLO v2** | Age/gender body-only OK when faces small | Apache-2.0 | **GATED** — default EMPTY/FUTURE until DPIA + k≥10 | `ENABLE_DEMOGRAPHICS=0` (default off). UI must **never** show raw age/gender as LIVE without aggregation gate. |
 | **Moondream** | Lean VLM — nightly shelf-photo QA only | Apache-2.0 (HF card) | FUTURE / nightly shelf | Not every-frame; on-prem OK |
 | **P2PNet** | Crush-density edge cases | **Academic-research-only** (Tencent LICENSE §1) | **SKIP** commercial; FUTURE research only | Prefer raising YOLO `max_det` first |

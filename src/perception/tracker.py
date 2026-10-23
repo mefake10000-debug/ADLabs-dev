@@ -45,6 +45,10 @@ class Track:
         # Zone / queue dwell while currently inside (seconds). Updated by analytics.
         self.dwell_s: float = 0.0
         self.zone_id: Optional[str] = None
+        # Pose-refined ground contact (RTMPose ankles). None → bbox bottom-center.
+        self.pose_foot: Optional[Tuple[float, float]] = None
+        self.keypoints: Optional[Dict[str, List[float]]] = None
+        self.keypoints_xy: Optional[List[List[float]]] = None
 
         foot = ((bbox[0] + bbox[2]) / 2.0, bbox[3])
         self.initial_foot = foot
@@ -55,13 +59,31 @@ class Track:
 
     @property
     def foot_point(self) -> Tuple[float, float]:
-        """Bbox bottom-center — contact with the ground plane in image space."""
+        """Primary ground contact for tripwire / dwell / red foot overlay.
+
+        Prefer RTMPose ankle midpoint when set; otherwise AABB bottom-center.
+        """
+        if self.pose_foot is not None:
+            return (float(self.pose_foot[0]), float(self.pose_foot[1]))
         return ((self.bbox[0] + self.bbox[2]) / 2.0, self.bbox[3])
 
     @property
     def ground_point(self) -> Tuple[float, float]:
         """Alias for foot_point (tripwire / zone / overlay contract)."""
         return self.foot_point
+
+    def set_pose(
+        self,
+        foot: Optional[Tuple[float, float]] = None,
+        keypoints: Optional[Dict[str, List[float]]] = None,
+        keypoints_xy: Optional[List[List[float]]] = None,
+    ) -> None:
+        if foot is not None:
+            self.pose_foot = (float(foot[0]), float(foot[1]))
+        if keypoints is not None:
+            self.keypoints = keypoints
+        if keypoints_xy is not None:
+            self.keypoints_xy = keypoints_xy
 
     def to_live_dict(self) -> Dict[str, Any]:
         gx, gy = self.ground_point
@@ -71,11 +93,13 @@ class Track:
             "first_seen": float(self.first_seen),
             "last_seen": float(self.last_seen),
             "dwell_s": round(float(self.dwell_s or 0.0), 2),
+            "foot": [round(float(gx), 1), round(float(gy), 1)],
             "ground_point": [round(float(gx), 1), round(float(gy), 1)],
             "bbox": [round(float(v), 1) for v in self.bbox],
             "confidence": round(float(self.confidence), 3),
             "zone_id": self.zone_id,
             "is_stationary": bool(self.is_stationary),
+            "stationary": bool(self.is_stationary),
         }
 
     def _update_velocity(self):
@@ -114,6 +138,18 @@ class Track:
                                # previously this never reset, so a track that
                                # went 'lost' stayed invisible forever even after
                                # being correctly re-matched
+
+        # Keep pose_foot across bbox updates; drop if ankles drift far from bbox.
+        if self.pose_foot is not None:
+            cx = (bbox[0] + bbox[2]) * 0.5
+            bottom = bbox[3]
+            fx, fy = self.pose_foot
+            if abs(fx - cx) > max(40.0, 0.6 * (bbox[2] - bbox[0])) or abs(fy - bottom) > max(
+                60.0, 0.35 * (bbox[3] - bbox[1])
+            ):
+                self.pose_foot = None
+                self.keypoints = None
+                self.keypoints_xy = None
 
         foot = self.foot_point
         self.history.append((foot[0], foot[1], timestamp))

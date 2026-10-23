@@ -3,17 +3,17 @@
 Docker on Mac ARM runs PyTorch CPU-only. Enabling pose / YuNet / YOLO-World+CLIP
 on every stream collapses infer FPS to ~0.3–1. Fast keeps max display FPS;
 balanced (default for local demos) restores reliable person boxes; quality
-restores the enrichment tier. Detector default is always Ultralytics YOLO
-(``DETECTOR_BACKEND=yolo26``); RF-DETR is opt-in only.
+restores the enrichment tier (+ RF-DETR by default).
 
 Env (wins over yaml):
   EDGE_PERF_MODE=fast|balanced|quality
   EDGE_MAX_CAMERAS=<int>
   EDGESIGHT_DETECT_MODEL=<path>   # optional YOLO weight override
-  DETECTOR_BACKEND=yolo26|yolo11|rfdetr  # default yolo26 (Ultralytics); rfdetr opt-in
+  DETECTOR_BACKEND=yolo26|rfdetr  # fast/balanced→yolo26; quality→rfdetr unless set
   RFDETR_VARIANT=nano|small
   RFDETR_WEIGHTS=<path|filename>
-  OVERLAY_BOX_STYLE=nvidia|parallel|pallet|aabb  # default nvidia (LocateAnything look-alike)
+  OVERLAY_BOX_STYLE=foot|skeleton|parallel|aabb  # default foot (red ground mark)
+  ENABLE_RTMPOSE=1|0                             # ankle feet when ONNX on disk
 """
 from __future__ import annotations
 
@@ -57,13 +57,13 @@ BALANCED_PRESET: Dict[str, Any] = {
 
 QUALITY_PRESET: Dict[str, Any] = {
     "mode": "quality",
-    "model_name": "models/yolo26s.pt",  # Ultralytics accuracy path (imgsz 640)
+    "model_name": "models/yolo26s.pt",  # used when DETECTOR_BACKEND=yolo26
     "imgsz": 640,
     "infer_every_n": 1,
     "display_every_n": 2,
     "enrichment": True,
     "reid": False,  # still opt-in via models.reid.enabled
-    "detector_backend": BACKEND_YOLO26,  # Ultralytics default; RF-DETR via DETECTOR_BACKEND=rfdetr
+    "detector_backend": BACKEND_RFDETR,  # Apache SOTA default for quality
 }
 
 _PRESETS = {

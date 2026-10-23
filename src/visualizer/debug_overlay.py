@@ -1,12 +1,10 @@
 """Debug / live MJPEG overlays for EdgeSight.
 
-Default box style is **nvidia** (LocateAnything Parallel Box look-alike): clean
-parallel / palletized framing drawn with OpenCV — sheared parallelogram body,
-inset parallel rails, corner caps, and a solid class label. Visual only; do not
-download LocateAnything-3B (NVIDIA NC).
+Default person UI is **foot** tracking: red ground-contact mark + faint ID + trail.
+Heavy AABB / pallet boxes are optional (``parallel`` / ``aabb``). ``skeleton`` draws
+thin joint lines when RTMPose / YOLO-pose keypoints are on the track.
 
-Aliases: ``parallel`` / ``pallet`` → same as ``nvidia``. ``aabb`` restores
-classic axis-aligned YOLO rectangles.
+``OVERLAY_BOX_STYLE=foot|skeleton|parallel|aabb`` (default **foot**).
 """
 from __future__ import annotations
 
@@ -24,46 +22,39 @@ from src.perception.tracker import Track
 from src.analytics.tripwire import Tripwire
 from src.analytics.zones import Zone
 from src.analytics.queue_analyzer import QueueAnalyzer
+from src.perception.rtmpose_estimator import COCO17_SKELETON
 
 STAFF_COLOR = (255, 0, 255)  # BGR magenta
-PERSON_COLOR = (0, 255, 255)  # cyan — person priority
+PERSON_COLOR = (0, 255, 255)  # cyan
 STILL_COLOR = (120, 160, 120)
-OBJECT_COLOR = (0, 200, 120)  # store objects
+FOOT_COLOR = (0, 0, 255)  # red — primary position mark
+SKELETON_COLOR = (180, 180, 180)
 
-# Motion below this (px/s) uses a mild isometric lean instead of velocity shear.
 _SHEAR_SPEED_MIN = 8.0
 _MAX_SHEAR_FRAC = 0.45
 _ISO_SHEAR_FRAC = 0.18
 
-_NVIDIA_STYLES = frozenset({"nvidia", "parallel", "pallet"})
-_VALID_STYLES = frozenset({"nvidia", "parallel", "pallet", "aabb"})
+_VALID_STYLES = frozenset({"foot", "skeleton", "parallel", "aabb"})
+# Aliases kept for peers / older compose files
+_ALIAS = {"nvidia": "parallel", "pallet": "parallel"}
 
 
 def resolve_overlay_box_style(env: Optional[Dict[str, str]] = None) -> str:
-    """``nvidia`` (default; aliases parallel/pallet) or ``aabb``."""
+    """Default ``foot``. Accepts foot|skeleton|parallel|aabb (+ nvidia/pallet → parallel)."""
     src = env if env is not None else os.environ
-    raw = (src.get("OVERLAY_BOX_STYLE") or "nvidia").strip().lower()
-    if raw not in _VALID_STYLES:
-        return "nvidia"
-    if raw in ("parallel", "pallet"):
-        return "nvidia"
-    return raw
+    raw = (src.get("OVERLAY_BOX_STYLE") or "foot").strip().lower()
+    raw = _ALIAS.get(raw, raw)
+    return raw if raw in _VALID_STYLES else "foot"
 
 
 def heading_shear_px(track: Track, width: float) -> float:
-    """Horizontal top-edge shear (px) from track velocity, else isometric lean.
-
-    Length of the body parallelogram stays the AABB height; width stays the AABB
-    width. Shear tilts the vertical sides so opposite edges stay parallel — a
-    cheap oriented footprint without a full OBB solver.
-    """
+    """Horizontal top-edge shear (px) from track velocity, else isometric lean."""
     w = max(float(width), 1.0)
     vx, vy = getattr(track, "velocity", (0.0, 0.0)) or (0.0, 0.0)
     speed = (float(vx) * float(vx) + float(vy) * float(vy)) ** 0.5
     if speed >= _SHEAR_SPEED_MIN:
         unit_x = float(vx) / speed
         return max(-_MAX_SHEAR_FRAC * w, min(_MAX_SHEAR_FRAC * w, unit_x * 0.35 * w))
-    # Prefer recent history if velocity is flat but the person has moved.
     hist = getattr(track, "history", None) or []
     if len(hist) >= 3:
         x0, y0, _ = hist[-3]
@@ -111,105 +102,74 @@ def parallel_footprint_quad(bbox: Sequence[float], shear: float) -> Any:
     )
 
 
-def inset_parallel_quad(quad: Any, inset: float = 4.0) -> Any:
-    """Shrink a parallelogram toward its centroid (inner pallet rail)."""
-    pts = np.asarray(quad, dtype=np.float32)
-    c = pts.mean(axis=0)
-    out = []
-    for p in pts:
-        v = p - c
-        n = float(np.linalg.norm(v)) or 1.0
-        scale = max(0.55, 1.0 - float(inset) / n)
-        out.append(c + v * scale)
-    return np.asarray(out, dtype=np.int32)
+def _draw_skeleton(canvas: Any, track: Track, color: Tuple[int, int, int] = SKELETON_COLOR) -> None:
+    """Thin joint lines from keypoints_xy (COCO-17) or named ankles/hips when present."""
+    xy = getattr(track, "keypoints_xy", None)
+    if xy and len(xy) >= 17:
+        pts = [(int(p[0]), int(p[1])) for p in xy]
+        for a, b in COCO17_SKELETON:
+            if a >= len(pts) or b >= len(pts):
+                continue
+            pa, pb = pts[a], pts[b]
+            if pa[0] <= 1 and pa[1] <= 1:
+                continue
+            if pb[0] <= 1 and pb[1] <= 1:
+                continue
+            cv2.line(canvas, pa, pb, color, 1, lineType=cv2.LINE_AA)
+            cv2.circle(canvas, pa, 2, color, -1, lineType=cv2.LINE_AA)
+        return
+    # Named keypoints fallback (partial)
+    kps = getattr(track, "keypoints", None) or {}
+    pairs = (
+        ("left_shoulder", "right_shoulder"),
+        ("left_shoulder", "left_hip"),
+        ("right_shoulder", "right_hip"),
+        ("left_hip", "right_hip"),
+        ("left_hip", "left_knee"),
+        ("left_knee", "left_ankle"),
+        ("right_hip", "right_knee"),
+        ("right_knee", "right_ankle"),
+    )
+    for a, b in pairs:
+        if a not in kps or b not in kps:
+            continue
+        pa = (int(kps[a][0]), int(kps[a][1]))
+        pb = (int(kps[b][0]), int(kps[b][1]))
+        cv2.line(canvas, pa, pb, color, 1, lineType=cv2.LINE_AA)
 
 
-def _draw_corner_caps(canvas: Any, quad: Any, color: Tuple[int, int, int], frac: float = 0.22) -> None:
-    """Short L-caps at each parallelogram corner (NVIDIA / Metropolis cue)."""
-    pts = np.asarray(quad, dtype=np.int32)
-    n = len(pts)
-    for i in range(n):
-        p = pts[i]
-        prev_p = pts[(i - 1) % n]
-        next_p = pts[(i + 1) % n]
-        for q in (prev_p, next_p):
-            dx = int(q[0] - p[0])
-            dy = int(q[1] - p[1])
-            ex = int(p[0] + dx * frac)
-            ey = int(p[1] + dy * frac)
-            cv2.line(canvas, (int(p[0]), int(p[1])), (ex, ey), color, 2, cv2.LINE_AA)
+def _draw_foot_mark(canvas: Any, track: Track) -> Tuple[int, int]:
+    """Primary red ground-contact mark. Returns integer foot xy."""
+    fx, fy = track.foot_point
+    foot = (int(fx), int(fy))
+    cv2.circle(canvas, foot, 5, FOOT_COLOR, -1, lineType=cv2.LINE_AA)
+    cv2.circle(canvas, foot, 7, FOOT_COLOR, 1, lineType=cv2.LINE_AA)
+    return foot
 
 
-def draw_nvidia_pallet_box(
-    canvas: Any,
-    bbox: Sequence[float],
-    shear: float,
-    color: Tuple[int, int, int],
-    label: str,
-) -> None:
-    """LocateAnything-style parallel / palletized frame + class label (OpenCV)."""
-    body = parallel_body_quad(bbox, shear)
-    foot_q = parallel_footprint_quad(bbox, shear)
-    inner = inset_parallel_quad(body, inset=max(3.0, 0.06 * max(float(bbox[2]) - float(bbox[0]), 1.0)))
-
-    cv2.polylines(canvas, [body], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
-    cv2.polylines(canvas, [inner], isClosed=True, color=color, thickness=1, lineType=cv2.LINE_AA)
-    cv2.polylines(canvas, [foot_q], isClosed=True, color=color, thickness=1, lineType=cv2.LINE_AA)
-    _draw_corner_caps(canvas, body, color)
-
-    if label:
-        _draw_label_bar(canvas, body, label, color)
+def _draw_trail(canvas: Any, track: Track) -> None:
+    hist = track.history
+    n = len(hist)
+    for i in range(1, n):
+        pt1 = (int(hist[i - 1][0]), int(hist[i - 1][1]))
+        pt2 = (int(hist[i][0]), int(hist[i][1]))
+        t = i / max(n - 1, 1)
+        g = int(70 + 110 * t)
+        cv2.line(canvas, pt1, pt2, (g, g, g), 1, lineType=cv2.LINE_AA)
 
 
-def _draw_label_bar(canvas: Any, quad: Any, label: str, color: Tuple[int, int, int]) -> None:
-    """Solid label strip above the top-left of the parallelogram."""
-    pts = np.asarray(quad, dtype=np.int32)
-    # Top edge is indices 0→1 in body quad.
-    x = int(min(pts[0][0], pts[1][0]))
-    y = int(min(pts[0][1], pts[1][1]))
-    text = str(label)[:48]
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-    pad_x, pad_y = 4, 3
-    x1 = max(0, x)
-    y1 = max(0, y - th - 2 * pad_y - 2)
-    x2 = min(canvas.shape[1] - 1, x1 + tw + 2 * pad_x)
-    y2 = min(canvas.shape[0] - 1, y1 + th + 2 * pad_y)
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), (18, 18, 18), -1)
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 1)
+def _draw_faint_id(canvas: Any, track: Track, foot: Tuple[int, int], is_staff: bool) -> None:
+    label = f"{track.track_id}" + ("S" if is_staff else "")
     cv2.putText(
         canvas,
-        text,
-        (x1 + pad_x, y2 - pad_y - 1),
+        label,
+        (foot[0] + 6, foot[1] - 6),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.45,
-        (240, 240, 240),
+        0.4,
+        (160, 160, 160),
         1,
-        cv2.LINE_AA,
+        lineType=cv2.LINE_AA,
     )
-
-
-def person_label(track: Track, is_staff: bool = False) -> str:
-    """Person-priority label text for overlays (ID + optional dwell from track peer)."""
-    base = f"person ID:{track.track_id}"
-    dwell = float(getattr(track, "dwell_s", 0.0) or 0.0)
-    if dwell >= 0.5:
-        base = f"{base} {dwell:.0f}s"
-    if is_staff:
-        return f"{base} STAFF"
-    if getattr(track, "is_stationary", False):
-        return f"{base} (still)"
-    return base
-
-
-def object_label(det: Dict[str, Any]) -> str:
-    """Store-object class name (COCO / YOLOE / YOLO-World)."""
-    name = (
-        det.get("label")
-        or det.get("class_name")
-        or det.get("name")
-        or f"class_{det.get('class_id', '?')}"
-    )
-    return str(name).strip() or "object"
 
 
 class DebugOverlay:
@@ -234,12 +194,11 @@ class DebugOverlay:
             return frame
         canvas = frame.copy()
         style = (box_style or resolve_overlay_box_style()).strip().lower()
-        if style in ("parallel", "pallet"):
-            style = "nvidia"
-        if style not in ("nvidia", "aabb"):
-            style = "nvidia"
+        style = _ALIAS.get(style, style)
+        if style not in _VALID_STYLES:
+            style = "foot"
 
-        # 1. Draw Zones (Polygons)
+        # 1. Zones
         for zone in zones:
             pts = np.array(zone.polygon, np.int32).reshape((-1, 1, 2))
             cv2.polylines(canvas, [pts], isClosed=True, color=(255, 200, 0), thickness=2)
@@ -267,7 +226,7 @@ class DebugOverlay:
                 2,
             )
 
-        # 2. Draw Queues
+        # 2. Queues
         for q in queues:
             pts = np.array(q.zone.polygon, np.int32).reshape((-1, 1, 2))
             color = (0, 0, 255) if q.alert_active else (0, 200, 255)
@@ -283,7 +242,7 @@ class DebugOverlay:
                 2,
             )
 
-        # 3. Draw Tripwires
+        # 3. Tripwires
         for tw in tripwires:
             p1 = (int(tw.p1[0]), int(tw.p1[1]))
             p2 = (int(tw.p2[0]), int(tw.p2[1]))
@@ -299,30 +258,24 @@ class DebugOverlay:
                 2,
             )
 
-        # 4a. Store objects first (under people — person priority on top)
+        # 4a. Optional store objects (never person) — light AABB only
         for det in objects or []:
             bbox = det.get("bbox")
             if not bbox or len(bbox) < 4:
                 continue
-            label = object_label(det)
-            # Never re-label a person-class hit here; people come from tracks.
-            if label.lower() in ("person", "people"):
+            name = str(
+                det.get("label") or det.get("class_name") or det.get("name") or "object"
+            ).strip()
+            if name.lower() in ("person", "people"):
                 continue
-            b = [float(v) for v in bbox]
-            shear = _ISO_SHEAR_FRAC * max(b[2] - b[0], 1.0)
-            if style == "aabb":
-                x1, y1, x2, y2 = [int(v) for v in b]
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), OBJECT_COLOR, 2)
-                _draw_label_bar(
-                    canvas,
-                    np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32),
-                    label,
-                    OBJECT_COLOR,
-                )
-            else:
-                draw_nvidia_pallet_box(canvas, b, shear, OBJECT_COLOR, label)
+            x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 200, 120), 1)
+            cv2.putText(
+                canvas, name[:18], (x1, max(12, y1 - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 120), 1,
+            )
 
-        # 4b. Person tracks — nvidia pallet (default) or AABB
+        # 4b. People — style-dependent (foot default = no heavy boxes)
         for track in tracks:
             b = [int(v) for v in track.bbox]
             is_stationary = getattr(track, "is_stationary", False)
@@ -332,44 +285,39 @@ class DebugOverlay:
             else:
                 color = STILL_COLOR if is_stationary else PERSON_COLOR
 
-            shear = 0.0
-            label = person_label(track, is_staff=is_staff)
             if style == "aabb":
                 cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2)
-                _draw_label_bar(
-                    canvas,
-                    np.array([[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]], dtype=np.int32),
-                    label,
-                    color,
-                )
-            else:
+            elif style == "parallel":
                 width = max(1, b[2] - b[0])
                 shear = heading_shear_px(track, width)
-                draw_nvidia_pallet_box(canvas, track.bbox, shear, color, label)
+                body = parallel_body_quad(track.bbox, shear)
+                foot_q = parallel_footprint_quad(track.bbox, shear)
+                cv2.polylines(canvas, [body], isClosed=True, color=color, thickness=2)
+                cv2.polylines(canvas, [foot_q], isClosed=True, color=color, thickness=1)
+            elif style == "skeleton":
+                _draw_skeleton(canvas, track)
 
-            # Ground point = bbox bottom-center (same point tripwire/zones use).
-            gp = getattr(track, "ground_point", None) or track.foot_point
-            foot = (int(gp[0]), int(gp[1]))
-            cv2.circle(canvas, foot, 4, (0, 0, 255), -1)
+            # Primary UX for all styles: red foot + trail + faint id
+            foot = _draw_foot_mark(canvas, track)
+            _draw_trail(canvas, track)
+            _draw_faint_id(canvas, track, foot, is_staff)
 
-            # Fade trajectory trail / LOS (older = dimmer) — coherent with ground point
-            hist = track.history
-            n = len(hist)
-            for i in range(1, n):
-                pt1 = (int(hist[i - 1][0]), int(hist[i - 1][1]))
-                pt2 = (int(hist[i][0]), int(hist[i][1]))
-                t = i / max(n - 1, 1)
-                g = int(90 + 130 * t)
-                cv2.line(canvas, pt1, pt2, (g, g, g), 1)
+            # Heavier ID only for box styles (foot/skeleton stay faint)
+            if style in ("aabb", "parallel"):
+                label = f"ID:{track.track_id}" + (
+                    " STAFF" if is_staff else " (still)" if is_stationary else ""
+                )
+                cv2.putText(
+                    canvas, label, (b[0], max(14, b[1] - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                )
 
-        # 5. Draw HUD Bar at top
+        # 5. HUD
         cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 40), (20, 20, 20), -1)
         fps_text = f"FEED {fps:.1f} fps" if infer_fps is None else f"FEED {fps:.1f} | MODEL {infer_fps:.1f} fps"
         n_staff = sum(t.track_id in staff_ids for t in tracks)
         people = f"People: {len(tracks) - n_staff}" + (f" + {n_staff} staff" if n_staff else "")
-        n_obj = len(objects or [])
-        obj_bit = f" | Objects: {n_obj}" if n_obj else ""
-        hud_text = f"AD Labs EdgeSight | {camera_name} | {fps_text} | {people}{obj_bit}"
+        hud_text = f"AD Labs EdgeSight | {camera_name} | {fps_text} | {people} | {style}"
         cv2.putText(canvas, hud_text, (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
         return canvas

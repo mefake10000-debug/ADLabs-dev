@@ -15,23 +15,24 @@ edge:
 #   performance.mode: fast|balanced|quality  # this file
 #   EDGE_MAX_CAMERAS=2                   # all configured views; reduce only for a measured FPS budget
 #   EDGESIGHT_DETECT_MODEL=…             # optional YOLO weight override
-#   DETECTOR_BACKEND=yolo26|yolo11|rfdetr  # default Ultralytics yolo26; rfdetr opt-in only
-#   RFDETR_VARIANT=nano|small            # Apache-2.0 sizes only (when rfdetr selected)
-#   OVERLAY_BOX_STYLE=nvidia|parallel|pallet|aabb  # default nvidia (LocateAnything look-alike)
+#   DETECTOR_BACKEND=yolo26|rfdetr       # fast/balanced→yolo26; quality→rfdetr (SOTA) unless set
+#   RFDETR_VARIANT=nano|small            # Apache-2.0 sizes only
+#   OVERLAY_BOX_STYLE=foot|skeleton|parallel|aabb  # default foot (red mark + trail)
+#   ENABLE_RTMPOSE=1                     # ankle feet via RTMPose ONNX when packed
 #
-# See docs/live-fps.md, docs/overlay-parallel-boxes.md, docs/rfdetr-integration.md.
+# See docs/live-fps.md, docs/foot-tracking-retail-models.md, docs/rfdetr-integration.md.
 performance:
   mode: "balanced"            # balanced (local demo default) | fast | quality
-  imgsz: 416                  # Ultralytics letterbox; fast=320, quality YOLO=640
+  imgsz: 416                  # Ultralytics letterbox; fast=320, quality YOLO=640; RF-DETR fixed
   infer_every_n: 2            # denser tracks than fast(3); quality uses 1
   display_every_n: 1          # smooth MJPEG from last tracks between infer frames
   # Docker CPU demo: 1 cam. Peer fusion can raise EDGE_MAX_CAMERAS after measuring KPI floor.
   max_cameras: 1
 
 perception:
-  # Ultralytics YOLO26n default (all perf modes). Quality uses yolo26s @ 640 via preset.
-  # RF-DETR only when DETECTOR_BACKEND=rfdetr (never the default).
-  detector_backend: "yolo26"   # yolo26 | yolo11 | rfdetr
+  # Balanced/fast default: YOLO26n. Quality defaults to RF-DETR (Apache SOTA) unless
+  # DETECTOR_BACKEND=yolo26. Leave detector_backend unset to honor EDGE_PERF_MODE defaults.
+  # detector_backend: "yolo26"   # optional hard pin: yolo26 | rfdetr
   rfdetr_variant: "nano"         # nano | small (Apache-2.0 only; not XL/2XL)
   model_name: "models/yolo26n.pt"
   imgsz: 416
@@ -50,21 +51,16 @@ perception:
   min_aspect_ratio: 1.0       # Suppress wide/horizontal displays (baskets, flat signs)
   max_aspect_ratio: 4.2       # Suppress vertical slivers / poles
   min_area: 3000
-  # Person (0) is tracked; additional retail COCO classes are drawn as labeled overlay objects.
-  classes: [0]
+  classes: [0]                # Class 0 is 'person' in COCO
   require_model: true         # Fail at startup if YOLO cannot load, instead of silently reporting zero people
 
 tracking:
   tracker_type: "bytetrack"
   track_thresh: 0.50          # Bar for STARTING a new track. Detections below this (but above
                                # perception.confidence_threshold) can only extend an existing track.
-  match_thresh: 0.45          # Base IoU match; EdgePipeline scales down when infer_every_n > 1
-  track_buffer: 60            # Update-ticks to keep a lost track (scaled up with infer_every_n).
-                               # Balanced (n=2) → ~81 ticks; fast (n=3) → ~102. Skipped decode
-                               # frames must not mint new IDs or tripwire/dwell break.
-  min_hits: 3                 # Confirm sooner under sparse infer; still drops 1-frame flicker.
-                               # Tripwire also sees early_tracks (≥2 hits) so crossings during
-                               # confirmation are not lost.
+  match_thresh: 0.45          # Tuned IoU matching to prevent ID switching & track fragmentation
+  track_buffer: 45            # Max frames to keep lost track alive
+  min_hits: 4                 # Temporal confirmation to eliminate 1-frame detector flicker
   stationary_policy: "tag"    # "tag": stationary tracks (e.g. someone standing still in a queue)
                                # are still returned, with is_stationary=True, so zones/queues can
                                # count them -- only the tripwire ignores the flag (it already did).

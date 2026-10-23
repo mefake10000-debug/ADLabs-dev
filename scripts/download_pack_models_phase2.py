@@ -290,15 +290,29 @@ def download(url: str, dest: Path, min_size: int) -> None:
 
 
 def unpack_onnx_zip(zip_path: Path, folder: Path) -> list[Path]:
+    """Extract ONNX with a unique short name (rtmpose-t.onnx / rtmpose-s.onnx).
+
+    OpenMMLab SDK zips all ship ``end2end.onnx`` — extracting by basename alone
+    would overwrite t with s (or vice versa).
+    """
     out: list[Path] = []
+    stem = zip_path.name
+    if "rtmpose-t_" in stem:
+        short = "rtmpose-t.onnx"
+    elif "rtmpose-s_" in stem:
+        short = "rtmpose-s.onnx"
+    elif "rtmpose-m_" in stem:
+        short = "rtmpose-m.onnx"
+    else:
+        short = None
     with zipfile.ZipFile(zip_path, "r") as zf:
         for name in zf.namelist():
-            if name.lower().endswith(".onnx"):
-                target = folder / Path(name).name
-                if not target.exists():
-                    with zf.open(name) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                out.append(target)
+            if not name.lower().endswith(".onnx"):
+                continue
+            target = folder / (short or Path(name).name)
+            with zf.open(name) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            out.append(target)
     return out
 
 

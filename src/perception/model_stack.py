@@ -128,14 +128,14 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
         ),
         StackEntry(
             key="rtmpose",
-            name="RTMPose-t/s/m ONNX (rtmlib)",
-            role="Pose fall-candidate tier",
-            job="Flags unusual body poses (caution only)",
-            feeds_kpi="Safety cautions",
+            name="RTMPose-t/s ONNX (rtmlib)",
+            role="Ankle / foot pose + fall-candidate",
+            job="Red foot mark, skeleton, tripwire/dwell ground point",
+            feeds_kpi="Footfall · dwell · safety cautions",
             license="Apache-2.0",
             status="PACKED",
             path_hint="models/pack/07-pose/",
-            notes="Phase-2 dry-run default. PARTIAL when ONNX on disk + slow-tier wire.",
+            notes="LIVE when ONNX on disk and RTMPoseFootEstimator active.",
         ),
         StackEntry(
             key="shelf_gap_geometry",
@@ -245,9 +245,28 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             pose_dir = base / "models/pack/07-pose"
             on = pose_dir.is_dir() and any(pose_dir.glob("*.onnx"))
             e.on_disk = on
-            if on and e.status == "PACKED":
+            # Runtime latch from edge process (main sets after successful load).
+            runtime = os.environ.get("RTMPOSE_RUNTIME_LOADED", "").strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+            enable = (os.environ.get("ENABLE_RTMPOSE") or "1").strip().lower() not in (
+                "0", "false", "off", "no",
+            )
+            if on and runtime and enable:
+                e.status = "LIVE"
+                e.notes = (
+                    "ON — ankle feet feed overlay/tripwire/dwell. "
+                    "Fall-candidate remains caution-only."
+                )
+            elif on and enable:
                 e.status = "PARTIAL"
-                e.notes = "ONNX present — wire slow-tier SAFETY_FALL_CANDIDATE_POSE (candidate-only)."
+                e.notes = (
+                    "ONNX on disk — waiting for edge RTMPoseFootEstimator "
+                    "(ENABLE_RTMPOSE=1). Overlay foot falls back to bbox bottom-center until then."
+                )
+            elif on:
+                e.status = "PACKED"
+                e.notes = "ONNX present but ENABLE_RTMPOSE=0."
         elif e.key == "mivolo_v2":
             e.on_disk = _any_exists(
                 base,

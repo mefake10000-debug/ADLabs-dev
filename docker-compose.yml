@@ -48,16 +48,20 @@ services:
       # See docs/live-fps.md. Default one cam on Docker CPU; set EDGE_MAX_CAMERAS= empty for all.
       - EDGE_PERF_MODE=${EDGE_PERF_MODE:-balanced}
       - EDGE_MAX_CAMERAS=${EDGE_MAX_CAMERAS:-1}
-      # NVIDIA-style parallel/pallet boxes (LocateAnything look-alike; OpenCV only — no NC download).
-      # Aliases: parallel|pallet → nvidia. aabb = classic YOLO rect. See docs/overlay-parallel-boxes.md.
-      - OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-nvidia}
+      # Person overlays: foot (default — red ground mark + trail) | skeleton | parallel | aabb.
+      # See docs/foot-tracking-retail-models.md.
+      - OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-foot}
+      - ENABLE_RTMPOSE=${ENABLE_RTMPOSE:-1}
+      - RTMPOSE_VARIANT=${RTMPOSE_VARIANT:-t}
+      - RTMPOSE_EVERY_N=${RTMPOSE_EVERY_N:-4}
       - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}
-      # Detector: Ultralytics YOLO only by default (yolo26|yolo11). RF-DETR is opt-in.
+      # Detector backend: yolo26 (fast default) | rfdetr (SOTA Apache; quality default).
       # See docs/rfdetr-integration.md. Optional: pip install rfdetr in the edge image.
       # RF-DETR weights are NOT baked (~350 MB nano). One-command optional pull (disk-gated):
       #   python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
       # Dry-run (default): python3 scripts/download_pack_models_phase2.py --only rfdetr-nano
-      - DETECTOR_BACKEND=${DETECTOR_BACKEND:-yolo26}
+      # Until weights land, stack reports rfdetr OFF/PACKED; YOLO26n stays the live fast path.
+      - DETECTOR_BACKEND=${DETECTOR_BACKEND:-}
       - RFDETR_VARIANT=${RFDETR_VARIANT:-nano}
       - RFDETR_WEIGHTS=${RFDETR_WEIGHTS:-}
       - RF_HOME=${RF_HOME:-/app/models/pack/01-detection/rfdetr}
