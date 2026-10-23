@@ -229,7 +229,7 @@ class DebugOverlay:
 
         # 5. Draw HUD Bar at top
         cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 40), (20, 20, 20), -1)
-        fps_text = f"FPS: {fps:.1f}" if infer_fps is None else f"Decode {fps:.1f} | Infer {infer_fps:.1f} FPS"
+        fps_text = f"FEED {fps:.1f} fps" if infer_fps is None else f"FEED {fps:.1f} | MODEL {infer_fps:.1f} fps"
         n_staff = sum(t.track_id in staff_ids for t in tracks)
         people = f"People: {len(tracks) - n_staff}" + (f" + {n_staff} staff" if n_staff else "")
         hud_text = f"AD Labs EdgeSight | {camera_name} | {fps_text} | {people}"

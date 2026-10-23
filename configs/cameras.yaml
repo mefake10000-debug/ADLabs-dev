@@ -50,7 +50,7 @@ cameras:
 - id: cam_checkout_01
   name: Checkout Floor
   source: data/sample_videos/checkout_sample.mp4
-  fps_target: 12
+  fps_target: 15  # auto-clamped to the source's real fps at camera init
   resolution:
   - 1270
   - 720

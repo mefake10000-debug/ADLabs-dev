@@ -76,7 +76,9 @@ analytics:
 # demographics, open-vocabulary products) on a slower cadence.
 #
 # Fast mode (default) keeps models.enabled: false so Docker CPU demos stay at usable FPS.
-# Quality mode (EDGE_PERF_MODE=quality) turns enrichment back on — expect ~0.3–2 FPS in Docker.
+# Quality mode (EDGE_PERF_MODE=quality) does NOT silently re-enable enrichment:
+# every models.* block stays exactly as configured below. Flip models.enabled (or
+# export EDGE_ENRICHMENT=1) on purpose, and watch the FPS column while you do.
 #
 # Weights are not committed (see .gitignore). Run `python scripts/download_models.py`
 # once after cloning.
@@ -104,7 +106,7 @@ models:
     max_products_per_tick: 12 # cap open-vocabulary detections fed to the interest model
 
   pose:
-    enabled: false            # quality mode re-enables; yolo26m-pose is expensive on CPU
+    enabled: false            # enrichment-tier gate (deliberate; quality mode never auto-enables)
     weights: "models/yolo26m-pose.pt"
     confidence: 0.30
     match_iou: 0.30           # min IoU to bind a pose to an existing track
@@ -138,7 +140,7 @@ models:
     focal_scale: 1.0          # 1.0 => focal length equals frame width
 
   products:
-    enabled: false            # quality mode re-enables; yoloe avoids CLIP thrash
+    enabled: false            # enrichment-tier gate (deliberate; quality mode never auto-enables)
     backend: "yoloe"
     weights: "models/yolov8s-worldv2.pt"
     shelf_weights: "models/pack/06-shelf/yoloe-v8s-seg-pf.pt"
@@ -166,7 +168,8 @@ models:
   # Soft body ReID (OSNet). Default OFF — DPDP / no face ReID / no multi-day gallery.
   # Session-scoped embeddings only; SoftReIdExtractor also probes verified pack paths.
   # Cross-cam global_person_id still requires NTP + overlap + fusion (not shipped).
-  # Soft ReID: enabled true + EDGE_PERF_MODE=quality (fast keeps off). Session-scoped ONNX.
+  # Session-scoped OSNet ReID. Computed only when the enrichment tier runs
+  # (models.enabled / EDGE_ENRICHMENT); the fast tier alone never embeds crops.
   reid:
     enabled: true
     weights: "models/pack/03-reid/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"

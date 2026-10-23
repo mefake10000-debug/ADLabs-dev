@@ -37,9 +37,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    # POST needed for NFC tap webhook + telemetry/config writes from the portal.
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Accept", "Content-Type", "X-API-Key"],
 )
+
+from server.nfc_store import industry_status_block, nfc_live_block, record_tap
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -137,6 +140,29 @@ def init_db():
         _add_column(conn, "telemetry_rollups", "group_count", "INTEGER")
         _add_column(conn, "telemetry_rollups", "people_in_groups", "INTEGER")
         _add_column(conn, "telemetry_rollups", "demographics_json", "TEXT")
+        _add_column(conn, "telemetry_rollups", "loop_count", "INTEGER DEFAULT 0")
+        _add_column(conn, "telemetry_rollups", "is_simulated", "INTEGER DEFAULT 0")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_registry (
+            device_id TEXT PRIMARY KEY,
+            device_name TEXT,
+            inference_engine TEXT,
+            perf_mode TEXT,
+            cameras INTEGER,
+            python_version TEXT,
+            torch_version TEXT,
+            registered_at TEXT
+        )
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS alert_state (
+            rule_id TEXT,
+            camera_id TEXT,
+            state TEXT,
+            last_change_at TEXT,
+            PRIMARY KEY (rule_id, camera_id)
+        )
+        """)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS telemetry_products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,6 +212,9 @@ class RollupItem(BaseModel):
     group_count: Optional[int] = None
     people_in_groups: Optional[int] = None
     demographics_json: Optional[str] = None
+    # Sample-video provenance (loop_count > 0 => replaying sample footage, not live RTSP)
+    loop_count: Optional[int] = 0
+    is_simulated: Optional[int] = 0
 
 class TelemetryPayload(BaseModel):
     batch_size: int
@@ -231,6 +260,25 @@ class ProductBatchPayload(BaseModel):
     products: List[ProductInterestItem]
     exported_at: float
 
+
+class NfcTapPayload(BaseModel):
+    """Fashion / apparel NFC reader webhook — one person tap on a tagged product."""
+
+    product_id: str = Field(..., min_length=1, max_length=128)
+    zone: Optional[str] = Field(default=None, max_length=128)
+    zone_id: Optional[str] = Field(default=None, max_length=64)
+    camera_id: Optional[str] = Field(default=None, max_length=64)
+    tapped_at: Optional[str] = Field(default=None, max_length=64)
+    meta: Optional[Dict[str, Any]] = None
+
+    @field_validator("product_id")
+    @classmethod
+    def _strip_product(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("product_id is required")
+        return s
+
 # Web App Entrypoint (Structured Production SPA)
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
@@ -256,14 +304,16 @@ def receive_telemetry(payload: TelemetryPayload):
                 in_count, out_count, current_occupancy, avg_dwell_seconds,
                 queue_length, avg_queue_wait_seconds, queue_alert_active,
                 avg_attention_score, facing_ratio, phone_usage_rate, engaged_ratio,
-                group_count, people_in_groups, demographics_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                group_count, people_in_groups, demographics_json,
+                loop_count, is_simulated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 r.store_id, r.device_id, r.camera_id, r.timestamp_start, r.timestamp_end,
                 r.in_count, r.out_count, r.current_occupancy, r.avg_dwell_seconds,
                 r.queue_length, r.avg_queue_wait_seconds, r.queue_alert_active,
                 r.avg_attention_score, r.facing_ratio, r.phone_usage_rate, r.engaged_ratio,
-                r.group_count, r.people_in_groups, r.demographics_json
+                r.group_count, r.people_in_groups, r.demographics_json,
+                r.loop_count or 0, r.is_simulated or 0
             ))
         conn.commit()
     return {"status": "success", "processed_records": len(payload.rollups)}
@@ -464,6 +514,10 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "cameras": snap.get("cameras"),
                 "reid": snap.get("reid"),
                 "products_top": snap.get("products_top"),
+                "zones": snap.get("zones"),
+                "staff_zones": snap.get("staff_zones"),
+                "queues": snap.get("queues"),
+                "field_status": snap.get("field_status"),
             })
         elif snap and snap.get("_stale"):
             result["snapshot_stale"] = True
@@ -496,12 +550,52 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                     "out_count": row.get("total_exits", 0),
                     "last_rollup_at": row.get("timestamp"),
                     "infer_fps": row.get("infer_fps"),
+                    "loop_count": (row.get("video_loop") or {}).get("loop_count"),
+                    "is_simulated": (row.get("video_loop") or {}).get("is_simulated"),
+                    "unique_this_pass": (row.get("video_loop") or {}).get("unique_this_pass"),
                     "source": "live_snapshot",
                 })
             if snap_cams:
                 result["per_camera"] = snap_cams
 
+        # Industry modes: NFC buffer + honest status map (never invent sample taps / defect %).
+        fresh_snap = snap if snap and not snap.get("_stale") else None
+        nfc = nfc_live_block(20)
+        result["nfc"] = nfc
+        result["industry"] = industry_status_block(fresh_snap, nfc)
+
+        # Frame-synced provenance for the portal (ISO timestamp + sample-loop state).
+        result["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        result["video_loop"] = (snap or {}).get("video_loop")
+
         return result
+
+
+@app.post("/api/v1/nfc/tap")
+def post_nfc_tap(payload: NfcTapPayload):
+    """Fashion NFC reader webhook. Does not invent taps — only records POSTed events."""
+    try:
+        tap = record_tap(
+            payload.product_id,
+            zone=payload.zone,
+            zone_id=payload.zone_id,
+            camera_id=payload.camera_id,
+            tapped_at=payload.tapped_at,
+            meta=payload.meta,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "tap": tap,
+        "nfc": nfc_live_block(20),
+    }
+
+
+@app.get("/api/v1/nfc/taps")
+def get_nfc_taps(limit: int = 20):
+    """Recent NFC taps this session (empty until a reader POSTs)."""
+    return nfc_live_block(limit)
 
 
 @app.get("/api/v1/live/snapshot")
@@ -513,7 +607,118 @@ def get_live_snapshot(camera_id: Optional[str] = None):
             status_code=404,
             detail="No live snapshot yet — is edge-analyzer processing video?",
         )
-    return snap
+    nfc = nfc_live_block(20)
+    out = dict(snap)
+    out["nfc"] = nfc
+    out["industry"] = industry_status_block(snap, nfc)
+    return out
+
+
+@app.get("/api/v1/live.queue")
+def get_live_queue(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None):
+    """Per-queue now + KPI window (contract: docs/handoff/queue-analytics-upgrade.md).
+
+    Reads frame-synced snapshot rows; KPI fields stay null/empty while the window is
+    under-sampled — the honest empty state from the alert catalog.
+    """
+    live_dir = _live_dir()
+    queues = []
+    if os.path.isdir(live_dir):
+        for name in sorted(os.listdir(live_dir)):
+            if not name.endswith(".json") or name in ("store.json",) or name.endswith(".tmp.json"):
+                continue
+            try:
+                with open(os.path.join(live_dir, name)) as f:
+                    row = json.load(f)
+            except Exception:
+                continue
+            if camera_id and row.get("camera_id") != camera_id:
+                continue
+            vl = row.get("video_loop") or {}
+            for q in row.get("queues") or []:
+                queues.append({
+                    "queue_id": q.get("id", "queue"),
+                    "name": q.get("name"),
+                    "camera_id": row.get("camera_id"),
+                    "now": q.get("now") or {"length": q.get("queue_length", 0)},
+                    "kpi": q.get("kpi") or {},
+                    "series": q.get("series") or [],
+                    "recent_episodes": q.get("recent_episodes") or [],
+                    "abandon_status": q.get("abandon_status", "PARTIAL"),
+                    "abandon_note": q.get("abandon_note"),
+                    "staff_zone_id": q.get("staff_zone_id"),
+                    "loop_count": vl.get("loop_count"),
+                    "is_simulated": vl.get("is_simulated"),
+                })
+    return {
+        "store_id": store_id,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "queues": queues,
+    }
+
+
+@app.get("/api/v1/live.staff")
+def get_live_staff(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None):
+    """Per-approach staff presence from geometry-based dwell tagging (no facial ID)."""
+    live_dir = _live_dir()
+    zones = []
+    if os.path.isdir(live_dir):
+        for name in sorted(os.listdir(live_dir)):
+            if not name.endswith(".json") or name in ("store.json",) or name.endswith(".tmp.json"):
+                continue
+            try:
+                with open(os.path.join(live_dir, name)) as f:
+                    row = json.load(f)
+            except Exception:
+                continue
+            if camera_id and row.get("camera_id") != camera_id:
+                continue
+            for z in row.get("staff_zones") or []:
+                zones.append({**z, "camera_id": z.get("camera_id") or row.get("camera_id")})
+    present = sum(int(z.get("tagged_ids", 0) or 0) for z in zones)
+    return {
+        "store_id": store_id,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "zones": zones,
+        "camera_inventory_present": present,
+        "note": "Geometry-based sticky staff tag; no facial ID. response_time_to_queue PARTIAL.",
+    }
+
+
+class DeviceRegister(BaseModel):
+    device_id: str
+    device_name: Optional[str] = None
+    inference_engine: Optional[str] = None
+    perf_mode: Optional[str] = None
+    cameras: Optional[int] = None
+    python_version: Optional[str] = None
+    torch_version: Optional[str] = None
+
+
+@app.post("/api/v1/device/register")
+def device_register(body: DeviceRegister):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+        INSERT INTO device_registry (
+            device_id, device_name, inference_engine, perf_mode, cameras,
+            python_version, torch_version, registered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(device_id) DO UPDATE SET
+            device_name = excluded.device_name,
+            inference_engine = excluded.inference_engine,
+            perf_mode = excluded.perf_mode,
+            cameras = excluded.cameras,
+            python_version = excluded.python_version,
+            torch_version = excluded.torch_version,
+            registered_at = excluded.registered_at
+        """, (
+            body.device_id, body.device_name, body.inference_engine, body.perf_mode,
+            body.cameras, body.python_version, body.torch_version,
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+        conn.commit()
+    return {"status": "success", "device_id": body.device_id}
+
 
 # Metric Reset Endpoint (Clears accumulated test telemetry)
 @app.post("/api/v1/metrics/reset")
@@ -1044,7 +1249,16 @@ def get_device_health():
         or "fast"
     )
     # Honest engine label: Compose edge is CPU; do not claim Core ML inside Docker.
-    engine = "PyTorch CPU (Docker)" if os.path.exists("/.dockerenv") else "Core ML / ONNX Runtime FP16"
+    with sqlite3.connect(DB_PATH) as _conn:
+        _reg = _conn.execute(
+            "SELECT device_name, inference_engine, device_id FROM device_registry "
+            "ORDER BY registered_at DESC LIMIT 1"
+        ).fetchone()
+    if _reg and _reg[1]:
+        engine = _reg[1]
+    else:
+        # Honest fallback until the edge self-registers (POST /api/v1/device/register).
+        engine = "PyTorch CPU (Docker)" if os.path.exists("/.dockerenv") else "PyTorch MPS (native; self-registration pending)"
     return {
         "device_id": "edge_node_macmini_01",
         "device_name": "Apple Silicon Mac mini (Edge Node)",

@@ -55,6 +55,8 @@ class EdgePipeline:
 
         self.store_id = self.pipeline_cfg.get("edge", {}).get("store_id", "store_default")
         self.device_id = self.pipeline_cfg.get("edge", {}).get("device_id", "edge_01")
+        from src.analytics.alerts_engine import AlertsEngine
+        self.alerts_engine = AlertsEngine()
         self.rollup_interval = self.pipeline_cfg.get("storage", {}).get("rollup_interval_seconds", 30)
 
         # Storage & Telemetry
@@ -616,6 +618,10 @@ class EdgePipeline:
         self.running = True
         self.exporter.start()
 
+        import threading as _threading
+        reg = _threading.Thread(target=self._device_registration_loop, name="DeviceRegister", daemon=True)
+        reg.start()
+
         for ctx in self.camera_contexts.values():
             ctx["reader"].start()
             self._start_slow_tier(ctx)
@@ -1094,6 +1100,17 @@ class EdgePipeline:
                 "queue_length": m.get("queue_length", 0),
                 "avg_wait_seconds": m.get("avg_wait_seconds", 0.0),
                 "alert_active": bool(m.get("alert_active")),
+                # Episode tier pass-through (join/leave machinery feeds /live.queue)
+                "now": m.get("now"),
+                "kpi": m.get("kpi"),
+                "series": m.get("series"),
+                "recent_episodes": m.get("recent_episodes"),
+                "abandon_status": m.get("abandon_status"),
+                "abandon_note": m.get("abandon_note"),
+                "staff_zone_id": m.get("staff_zone_id"),
+                "alert_wait_ms": m.get("alert_wait_ms"),
+                "alert_length": m.get("alert_length"),
+                "max_capacity": m.get("max_capacity"),
             })
             queue_len = max(queue_len, m.get("queue_length", 0))
             avg_wait = max(avg_wait, m.get("avg_wait_seconds", 0.0))
@@ -1116,12 +1133,40 @@ class EdgePipeline:
 
         staff_zones = []
         for z in ctx.get("staff_zones", []):
+            tagged = len(getattr(z, "active_tracks_in_zone", {}) or {})
+            expected = getattr(z, "expected_on_post", None)
+            understaffed = expected is not None and tagged < expected
             staff_zones.append({
                 "id": getattr(z, "zone_id", None) or getattr(z, "id", "staff"),
                 "name": getattr(z, "name", "staff"),
                 "type": "staff",
-                "tagged_ids": len(getattr(z, "active_tracks_in_zone", {}) or {}),
+                "tagged_ids": tagged,
+                "staff_present": tagged,
+                "expected_on_post": expected,
+                "understaffed": understaffed,
+                "state": (
+                    "UNDERSTAFFED" if understaffed
+                    else ("STAFFED" if expected is not None else "UNCALIBRATED")
+                ),
+                "linked_queue_ids": list(getattr(z, "linked_queue_ids", []) or []),
+                "camera_id": cam_id,
             })
+
+        alerts_block = (
+            self.alerts_engine.evaluate(
+                {
+            "queues": queues_out,
+            "alerts": alerts_block,
+                    "queue_length": queue_len,
+                    "queue_alert_active": alert_active,
+                    "staff_zones": staff_zones,
+                    "camera_id": cam_id,
+                },
+                now=frame_time,
+            )
+            if getattr(self, "alerts_engine", None)
+            else {"fired": [], "pending": [], "unavailable": []}
+        )
 
         attention = ctx["attention"].snapshot() if ctx.get("attention") else {}
         groups = ctx["groups"].snapshot() if ctx.get("groups") else {}
@@ -1336,6 +1381,50 @@ class EdgePipeline:
         with open(store_tmp, "w") as f:
             json.dump(store, f)
         os.replace(store_tmp, store_path)
+
+    def _device_registration_loop(self):
+        import time as _time
+        while self.running:
+            try:
+                self._register_device()
+            except Exception as e:
+                logger.debug(f"Device register skipped: {e}")
+            _time.sleep(60.0)
+
+    def _register_device(self):
+        """Self-register the edge node so the cloud device panel runs on measured truth."""
+        import platform as _platform
+        import urllib.request as _urllib
+        endpoint = os.environ.get("TELEMETRY_CLOUD_ENDPOINT", "")
+        if not endpoint or not endpoint.endswith("api/v1/telemetry"):
+            return
+        base = endpoint[: -len("api/v1/telemetry")].rstrip("/")
+        try:
+            dev = str(getattr(self.detector, "device", "cpu") or "cpu")
+        except Exception:
+            dev = "cpu"
+        engine = "PyTorch MPS (native)" if dev == "mps" else f"PyTorch {dev} (edge)"
+        try:
+            import torch as _torch
+            torch_version = getattr(_torch, "__version__", None)
+        except Exception:
+            torch_version = None
+        payload = {
+            "device_id": self.device_id,
+            "device_name": f"{_platform.node()} (Edge Node)",
+            "inference_engine": engine,
+            "perf_mode": getattr(self, "perf_mode", "fast"),
+            "cameras": len(self.camera_contexts),
+            "python_version": _platform.python_version(),
+            "torch_version": torch_version,
+        }
+        req = _urllib.Request(
+            base + "/api/v1/device/register",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        _urllib.urlopen(req, timeout=3).read()
+        logger.info(f"Device registered with cloud: {self.device_id} ({engine})")
 
     def _persist_crossing_events(self, cam_id: str, events: List[Dict[str, Any]]):
         """Persists individual tripwire crossings as durable events, independent of
