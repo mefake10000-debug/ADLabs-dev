@@ -1188,10 +1188,16 @@ class EdgePipeline:
             "models": payload.get("models"),
             "perf_mode": payload.get("perf_mode"),
             "engagement": payload.get("engagement"),
+            "reid": payload.get("reid"),
+            "products_top": payload.get("products_top"),
         }
         dwell_acc = []
+        active = set(self.camera_contexts.keys())
         for name in os.listdir(self.live_dir):
             if not name.endswith(".json") or name.startswith("store") or name.endswith(".tmp.json"):
+                continue
+            cam_key = name[: -len(".json")]
+            if active and cam_key not in active:
                 continue
             try:
                 with open(os.path.join(self.live_dir, name)) as f:
@@ -1222,6 +1228,10 @@ class EdgePipeline:
                 store["models"] = row["models"]
             if row.get("engagement"):
                 store["engagement"] = row["engagement"]
+            if row.get("reid"):
+                store["reid"] = row["reid"]
+            if row.get("products_top"):
+                store["products_top"] = row["products_top"]
         if dwell_acc:
             store["avg_dwell_seconds"] = round(sum(dwell_acc) / len(dwell_acc), 1)
 
