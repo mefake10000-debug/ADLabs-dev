@@ -517,6 +517,12 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "zones": snap.get("zones"),
                 "staff_zones": snap.get("staff_zones"),
                 "queues": snap.get("queues"),
+                "entrance": snap.get("entrance"),
+                "stop_rate": snap.get("stop_rate"),
+                "floor": snap.get("floor"),
+                "staff": snap.get("staff"),
+                "safety": snap.get("safety"),
+                "alerts": snap.get("alerts"),
                 "field_status": snap.get("field_status"),
             })
         elif snap and snap.get("_stale"):
@@ -611,6 +617,82 @@ def get_live_snapshot(camera_id: Optional[str] = None):
     out = dict(snap)
     out["nfc"] = nfc
     out["industry"] = industry_status_block(snap, nfc)
+    return out
+
+
+
+def _load_alerts_catalog_file() -> Dict[str, Any]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(os.path.join(here, ".."))
+    for p in (
+        os.path.join(here, "alerts_catalog.json"),
+        os.path.join(root, "docs", "handoff", "alerts-catalog-retail-grocery.json"),
+    ):
+        if os.path.isfile(p):
+            with open(p, "r") as f:
+                return json.load(f)
+    return {"alerts": []}
+
+
+@app.get("/api/v1/alerts")
+def get_alerts(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None):
+    snap = _read_live_snapshot(camera_id)
+    if snap and snap.get("alerts"):
+        out = dict(snap["alerts"])
+        out["store_id"] = store_id
+        out["camera_id"] = camera_id or snap.get("camera_id")
+        out["source"] = "live_snapshot"
+        return out
+    catalog = _load_alerts_catalog_file()
+    partial, future = [], []
+    for rule in catalog.get("alerts") or []:
+        status = (rule.get("data_status") or "FUTURE").upper()
+        row = {
+            "id": rule.get("id"),
+            "title": rule.get("title"),
+            "data_status": status,
+            "recommended_action": rule.get("recommended_action"),
+        }
+        if status == "PARTIAL":
+            row["chip"] = "pending calibration/upgrade"
+            partial.append(row)
+        elif status == "FUTURE":
+            row["chip"] = "requires external data source"
+            future.append(row)
+    return {
+        "store_id": store_id,
+        "camera_id": camera_id,
+        "active": [],
+        "partial_catalog": partial,
+        "future_catalog": future,
+        "catalog_version": catalog.get("version") or catalog.get("catalog"),
+        "source": "catalog_only",
+        "note": "No live snapshot alerts yet — active list empty (not invented).",
+    }
+
+
+@app.get("/api/v1/analytics/floor")
+def get_floor_analytics(window_seconds: int = 900, camera_id: Optional[str] = None):
+    snap = _read_live_snapshot(camera_id)
+    if not snap:
+        raise HTTPException(status_code=404, detail="No live snapshot yet")
+    floor = snap.get("floor")
+    if floor is None:
+        return {
+            "store_id": snap.get("store_id"),
+            "camera_id": snap.get("camera_id"),
+            "window_seconds": window_seconds,
+            "top_routes": [],
+            "zone_traction": [],
+            "paths_active": [],
+            "status": "PARTIAL",
+            "badge_copy": "Floor paths unlock after edge snapshot carries floor block.",
+            "coverage_note": "session-cam only; no cross-day identity",
+        }
+    out = dict(floor)
+    out["store_id"] = snap.get("store_id")
+    out["camera_id"] = snap.get("camera_id")
+    out["requested_window_seconds"] = window_seconds
     return out
 
 
@@ -1134,6 +1216,11 @@ class TripwireConfig(BaseModel):
             raise ValueError("in_direction must be 'top_to_bottom' or 'bottom_to_top'")
         return v
 
+_ZONE_TYPES = (
+    "dwell", "queue", "staff", "glass",
+    "exit_corridor", "restricted", "aisle",
+)
+
 class ZoneConfig(BaseModel):
     id: str
     name: Optional[str] = None
@@ -1141,6 +1228,17 @@ class ZoneConfig(BaseModel):
     type: str = "dwell"
     max_comfortable_queue: Optional[int] = Field(default=None, ge=1)
     congestion_threshold_seconds: Optional[float] = Field(default=None, gt=0)
+    service_point: Optional[List[float]] = None
+    service_radius_frac: Optional[float] = None
+    alert_wait_ms: Optional[int] = None
+    alert_length: Optional[int] = None
+    staff_zone_id: Optional[str] = None
+    expected_on_post: Optional[int] = None
+    linked_queue_ids: Optional[List[str]] = None
+    min_stop_seconds: Optional[float] = None
+    zone_capacity_people: Optional[int] = None
+    blocked_grace_seconds: Optional[float] = None
+    entry_grace_seconds: Optional[float] = None
 
     @field_validator("polygon")
     @classmethod
@@ -1152,13 +1250,27 @@ class ZoneConfig(BaseModel):
     @field_validator("type")
     @classmethod
     def _type(cls, v):
-        if v not in ("dwell", "queue", "staff"):
-            raise ValueError("zone type must be 'dwell', 'queue', or 'staff'")
+        if v not in _ZONE_TYPES:
+            raise ValueError(f"zone type must be one of {list(_ZONE_TYPES)}")
+        return v
+
+class GlassViewConfig(BaseModel):
+    id: str
+    name: Optional[str] = None
+    polygon: List[List[float]]
+    min_stop_seconds: Optional[float] = Field(default=5.0, ge=2.0, le=60.0)
+
+    @field_validator("polygon")
+    @classmethod
+    def _polygon(cls, v):
+        if len(v) < 3 or any(len(p) != 2 for p in v):
+            raise ValueError("glass polygon needs at least three [x, y] points")
         return v
 
 class CalibrationUpdate(BaseModel):
     tripwires: Optional[List[TripwireConfig]] = None
     zones: Optional[List[ZoneConfig]] = None
+    glass_views: Optional[List[GlassViewConfig]] = None
 
 # Selectable video files for the camera source switcher
 @app.get("/api/v1/config/sources")
@@ -1192,6 +1304,8 @@ def update_camera_calibration(camera_id: str, body: CalibrationUpdate):
         cam["tripwires"] = [t.model_dump(exclude_none=True) for t in body.tripwires]
     if body.zones is not None:
         cam["zones"] = [z.model_dump(exclude_none=True) for z in body.zones]
+    if body.glass_views is not None:
+        cam["glass_views"] = [g.model_dump(exclude_none=True) for g in body.glass_views]
     _write_config(config)
     return {"status": "success", "camera": _redact_camera(cam)}
 

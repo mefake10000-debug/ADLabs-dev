@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ad-labs.dev/schemas/edgesight/live.schema.json",
+  "title": "AD Labs EdgeSight live contract schemas",
+  "description": "Verified payload shapes for GET /api/v1/live, GET /api/v1/live/snapshot, POST /api/v1/telemetry (+ products, events variants). Generated 2026-10-23 from live probes of the running stack.",
+  "x-status-legend": {
+    "LIVE": "Real data today; render actual values.",
+    "PARTIAL": "Producer exists but display is suppressed (k-anonymity, enrichment config); show the honest empty state.",
+    "FUTURE": "No producer deployed; show empty-state copy, never fake numbers."
+  },
+  "x-endpoints": {
+    "GET /api/v1/live": { "$ref": "#/$defs/LiveResponse" },
+    "GET /api/v1/live/snapshot?camera_id=<id>": { "$ref": "#/$defs/CameraSnapshot" },
+    "POST /api/v1/telemetry": { "$ref": "#/$defs/TelemetryRollup" },
+    "POST /api/v1/telemetry/products": { "$ref": "#/$defs/TelemetryProducts" },
+    "POST /api/v1/telemetry/events": { "$ref": "#/$defs/CrossingEventInput" },
+    "GET /api/v1/events": { "$ref": "#/$defs/EventsResponse" }
+  },
+  "$defs": {
+    "Fps": {
+      "type": "number",
+      "description": "FEED fps = display_fps (annotated render), MODEL fps = infer_fps (detect+track cadence), decode_fps = raw decode.",
+      "minimum": 0.0
+    },
+    "Engagement": {
+      "type": "object",
+      "description": "Enrichment-gated; honest zeros when pose/head-pose enrichment is disabled.",
+      "properties": {
+        "avg_attention_score": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "facing_ratio": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "phone_usage_rate": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "engaged_ratio": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "group_count": { "type": "integer", "minimum": 0 },
+        "people_in_groups": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ModelsStatus": {
+      "type": "object",
+      "description": "What is actually loaded on the edge node right now. UI must show this strip verbatim, including disabled items.",
+      "properties": {
+        "person_detector": { "type": "string" },
+        "imgsz": { "type": "integer" },
+        "tracker": { "type": "string" },
+        "perf_mode": { "enum": ["fast", "quality"] },
+        "infer_every_n": { "type": "integer", "minimum": 1 },
+        "enrichment": { "type": "boolean" },
+        "pose": { "type": "boolean" },
+        "face_boxes": { "type": "boolean", "description": "Redaction-only face detection; never facial identity." },
+        "face_identity": { "const": false, "description": "Banked to false — no facial identification in this system." },
+        "products": { "type": "boolean", "description": "YOLO-World open-vocab display categories." },
+        "reid": { "type": "boolean", "description": "Session-scoped OSNet Re-ID only; no persistence, no cross-session identity." },
+        "note": { "type": "string" }
+      }
+    },
+    "PerCameraRow": {
+      "type": "object",
+      "properties": {
+        "camera_id": { "type": "string" },
+        "occupancy": { "type": "integer", "minimum": 0, "description": "Active customer tracks now (same number as the YOLO HUD)." },
+        "queue_length": { "type": "integer", "minimum": 0 },
+        "avg_dwell_seconds": { "type": "number", "minimum": 0.0 },
+        "in_count": { "type": "integer", "minimum": 0, "description": "Cumulative tripwire IN for the session." },
+        "out_count": { "type": "integer", "minimum": 0, "description": "Cumulative tripwire OUT for the session." },
+        "last_rollup_at": { "type": ["string", "null"] },
+        "infer_fps": { "$ref": "#/$defs/Fps" },
+        "source": { "type": "string", "description": "live_snapshot | telemetry_rollups" }
+      },
+      "required": ["camera_id", "occupancy", "source"]
+    },
+    "LiveResponse": {
+      "type": "object",
+      "description": "GET /api/v1/live — frame-synced store state; when fresh snapshots exist, fields come from them (source=live_snapshot), else from 10s rollups (source=telemetry_rollups).",
+      "properties": {
+        "store_id": { "type": "string" },
+        "camera_id": { "type": ["string", "null"] },
+        "total_visitors": { "type": "integer", "minimum": 0, "description": "Session tripwire IN total (snapshot) or DB fallback." },
+        "total_exits": { "type": "integer", "minimum": 0 },
+        "net_occupancy": { "type": "integer", "minimum": 0, "description": "Store-wide active customers when occupancy_mode=active_tracks." },
+        "people_now": { "type": "integer", "minimum": 0 },
+        "staff_now": { "type": "integer", "minimum": 0 },
+        "avg_dwell_seconds": { "type": "number", "minimum": 0.0 },
+        "queue_length": { "type": "integer", "minimum": 0 },
+        "avg_queue_wait_seconds": { "type": "number", "minimum": 0.0 },
+        "queue_alert_active": { "type": "boolean" },
+        "last_updated": { "type": "string" },
+        "occupancy_mode": { "enum": ["sum", "active_tracks"] },
+        "occupancy_note": { "type": "string" },
+        "decode_fps": { "$ref": "#/$defs/Fps" },
+        "infer_fps": { "$ref": "#/$defs/Fps" },
+        "display_fps": { "$ref": "#/$defs/Fps" },
+        "perf_mode": { "enum": ["fast", "quality"] },
+        "source": { "enum": ["live_snapshot", "telemetry_rollups"] },
+        "models": { "$ref": "#/$defs/ModelsStatus" },
+        "engagement": { "$ref": "#/$defs/Engagement" },
+        "cameras": { "type": "array", "items": { "type": "string" } },
+        "per_camera": { "type": "array", "items": { "$ref": "#/$defs/PerCameraRow" } },
+        "reid": { "type": "object", "description": "Session-scoped Re-ID status (if present)." },
+        "products_top": { "type": "array", "items": { "$ref": "#/$defs/ProductCategoryRow" } }
+      },
+      "required": ["store_id", "net_occupancy", "last_updated", "source", "per_camera"]
+    },
+    "ZoneRow": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "enum": ["dwell", "queue", "staff"] },
+        "occupancy": { "type": "integer", "minimum": 0 },
+        "avg_dwell_seconds": { "type": "number", "minimum": 0.0 }
+      }
+    },
+    "QueueRow": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "queue_length": { "type": "integer", "minimum": 0 },
+        "avg_wait_seconds": { "type": "number", "minimum": 0.0 },
+        "alert_active": { "type": "boolean" }
+      }
+    },
+    "StaffZoneRow": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "const": "staff" },
+        "tagged_ids": { "type": "integer", "minimum": 0, "description": "Count of active tracks inside the staff polygon; geometry-based role tag, not biometrics." }
+      }
+    },
+    "CameraSnapshot": {
+      "type": "object",
+      "description": "GET /api/v1/live/snapshot?camera_id=<id> — written frame-synced by the edge; powers the HUD-matching KPI strip.",
+      "properties": {
+        "store_id": { "type": "string" },
+        "device_id": { "type": "string" },
+        "camera_id": { "type": "string" },
+        "camera_name": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "frame_time": { "type": "number" },
+        "people_now": { "type": "integer", "minimum": 0 },
+        "staff_now": { "type": "integer", "minimum": 0 },
+        "unique_tracks_today": { "type": "integer", "minimum": 0, "description": "Session-scoped tracker-confirmed unique IDs today." },
+        "total_visitors": { "type": "integer", "minimum": 0 },
+        "total_exits": { "type": "integer", "minimum": 0 },
+        "net_occupancy": { "type": "integer", "minimum": 0 },
+        "avg_dwell_seconds": { "type": "number", "minimum": 0.0 },
+        "queue_length": { "type": "integer", "minimum": 0 },
+        "avg_queue_wait_seconds": { "type": "number", "minimum": 0.0 },
+        "queue_alert_active": { "type": "boolean" },
+        "zones": { "type": "array", "items": { "$ref": "#/$defs/ZoneRow" } },
+        "queues": { "type": "array", "items": { "$ref": "#/$defs/QueueRow" } },
+        "staff_zones": { "type": "array", "items": { "$ref": "#/$defs/StaffZoneRow" } },
+        "engagement": { "$ref": "#/$defs/Engagement" },
+        "models": { "$ref": "#/$defs/ModelsStatus" },
+        "decode_fps": { "$ref": "#/$defs/Fps" },
+        "display_fps": { "$ref": "#/$defs/Fps" },
+        "infer_fps": { "$ref": "#/$defs/Fps" },
+        "perf_mode": { "enum": ["fast", "quality"] }
+      },
+      "required": ["store_id", "camera_id", "people_now", "frame_time"]
+    },
+    "TelemetryRollup": {
+      "type": "object",
+      "description": "POST /api/v1/telemetry — 10-second edge window. current_occupancy = active tracks now (fixed 2026-10-23; previously tripwire net, which desynced DB from HUD).",
+      "properties": {
+        "store_id": { "type": "string" },
+        "device_id": { "type": "string" },
+        "camera_id": { "type": "string" },
+        "timestamp_start": { "type": "string" },
+        "timestamp_end": { "type": "string" },
+        "in_count": { "type": "integer", "minimum": 0, "description": "Tripwire IN delta for the window." },
+        "out_count": { "type": "integer", "minimum": 0, "description": "Tripwire OUT delta for the window." },
+        "current_occupancy": { "type": "integer", "minimum": 0 },
+        "avg_dwell_seconds": { "type": "number", "minimum": 0.0 },
+        "queue_length": { "type": "integer", "minimum": 0 },
+        "avg_queue_wait_seconds": { "type": "number", "minimum": 0.0 },
+        "queue_alert_active": { "enum": [0, 1] },
+        "avg_attention_score": { "type": "number" },
+        "facing_ratio": { "type": "number" },
+        "phone_usage_rate": { "type": "number" },
+        "engaged_ratio": { "type": "number" },
+        "group_count": { "type": "integer", "minimum": 0 },
+        "people_in_groups": { "type": "integer", "minimum": 0 },
+        "demographics_json": {
+          "type": "string",
+          "description": "JSON-encoded demographics window; k-anonymized, empty bands when below k=10."
+        }
+      },
+      "required": ["store_id", "device_id", "camera_id", "timestamp_start", "timestamp_end", "current_occupancy"]
+    },
+    "ProductCategoryRow": {
+      "type": "object",
+      "properties": {
+        "category": { "type": "string", "description": "Open-vocab display category; never a SKU." },
+        "viewers": { "type": "integer", "minimum": 0 },
+        "detections": { "type": "integer", "minimum": 0 },
+        "total_dwell_seconds": { "type": "number", "minimum": 0.0 },
+        "avg_dwell_seconds": { "type": "number", "minimum": 0.0 },
+        "windows": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["category"]
+    },
+    "TelemetryProducts": {
+      "type": "object",
+      "description": "POST /api/v1/telemetry/products — display-interest windows.",
+      "properties": {
+        "store_id": { "type": "string" },
+        "device_id": { "type": "string" },
+        "camera_id": { "type": "string" },
+        "windows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProductCategoryRow" }
+        }
+      },
+      "required": ["store_id", "device_id", "camera_id", "windows"]
+    },
+    "CrossingEventInput": {
+      "type": "object",
+      "description": "POST /api/v1/telemetry/events — durable tripwire crossing.",
+      "properties": {
+        "store_id": { "type": "string" },
+        "device_id": { "type": "string" },
+        "camera_id": { "type": "string" },
+        "wire_id": { "type": "string" },
+        "track_id": { "type": "integer", "minimum": 0, "description": "Session-scoped tracker ID." },
+        "direction": { "enum": ["in", "out"] },
+        "event_timestamp": { "type": "string" }
+      },
+      "required": ["store_id", "device_id", "camera_id", "wire_id", "direction"]
+    },
+    "EventsResponse": {
+      "type": "object",
+      "description": "GET /api/v1/events — {events:[CrossingEventInput + id, received_at]}",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "integer" },
+              "store_id": { "type": "string" },
+              "device_id": { "type": "string" },
+              "camera_id": { "type": "string" },
+              "wire_id": { "type": "string" },
+              "track_id": { "type": "integer" },
+              "direction": { "enum": ["in", "out"] },
+              "event_timestamp": { "type": "string" },
+              "received_at": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

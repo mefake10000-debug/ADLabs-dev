@@ -1,0 +1,106 @@
+{
+  "version": "2026-10-23",
+  "contract_basis": "Verified payloads only; FUTURE entries carry agreed empty-state copy. See field-map.md for the full table and live.schema.json for payload schemas.",
+  "sections": {
+    "alerts": {
+      "live": [
+        {
+          "metric": "Crossing event feed",
+          "json_path": "GET /api/v1/events → events[] {id, store_id, device_id, camera_id, wire_id, track_id, direction, event_timestamp, received_at}",
+          "source": "Tripwire crossing persistence (durably stored, survives rollup timing)",
+          "cadence": "event-driven",
+          "privacy": "Session-scoped numeric track_id; no identity ever stored.",
+          "sample_event": {
+            "id": 1236,
+            "store_id": "store_mumbai_001",
+            "device_id": "edge_node_macmini_01",
+            "camera_id": "cam_entrance_01",
+            "wire_id": "tripwire_1790217578233",
+            "track_id": 35,
+            "direction": "out",
+            "event_timestamp": "2026-10-23 05:41:10",
+            "received_at": "2026-10-23 05:41:15"
+          }
+        },
+        {
+          "metric": "Queue congestion alert",
+          "json_path": "GET /api/v1/live → queue_alert_active; per queue: GET /api/v1/live/snapshot → queues[].alert_active",
+          "source": "QueueAnalyzer thresholds (max_comfortable_queue=4, congestion_threshold_seconds=120 by default)",
+          "cadence": "10 s rollup",
+          "privacy": "Operational flag only.",
+          "ui_rule": "Red badge + suggested action copy while true; calms automatically when the queue drains past the threshold+grace."
+        }
+      ],
+      "future": [
+        {
+          "metric": "Dwell-spike / lingering alerts",
+          "why_future": "No alert rule is deployed; producing one before the rule exists would fabricate alerts.",
+          "empty_state_copy": "Dwell alerts activate when the alert rule is configured for your zones — aggregation fields (zone dwell) are live already."
+        },
+        {
+          "metric": "Safety alerts (fall / crowd surge)",
+          "why_future": "No safety model on this node.",
+          "empty_state_copy": "No safety model on this edge node. We will not render fabricated alerts; fall/crowd-surge will only come from a dedicated model."
+        }
+      ]
+    },
+    "retail_intelligence": {
+      "privacy_safe": true,
+      "available_live": [
+        {
+          "metric": "Display interest by category",
+          "json_path": "GET /api/v1/analytics/products → categories[] {category, viewers, detections, total_dwell_seconds, avg_dwell_seconds, windows}; GET /api/v1/live → products_top",
+          "source": "YOLO-World open-vocab labels + dwell windows",
+          "cadence": "slow-tier sampling + 10 s rollups",
+          "privacy": "Open-vocab display categories — explicitly not POS SKUs and never revenue.",
+          "note": "Historical rows exist and are dated (e.g., handbag: 47,305 viewers / 187,487 detections from earlier runs)."
+        }
+      ],
+      "partial": [
+        {
+          "metric": "Demographic cohorts (age bands, gender split)",
+          "json_path": "GET /api/v1/analytics/demographics → demographics {sample_size, k_anonymity, age_bands[], gender_split[], publishable, suppressed_count}",
+          "source": "Redaction-only face boxes → INT8 age/gender ONNX → k≥10 anonymity gate",
+          "cadence": "window-based rollups (10 s)",
+          "status_reason": "Model loads and runs; display suppressed while sample_size < k (verified output: sample_size 0, publishable false).",
+          "privacy": "k-anonymity k=10 verified; suppressed cohorts never render; no face identity stored, ever.",
+          "empty_state_copy": "Cohort counts unlock after ≥10 anonymous samples inside the privacy window (k-anonymity). The real model runs — we suppress below the threshold by design."
+        },
+        {
+          "metric": "Attention (facing / engaged ratio)",
+          "json_path": "GET /api/v1/analytics/engagement → avg_attention_score, facing_ratio, engaged_ratio",
+          "source": "Pose + head-pose enrichment over redacted face boxes",
+          "cadence": "10 s windows",
+          "status_reason": "Enrichment tier is config-gated and currently off in fast perf mode; fields are honest zeros (verified).",
+          "privacy": "Head-pose aggregates only; no gaze-per-person persisted.",
+          "empty_state_copy": "Attention metrics (facing/phone/groups) activate with pose + head-pose enrichment on this node. Rows show honest zeros today so the queue and footfall numbers are never contaminated."
+        },
+        {
+          "metric": "Groups (people-in-company)",
+          "json_path": "GET /api/v1/analytics/engagement → group_count, people_in_groups",
+          "source": "Proximity clustering on session tracks",
+          "cadence": "10 s windows",
+          "status_reason": "Producer exists in rollup schema; needs enrichment enablement, verified zeros otherwise.",
+          "privacy": "Aggregate cluster counts only.",
+          "empty_state_copy": "Groups activate with the enrichment tier — proximity clustering counts people-in-company once enabled."
+        },
+        {
+          "metric": "Phone usage rate",
+          "json_path": "GET /api/v1/analytics/engagement → phone_usage_rate",
+          "source": "Pose + head-pose heuristics",
+          "cadence": "10 s windows",
+          "status_reason": "Enrichment-gated, verified honest zeros.",
+          "privacy": "Aggregate ratio only.",
+          "empty_state_copy": "Phone-usage rate reports real ratios once the enrichment tier is enabled — never estimated."
+        }
+      ],
+      "future": [
+        {
+          "metric": "Multi-store comparison (per cohort or per alert)",
+          "why_future": "Schema keyed by store_id is ingest-ready, but a second store is not deployed.",
+          "empty_state_copy": "Single-store deployment. Multi-store compare activates as soon as a second device registers — store_id is already ingest-ready across the schema."
+        }
+      ]
+    }
+  }
+}

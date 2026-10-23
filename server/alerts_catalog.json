@@ -1,0 +1,400 @@
+{
+  "catalog": "retail-grocery-alerts",
+  "vertical_primary": "retail grocery",
+  "version": "1.0.0",
+  "generated": "2026-10-23",
+  "severity_vocab": [
+    "info",
+    "warning",
+    "critical"
+  ],
+  "cooldown_defaults_note": "critical 5 min; warning 5-30 min per rule; info up to 6 h. All rows: exactly one open instance per dedupe key; re-fire requires the clear_condition first (same dedupe/hysteresis discipline as the queue design).",
+  "data_status_vocab": {
+    "LIVE": "fires today on verified EdgeSight fields only",
+    "PARTIAL": "fires once the named in-flight upgrade ships and its calibrated fields exist; gated at runtime by field presence, never invented",
+    "FUTURE": "requires POS / identity / age / external sensors; the UI must render these as catalog entries with an 'unavailable' chip and must never fire them from EdgeSight data alone"
+  },
+  "ui_never_fire_rule": "runtime gate = data_status == LIVE AND all dependency fields present in the current snapshot/rollups; PARTIAL rows render 'pending calibration/upgrade'; FUTURE rows render 'requires external data source'. Idle-store or camera-outage gaps fire not-firable (absent rows), never fabricated zeros.",
+  "thresholds_note": "thresholds without a verified code default (occupancy caps, throughput floor, abandon band) are marked operator-calibrated and stay disabled until set; queue rows fall back to verified defaults (max_comfortable_queue 4, congestion_threshold_seconds 120 s, no_staff_grace 30 s).",
+  "alerts": [
+    {
+      "id": "QUEUE_WAIT_OVER",
+      "title": "Customer waiting too long",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "longest_in_flight_wait_ms",
+          "alert_wait_ms"
+        ],
+        "condition": "longest in-flight queue wait > alert_wait_ms (fallback: verified congestion_threshold_seconds 120 s), held 10 s"
+      },
+      "recommended_action": "Send a floater to open a second till or assist at the queue head; check self-checkout staffing.",
+      "data_dependency": [
+        "queue inflight waits",
+        "episodes (needs queue analytics upgrade, in flight)"
+      ],
+      "data_status": "PARTIAL",
+      "cooldown_minutes": 5,
+      "dedupe_key": "rule=wait_over&queue=<queue_id>",
+      "clear_condition": "wait <= alert_wait_ms - 15 s hysteresis"
+    },
+    {
+      "id": "QUEUE_LENGTH_OVER",
+      "title": "Queue length over comfort",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "queue_length",
+          "alert_length",
+          "alert_min_length_seconds"
+        ],
+        "condition": "queue_length > alert_length (fallback: verified max_comfortable_queue 4) held 10 s"
+      },
+      "recommended_action": "Brief a colleague to the till; consider opening lane 2.",
+      "data_dependency": [
+        "queue.length in 10 s rollups (verified today)"
+      ],
+      "data_status": "LIVE",
+      "cooldown_minutes": 5,
+      "dedupe_key": "rule=length_over&queue=<queue_id>",
+      "clear_condition": "length <= alert_length for 10 s"
+    },
+    {
+      "id": "QUEUE_NO_STAFF",
+      "title": "Active queue with nobody serving",
+      "severity": "critical",
+      "trigger": {
+        "fields": [
+          "staff_zone_tagged_count",
+          "no_staff_grace_seconds"
+        ],
+        "condition": "linked staff zone has 0 tagged staff >= 30 s (no_staff_grace_seconds) while QUEUE_WAIT_OVER or QUEUE_LENGTH_OVER is active"
+      },
+      "recommended_action": "Dispatch nearest colleague to checkouts immediately.",
+      "data_dependency": [
+        "linked staff zone tagging (verified)",
+        "queue alert state (in flight)"
+      ],
+      "data_status": "PARTIAL",
+      "cooldown_minutes": 5,
+      "dedupe_key": "rule=no_staff&queue=<queue_id>",
+      "clear_condition": "staff_on_post >= 1 or queue alert clears"
+    },
+    {
+      "id": "QUEUE_ABANDON_RATE_HIGH",
+      "title": "Abandon rate high (lane losing customers)",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "abandoned",
+          "completed",
+          "service_rate_basis",
+          "abandon_threshold"
+        ],
+        "condition": "abandon_rate > abandon_threshold (operator-set, suggested default 15%) AND completed >= 10 settled outcomes AND service evidence exists (service_point or head_exit)"
+      },
+      "recommended_action": "Walk the lane: pricing at head, basket limits, till speed; rebalance staffing at peak hours.",
+      "data_dependency": [
+        "queue episodes",
+        "graded service evidence (needs queue upgrade)"
+      ],
+      "data_status": "PARTIAL",
+      "cooldown_minutes": 120,
+      "dedupe_key": "rule=abandon_rate&queue=<queue_id>",
+      "clear_condition": "rate <= threshold for 30 min"
+    },
+    {
+      "id": "STORE_CAPACITY_NEAR",
+      "title": "Store near occupancy limit",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "people_now",
+          "store_capacity_people"
+        ],
+        "condition": "store people_now >= 0.9 x store_capacity_people for 2 min"
+      },
+      "recommended_action": "Stagger door entry; slow the queue merge; prep the over-limit procedure.",
+      "data_dependency": [
+        "store occupancy from active tracks (verified)",
+        "NEW calibration store_capacity_people"
+      ],
+      "data_status": "PARTIAL",
+      "cooldown_minutes": 10,
+      "dedupe_key": "rule=capacity_near&store",
+      "clear_condition": "people_now <= 0.85 x capacity for 5 min"
+    },
+    {
+      "id": "STORE_CAPACITY_OVER",
+      "title": "Store over occupancy limit",
+      "severity": "critical",
+      "trigger": {
+        "fields": [
+          "people_now",
+          "store_capacity_people"
+        ],
+        "condition": "store people_now > store_capacity_people for 1 min"
+      },
+      "recommended_action": "Hold entry at the door; open an immediate relief exit; log the event time for the duty record.",
+      "data_dependency": [
+        "store occupancy from active tracks (verified)",
+        "NEW calibration store_capacity_people"
+      ],
+      "data_status": "PARTIAL",
+      "cooldown_minutes": 5,
+      "dedupe_key": "rule=capacity_over&store",
+      "clear_condition": "people_now <= 0.85 x capacity for 5 min"
+    },
+    {
+      "id": "ENTRANCE_FLOW_STALLED",
+      "title": "Entrance counted nobody for a long window",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "trip_in_events",
+          "decode_fps",
+          "display_fps"
+        ],
+        "condition": "business hours AND decode fps > 0 AND stream fresh AND entrance trip_in count == 0 for 30 min"
+      },
+      "recommended_action": "Walk the door: locked? bypassed? Camera view shifted? Check the tripwire after your last calibration edit.",
+      "data_dependency": [
+        "tripwire events",
+        "fps trio",
+        "snapshot freshness (all verified)"
+      ],
+      "data_status": "LIVE",
+      "cooldown_minutes": 60,
+      "dedupe_key": "rule=flow_stalled&camera=<camera_id>",
+      "clear_condition": "a new trip_in crossing observed"
+    },
+    {
+      "id": "CAMERA_DOWN",
+      "title": "Camera feed down",
+      "severity": "critical",
+      "trigger": {
+        "fields": [
+          "decode_fps",
+          "display_fps",
+          "stream_ok"
+        ],
+        "condition": "decode_fps == 0 OR stream unreachable/stale >= 60 s"
+      },
+      "recommended_action": "Check camera power/RTSP link; dashboards will show NO DATA honestly, not zeros.",
+      "data_dependency": [
+        "fps trio",
+        "snapshot freshness (verified)"
+      ],
+      "data_status": "LIVE",
+      "cooldown_minutes": 10,
+      "dedupe_key": "rule=cam_down&camera=<camera_id>",
+      "clear_condition": "decode_fps > 0 stable 5 min"
+    },
+    {
+      "id": "MODEL_THROUGHPUT_LOW",
+      "title": "Edge throughput degraded",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "infer_fps",
+          "display_fps",
+          "decode_fps",
+          "throughput_floor"
+        ],
+        "condition": "infer/display fps < throughput_floor (operator floor, suggested 2.0) >= 5 min while decode_fps stays normal"
+      },
+      "recommended_action": "Reduce EDGE_MAX_CAMERAS or imgsz, or switch perf modes; expect counts to lag what eyes see.",
+      "data_dependency": [
+        "fps trio (verified)"
+      ],
+      "data_status": "LIVE",
+      "cooldown_minutes": 30,
+      "dedupe_key": "rule=model_slow&camera=<camera_id>",
+      "clear_condition": "fps recovered for 20 min"
+    },
+    {
+      "id": "ZONE_CROWD_BUILDUP",
+      "title": "Zone crowding above cap",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "zone_occupancy",
+          "zone_capacity_people"
+        ],
+        "condition": "zone occupancy > zone_capacity_people for 3 min"
+      },
+      "recommended_action": "Open an adjacent lane or deflect foot traffic; restaff the zone.",
+      "data_dependency": [
+        "zone occupancy (verified)",
+        "NEW per-zone calibration zone_capacity_people"
+      ],
+      "data_status": "PARTIAL",
+      "cooldown_minutes": 15,
+      "dedupe_key": "rule=zone_crowd&zone=<zone_id>&camera=<camera_id>",
+      "clear_condition": "occupancy <= cap - 1 for 60 s"
+    },
+    {
+      "id": "STAFF_ABSENT_ZONE_BUSY",
+      "title": "Busy zone with zero staff visible",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "zone_occupancy",
+          "staff_now",
+          "busy_floor"
+        ],
+        "condition": "zone occupancy >= busy_floor for 10 min AND staff_now == 0 during business hours"
+      },
+      "recommended_action": "Move or schedule cover into the high-browse area.",
+      "data_dependency": [
+        "zone occupancy",
+        "staff presence tagging (both verified)"
+      ],
+      "data_status": "LIVE",
+      "cooldown_minutes": 30,
+      "dedupe_key": "rule=zone_nostaff&zone=<zone_id>",
+      "clear_condition": "staff_on_post >= 1 or zone quiet 10 min"
+    },
+    {
+      "id": "DISPLAY_INTEREST_SPIKE",
+      "title": "Display interest unusually high",
+      "severity": "info",
+      "trigger": {
+        "fields": [
+          "category_detections",
+          "baseline_same_hour"
+        ],
+        "condition": "category detections per window >= 3x same-hour rolling mean built from real product-window history"
+      },
+      "recommended_action": "Face-up and restock the display; watch for stockout in the following hours.",
+      "data_dependency": [
+        "products categories",
+        "product-window history (verified)"
+      ],
+      "data_status": "LIVE",
+      "cooldown_minutes": 240,
+      "dedupe_key": "rule=display_spike&camera=<camera_id>&category=<category>",
+      "clear_condition": "baseline restored for 1 window"
+    },
+    {
+      "id": "HEATMAP_NOT_UPDATING",
+      "title": "Traction heatmap stale",
+      "severity": "info",
+      "trigger": {
+        "fields": [
+          "heatmap_mtime",
+          "heatmap_write_seconds"
+        ],
+        "condition": "heatmap artifact age > 3 x heatmap_write_seconds"
+      },
+      "recommended_action": "Check disk space and heatmaps config; a truly idle camera can also lag writes (acceptable).",
+      "data_dependency": [
+        "heatmap artifact (verified)"
+      ],
+      "data_status": "LIVE",
+      "cooldown_minutes": 360,
+      "dedupe_key": "rule=heatmap_stale&camera=<camera_id>",
+      "clear_condition": "heatmap file newer than 2 x write interval"
+    },
+    {
+      "id": "PROMO_REDEMPTION_DELTA",
+      "title": "Promo conversion vs footfall",
+      "severity": "warning",
+      "trigger": {
+        "fields": [
+          "promo_scans_pos",
+          "footfall_session_entries"
+        ],
+        "condition": "promo redemptions / entries deviates beyond the operator band (requires POS tie-in)"
+      },
+      "recommended_action": "Owned by the POS integration owner once receipts are linked (separate consented intake).",
+      "data_dependency": [
+        "POS receipts (NOT in edge data)"
+      ],
+      "data_status": "FUTURE",
+      "cooldown_minutes": 240,
+      "dedupe_key": "rule=promo_pos&store",
+      "clear_condition": "per business rule"
+    },
+    {
+      "id": "CART_ABANDON_REVENUE",
+      "title": "Abandoned-basket revenue lost",
+      "severity": "info",
+      "trigger": {
+        "fields": [
+          "abandoned_flag",
+          "pos_price_lookup"
+        ],
+        "condition": "graded queue-abandon events x POS price of the basket proxy"
+      },
+      "recommended_action": "Retune staffing at abandonment-prone hours; the revenue numerator needs POS data.",
+      "data_dependency": [
+        "queue abandon flag (graded, in flight)",
+        "POS price lookup (future)"
+      ],
+      "data_status": "FUTURE",
+      "cooldown_minutes": 240,
+      "dedupe_key": "rule=cart_revenue&camera=<camera_id>",
+      "clear_condition": "per business rule"
+    },
+    {
+      "id": "AGE_RESTRICTED_UNATTENDED",
+      "title": "Age-restricted checkout unattended",
+      "severity": "critical",
+      "trigger": {
+        "fields": [
+          "verified_age_signal",
+          "checkout_presence"
+        ],
+        "condition": "person below the age threshold at a restricted till with no staff beside them"
+      },
+      "recommended_action": "Compliance process: page a supervisor per the store SOP.",
+      "data_dependency": [
+        "verified-age signal (NOT derivable from anonymized video; assumed-governed external source)"
+      ],
+      "data_status": "FUTURE",
+      "cooldown_minutes": 15,
+      "dedupe_key": "rule=age_gate&camera=<camera_id>&lane=<lane_id>",
+      "clear_condition": "manual-review acknowledgement"
+    },
+    {
+      "id": "INDIVIDUAL_REVISIT_ALERT",
+      "title": "Returning visitor follow-up",
+      "severity": "info",
+      "trigger": {
+        "fields": [
+          "cross_day_identity_match"
+        ],
+        "condition": "cross-day identity match on return"
+      },
+      "recommended_action": "Personalized greeting or loyalty follow-up.",
+      "data_dependency": [
+        "cross-day identity (forbidden by design in this system)"
+      ],
+      "data_status": "FUTURE",
+      "cooldown_minutes": 10080,
+      "dedupe_key": "rule=identity_followup&person=<identity>",
+      "clear_condition": "per loyalty rule"
+    },
+    {
+      "id": "FRIDGE_TEMP_EXCURSION",
+      "title": "Aisle chiller temperature excursion",
+      "severity": "critical",
+      "trigger": {
+        "fields": [
+          "sensor_temp",
+          "sensor_band"
+        ],
+        "condition": "IoT sensor temperature outside the food-safety band for 5 min"
+      },
+      "recommended_action": "Check the chiller unit; complete the food-safety log per SOP.",
+      "data_dependency": [
+        "IoT temperature sensors (NOT in edge data; video never substitutes for a thermometer)"
+      ],
+      "data_status": "FUTURE",
+      "cooldown_minutes": 30,
+      "dedupe_key": "rule=fridge_temp&asset=<asset_id>",
+      "clear_condition": "sensor back in band for 10 min"
+    }
+  ]
+}

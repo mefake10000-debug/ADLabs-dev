@@ -30,6 +30,10 @@ from src.analytics.demographics import DemographicsAnalyzer
 from src.analytics.groups import GroupAnalyzer
 from src.analytics.attention import AttentionAnalyzer
 from src.analytics.product_interest import ProductInterestAnalyzer
+from src.analytics.glass_analyzer import GlassROIAnalyzer, build_glass_block
+from src.analytics.floor_analytics import FloorAnalytics
+from src.analytics.alerts_engine import AlertsEngine
+from src.analytics.safety_analytics import SafetyAnalytics
 from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
@@ -55,7 +59,6 @@ class EdgePipeline:
 
         self.store_id = self.pipeline_cfg.get("edge", {}).get("store_id", "store_default")
         self.device_id = self.pipeline_cfg.get("edge", {}).get("device_id", "edge_01")
-        from src.analytics.alerts_engine import AlertsEngine
         self.alerts_engine = AlertsEngine()
         self.rollup_interval = self.pipeline_cfg.get("storage", {}).get("rollup_interval_seconds", 30)
 
@@ -501,37 +504,79 @@ class EdgePipeline:
         zones = []
         queues = []
         staff_zones = []
+        glass_rois: List[GlassROIAnalyzer] = []
         for z in cam.get("zones", []):
-            if z.get("type") == "staff":
-                staff_zones.append(Zone(
+            ztype = z.get("type", "dwell")
+            if ztype == "staff":
+                sz = Zone(
                     zone_id=z["id"],
                     name=z.get("name", z["id"]),
                     polygon=z["polygon"],
                     zone_type="staff",
                     exit_grace_seconds=grace
-                ))
-            elif z.get("type") == "queue":
+                )
+                sz.expected_on_post = z.get("expected_on_post")
+                sz.linked_queue_ids = list(z.get("linked_queue_ids") or [])
+                staff_zones.append(sz)
+            elif ztype == "queue":
                 queues.append(QueueAnalyzer(
                     zone_id=z["id"],
                     name=z.get("name", z["id"]),
                     polygon=z["polygon"],
                     max_comfortable_queue=z.get("max_comfortable_queue", 4),
                     congestion_threshold_seconds=z.get("congestion_threshold_seconds", 120.0),
-                    exit_grace_seconds=grace
+                    exit_grace_seconds=grace,
+                    service_point=z.get("service_point"),
+                    alert_wait_ms=z.get("alert_wait_ms"),
+                    alert_length=z.get("alert_length"),
+                    staff_zone_id=z.get("staff_zone_id"),
+                ))
+            elif ztype == "glass":
+                glass_rois.append(GlassROIAnalyzer(
+                    glass_id=z["id"],
+                    name=z.get("name", z["id"]),
+                    polygon=z["polygon"],
+                    min_stop_seconds=float(z.get("min_stop_seconds", 5.0) or 5.0),
+                    entry_attribution_seconds=float(z.get("entry_attribution_seconds", 90.0) or 90.0),
+                    exit_grace_seconds=grace,
                 ))
             else:
-                zones.append(Zone(
+                zone = Zone(
                     zone_id=z["id"],
                     name=z.get("name", z["id"]),
                     polygon=z["polygon"],
-                    zone_type=z.get("type", "dwell"),
+                    zone_type=ztype,
                     exit_grace_seconds=grace
-                ))
-        return tripwires, zones, queues, staff_zones
+                )
+                if z.get("zone_capacity_people") is not None:
+                    zone.zone_capacity_people = z.get("zone_capacity_people")
+                if z.get("blocked_grace_seconds") is not None:
+                    zone.blocked_grace_seconds = z.get("blocked_grace_seconds")
+                if z.get("entry_grace_seconds") is not None:
+                    zone.entry_grace_seconds = z.get("entry_grace_seconds")
+                zones.append(zone)
+
+        for g in cam.get("glass_views") or []:
+            poly = g.get("polygon")
+            if not poly or len(poly) < 3:
+                continue
+            glass_rois.append(GlassROIAnalyzer(
+                glass_id=g.get("id") or f"glass_{len(glass_rois)+1}",
+                name=g.get("name") or g.get("id") or "Glass",
+                polygon=poly,
+                min_stop_seconds=float(g.get("min_stop_seconds", 5.0) or 5.0),
+                entry_attribution_seconds=float(g.get("entry_attribution_seconds", 90.0) or 90.0),
+                exit_grace_seconds=grace,
+            ))
+        return tripwires, zones, queues, staff_zones, glass_rois
 
     @staticmethod
     def _calibration_signature(cam: Dict[str, Any]) -> str:
-        return json.dumps({"tripwires": cam.get("tripwires", []), "zones": cam.get("zones", [])}, sort_keys=True)
+        return json.dumps({
+            "tripwires": cam.get("tripwires", []),
+            "zones": cam.get("zones", []),
+            "glass_views": cam.get("glass_views", []),
+        }, sort_keys=True)
 
     def _build_camera_context(self, cam: Dict[str, Any]) -> Dict[str, Any]:
         t_cfg = self.pipeline_cfg.get("tracking", {})
@@ -539,7 +584,7 @@ class EdgePipeline:
         source = cam.get("source", "")
         fps_target = cam.get("fps_target", 15)
 
-        tripwires, zones, queues, staff_zones = self._build_analytics(cam)
+        tripwires, zones, queues, staff_zones, glass_rois = self._build_analytics(cam)
 
         demo_cfg = (getattr(self, "models_cfg", {}) or {}).get("demographics", {}) or {}
         prod_cfg = (getattr(self, "models_cfg", {}) or {}).get("products", {}) or {}
@@ -562,6 +607,10 @@ class EdgePipeline:
             "zones": zones,
             "queues": queues,
             "staff_zones": staff_zones,
+            "glass_rois": glass_rois,
+            "floor": FloorAnalytics(),
+            "safety": SafetyAnalytics(),
+            "recent_trip_in": {},
             "staff_ids": set(),
             "staff_visible": 0,
             "tracked_ids_today": set(),
@@ -687,12 +736,59 @@ class EdgePipeline:
                             crossing_events.extend(tw.update(customers, frame_time))
                         if crossing_events:
                             self._persist_crossing_events(cam_id, crossing_events)
+                            recent = ctx.setdefault("recent_trip_in", {})
+                            for ev in crossing_events:
+                                direction = str(ev.get("direction", "")).lower()
+                                if direction in ("in", "trip_in", "enter"):
+                                    tid = ev.get("track_id")
+                                    if tid is not None:
+                                        recent[int(tid)] = float(ev.get("timestamp") or frame_time)
+                            cutoff = frame_time - 120.0
+                            for tid in list(recent.keys()):
+                                if recent[tid] < cutoff:
+                                    del recent[tid]
 
                         for zone in ctx["zones"]:
                             zone.update(customers, frame_time)
 
+                        staff_on_post = int(ctx.get("staff_visible", 0) or 0)
+                        analytic_events: List[Dict[str, Any]] = []
                         for q in ctx["queues"]:
-                            q.update(customers, frame_time)
+                            try:
+                                analytic_events.extend(
+                                    q.update(customers, frame_time, staff_on_post=staff_on_post) or []
+                                )
+                            except TypeError:
+                                q.update(customers, frame_time)
+
+                        for glass in ctx.get("glass_rois") or []:
+                            analytic_events.extend(
+                                glass.update(
+                                    customers,
+                                    frame_time,
+                                    recent_trip_in_ids=ctx.get("recent_trip_in") or {},
+                                ) or []
+                            )
+
+                        floor = ctx.get("floor")
+                        if floor is not None:
+                            try:
+                                floor.set_frame_size(float(frame.shape[1]), float(frame.shape[0]))
+                            except Exception:
+                                pass
+                            floor.update(customers, list(ctx.get("zones") or []), frame_time)
+
+                        safety = ctx.get("safety")
+                        if safety is not None:
+                            safety.update(
+                                customers,
+                                list(ctx.get("zones") or []),
+                                frame_time,
+                                cam_id,
+                            )
+
+                        if analytic_events and hasattr(self, "_persist_analytic_events"):
+                            self._persist_analytic_events(cam_id, analytic_events)
 
                         if ctx.get("heatmap") is None:
                             ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
@@ -1055,7 +1151,7 @@ class EdgePipeline:
                 # Tripwire objects start at zero, so a stale last_in_count would make the
                 # next rollup's delta negative.
                 self._generate_and_save_rollup(cam_id, ctx, time.time())
-                ctx["tripwires"], ctx["zones"], ctx["queues"], ctx["staff_zones"] = self._build_analytics(cam)
+                ctx["tripwires"], ctx["zones"], ctx["queues"], ctx["staff_zones"], ctx["glass_rois"] = self._build_analytics(cam)
                 ctx["calibration_sig"] = self._calibration_signature(cam)
                 ctx["last_in_count"] = 0
                 ctx["last_out_count"] = 0
@@ -1132,41 +1228,30 @@ class EdgePipeline:
             })
 
         staff_zones = []
+        staff_block_zones = []
         for z in ctx.get("staff_zones", []):
             tagged = len(getattr(z, "active_tracks_in_zone", {}) or {})
             expected = getattr(z, "expected_on_post", None)
-            understaffed = expected is not None and tagged < expected
-            staff_zones.append({
+            if expected is None:
+                state = "UNCALIBRATED"
+            elif tagged >= int(expected):
+                state = "COVERED"
+            else:
+                state = "UNDERSTAFFED"
+            row = {
                 "id": getattr(z, "zone_id", None) or getattr(z, "id", "staff"),
                 "name": getattr(z, "name", "staff"),
                 "type": "staff",
                 "tagged_ids": tagged,
                 "staff_present": tagged,
                 "expected_on_post": expected,
-                "understaffed": understaffed,
-                "state": (
-                    "UNDERSTAFFED" if understaffed
-                    else ("STAFFED" if expected is not None else "UNCALIBRATED")
-                ),
+                "state": state,
+                "understaffed_since": None,
                 "linked_queue_ids": list(getattr(z, "linked_queue_ids", []) or []),
                 "camera_id": cam_id,
-            })
-
-        alerts_block = (
-            self.alerts_engine.evaluate(
-                {
-            "queues": queues_out,
-            "alerts": alerts_block,
-                    "queue_length": queue_len,
-                    "queue_alert_active": alert_active,
-                    "staff_zones": staff_zones,
-                    "camera_id": cam_id,
-                },
-                now=frame_time,
-            )
-            if getattr(self, "alerts_engine", None)
-            else {"fired": [], "pending": [], "unavailable": []}
-        )
+            }
+            staff_zones.append(row)
+            staff_block_zones.append(row)
 
         attention = ctx["attention"].snapshot() if ctx.get("attention") else {}
         groups = ctx["groups"].snapshot() if ctx.get("groups") else {}
@@ -1193,6 +1278,45 @@ class EdgePipeline:
         if products_top is not None and len(products_top) == 0:
             products_top = None
         reid_status = self.reid_extractor.status() if getattr(self, "reid_extractor", None) else {}
+
+        glass_block = build_glass_block(list(ctx.get("glass_rois") or []))
+        if glass_block is None:
+            entrance_block = {
+                "glass": None,
+                "stop_rate": None,
+                "status": "FUTURE",
+                "badge_copy": (
+                    "Stop-rate unlocks once entrance-zone dwell thresholds are exposed. "
+                    "The tracker already computes stationary seconds — we show nothing rather than estimate."
+                ),
+                "settling": False,
+            }
+        else:
+            entrance_block = {
+                "glass": glass_block,
+                "stop_rate": glass_block.get("stop_rate"),
+                "conversion_glass_to_entry": glass_block.get("conversion_glass_to_entry"),
+                "status": "LIVE",
+                "badge_copy": None,
+                "settling": glass_block.get("settling"),
+            }
+        floor_block = ctx["floor"].snapshot(list(ctx.get("zones") or []), frame_time) if ctx.get("floor") else None
+        safety_block = ctx["safety"].snapshot() if ctx.get("safety") else {"active": [], "note": "no safety evaluator"}
+        staff_block = {
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "zones": staff_block_zones,
+            "queue_response": [],
+            "status": "LIVE",
+            "note": "Geometry-based sticky staff tag; no facial ID. response_time_to_queue PARTIAL.",
+        }
+        alerts_block = self.alerts_engine.evaluate({
+            "queues": queues_out,
+            "queue_length": queue_len,
+            "queue_alert_active": alert_active,
+            "staff_zones": staff_zones,
+            "staff": staff_block,
+            "safety": safety_block,
+        }, now=frame_time)
 
         payload = {
             "store_id": self.store_id,
@@ -1235,6 +1359,12 @@ class EdgePipeline:
             "zones": zones_out,
             "staff_zones": staff_zones,
             "products_top": products_top,
+            "entrance": entrance_block,
+            "stop_rate": entrance_block.get("stop_rate"),
+            "floor": floor_block,
+            "staff": staff_block,
+            "safety": safety_block,
+            "alerts": alerts_block,
             "shelf_gap": shelf_gap_snapshot([]),
             "pose_fall": pose_fall_status(
                 pose_weights_on_disk=self._rtmpose_on_disk(),
@@ -1248,6 +1378,15 @@ class EdgePipeline:
                     wired=bool(self.pose_estimator),
                 ).get("status", "FUTURE"),
                 "locateanything_3b": "FUTURE",
+                "entrance_stop_rate": entrance_block.get("status", "FUTURE"),
+                "floor_paths": (floor_block or {}).get("status", "LIVE"),
+                "queue_episodes": "LIVE",
+                "queue_abandon": "PARTIAL" if any(q.get("abandon_status") == "PARTIAL" for q in queues_out) else "LIVE",
+                "staff": "LIVE",
+                "safety": "LIVE",
+                "alerts": "LIVE",
+                "multi_store": "FUTURE",
+                "display_interest": "LIVE" if products_top else "PARTIAL",
             },
             "engagement": {
                 "avg_attention_score": attention.get("avg_attention_score", 0.0),
@@ -1373,6 +1512,21 @@ class EdgePipeline:
                 store["reid"] = row["reid"]
             if row.get("products_top"):
                 store["products_top"] = row["products_top"]
+            if row.get("entrance"):
+                store["entrance"] = row["entrance"]
+                store["stop_rate"] = row.get("stop_rate")
+            if row.get("floor"):
+                store["floor"] = row["floor"]
+            if row.get("staff"):
+                store["staff"] = row["staff"]
+            if row.get("safety"):
+                store["safety"] = row["safety"]
+            if row.get("alerts"):
+                store["alerts"] = row["alerts"]
+            if row.get("field_status"):
+                store["field_status"] = row["field_status"]
+            if row.get("queues"):
+                store["queues"] = row["queues"]
         if dwell_acc:
             store["avg_dwell_seconds"] = round(sum(dwell_acc) / len(dwell_acc), 1)
 
@@ -1440,6 +1594,31 @@ class EdgePipeline:
                 "direction": event["direction"],
                 "event_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(event["timestamp"]))
             })
+
+    def _persist_analytic_events(self, cam_id: str, events: List[Dict[str, Any]]):
+        """Persist additive glass/queue events on the durable channel (non-trip)."""
+        skip = {"glass_stop_reached", "queue_wait_ms_reached", "glass_roi_ping"}
+        for event in events:
+            et = event.get("event") or event.get("direction")
+            if et in skip:
+                continue
+            tid = event.get("track_id")
+            if tid is None:
+                tid = 0
+            ts = event.get("timestamp") or time.time()
+            try:
+                self.local_buffer.save_event({
+                    "store_id": self.store_id,
+                    "device_id": self.device_id,
+                    "camera_id": cam_id,
+                    "wire_id": event.get("wire_id") or event.get("glass_id") or event.get("queue_id") or et,
+                    "track_id": int(tid),
+                    "direction": str(et or event.get("direction") or "analytic"),
+                    "event_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(float(ts))),
+                })
+            except Exception as e:
+                logger.debug(f"Analytic event persist error: {e}")
+
 
     def _generate_and_save_rollup(self, cam_id: str, ctx: Dict[str, Any], current_time: float):
         if ctx["tripwires"]:

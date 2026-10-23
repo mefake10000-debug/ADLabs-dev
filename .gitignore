@@ -98,3 +98,4 @@ models/pack/**/*.msgpack
 
 # Frame-synced live KPI JSON (edge-analyzer → API)
 data/storage/live/
+.venv/
