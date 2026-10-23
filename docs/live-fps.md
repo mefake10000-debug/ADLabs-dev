@@ -37,7 +37,7 @@ JPEGs and identical payloads to avoid torn / glitchy frames.
 # Quality (Compose default — yolo26s @ 640, person conf lower than objects)
 docker compose up -d edge-analyzer
 
-# Balanced (nano @ 416) if CPU cannot hold yolo26s
+# Balanced (nano @ 512) if CPU cannot hold yolo26s
 EDGE_PERF_MODE=balanced docker compose up -d edge-analyzer
 
 # Fast (max display FPS; may miss distant / small people)
