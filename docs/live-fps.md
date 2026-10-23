@@ -85,3 +85,8 @@ curl -s http://localhost:8000/api/v1/live | python3 -m json.tool | head -40
 # Look for infer_fps, display_fps, decode_fps, models.perf_mode, models.person_detector
 docker logs adlabs-edge-analyzer 2>&1 | grep -E 'Performance mode|Inference FPS'
 ```
+
+## CLIP / autoinstall
+
+Compose sets `YOLO_AUTOINSTALL=false` so Ultralytics cannot retry `pip install git+CLIP`
+at runtime. Bake `openai-clip` via `requirements-edge.txt` and rebuild `edge-analyzer`.
