@@ -91,11 +91,14 @@ services:
       ]
     volumes:
       - ./server:/app/server:ro
+      # Journey + model_stack live under src/ (server-only mount made stack/journey PARTIAL).
+      - ./src:/app/src:ro
       - ./configs:/app/configs
       - ./data/storage:/app/data/storage
       - ./data/sample_videos:/app/data/sample_videos:ro   # lets the dashboard list/validate selectable video sources
     environment:
       - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
       - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
       # Browser-facing API for Streamlit <img> tags — portal reverse-proxy on :3000
