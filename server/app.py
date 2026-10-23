@@ -574,6 +574,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                     continue
                 if camera_id and row.get("camera_id") != camera_id:
                     continue
+                vl = (row.get("video_loop") or {})
                 snap_cams.append({
                     "camera_id": row.get("camera_id"),
                     "occupancy": row.get("people_now", row.get("net_occupancy", 0)),
@@ -583,9 +584,12 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                     "out_count": row.get("total_exits", 0),
                     "last_rollup_at": row.get("timestamp"),
                     "infer_fps": row.get("infer_fps"),
-                    "loop_count": (row.get("video_loop") or {}).get("loop_count"),
-                    "is_simulated": (row.get("video_loop") or {}).get("is_simulated"),
-                    "unique_this_pass": (row.get("video_loop") or {}).get("unique_this_pass"),
+                    "loop_count": vl.get("loop_count"),
+                    "is_simulated": vl.get("is_simulated"),
+                    "unique_this_pass": vl.get("unique_this_pass"),
+                    "unique_total_all_passes": vl.get("unique_total_all_passes"),
+                    "source_fps": vl.get("source_fps"),
+                    "counting_mode": vl.get("counting_mode"),
                     "source": "live_snapshot",
                 })
             if snap_cams:
@@ -609,6 +613,10 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         # Frame-synced provenance for the portal (ISO timestamp + sample-loop state).
         result["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         result["video_loop"] = (snap or {}).get("video_loop")
+        result["loop_count"] = ((snap or {}).get("video_loop") or {}).get("loop_count")
+        result["is_simulated"] = ((snap or {}).get("video_loop") or {}).get("is_simulated")
+        result["unique_this_pass"] = ((snap or {}).get("video_loop") or {}).get("unique_this_pass")
+        result["unique_total_all_passes"] = ((snap or {}).get("video_loop") or {}).get("unique_total_all_passes")
 
         return result
 
@@ -783,6 +791,12 @@ def get_live_staff(store_id: str = "store_mumbai_001", camera_id: Optional[str] 
     """Per-approach staff presence from geometry-based dwell tagging (no facial ID)."""
     live_dir = _live_dir()
     zones = []
+    queue_response = []
+    response_times = []
+    note = (
+        "Geometry-based sticky staff tag; no facial ID. "
+        "response_time_to_queue null until queue alert/join pairs with a linked staff zone."
+    )
     if os.path.isdir(live_dir):
         for name in sorted(os.listdir(live_dir)):
             if not name.endswith(".json") or name in ("store.json",) or name.endswith(".tmp.json"):
@@ -796,13 +810,28 @@ def get_live_staff(store_id: str = "store_mumbai_001", camera_id: Optional[str] 
                 continue
             for z in row.get("staff_zones") or []:
                 zones.append({**z, "camera_id": z.get("camera_id") or row.get("camera_id")})
+            staff = row.get("staff") or {}
+            if isinstance(staff, dict):
+                queue_response.extend(staff.get("queue_response") or [])
+                rt = staff.get("response_time_to_queue")
+                if rt is not None:
+                    response_times.append(float(rt))
+                if staff.get("note"):
+                    note = staff["note"]
     present = sum(int(z.get("tagged_ids", 0) or 0) for z in zones)
+    median = None
+    if response_times:
+        ordered = sorted(response_times)
+        mid = len(ordered) // 2
+        median = ordered[mid] if len(ordered) % 2 else round((ordered[mid - 1] + ordered[mid]) / 2.0, 1)
     return {
         "store_id": store_id,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "zones": zones,
         "camera_inventory_present": present,
-        "note": "Geometry-based sticky staff tag; no facial ID. response_time_to_queue PARTIAL.",
+        "queue_response": queue_response[-20:],
+        "response_time_to_queue": median,
+        "note": note,
     }
 
 
