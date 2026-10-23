@@ -99,3 +99,11 @@ models/pack/**/*.msgpack
 # Frame-synced live KPI JSON (edge-analyzer → API)
 data/storage/live/
 .venv/
+
+# Local model recovery assets and runtime settings
+models-extra/
+vendor/
+local-runtime/
+compose.local-models.yaml
+/weights
+models/onnx/

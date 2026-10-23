@@ -75,3 +75,18 @@ class RTMPosePackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MovingPoseFootTests(unittest.TestCase):
+    def test_cached_ankles_move_with_detection_between_pose_passes(self):
+        t = Track(1, [100, 50, 160, 220], 0.9, 1.0)
+        t.set_pose(foot=(128, 218), keypoints_xy=[[128, 218]])
+        t.update([120, 60, 180, 230], 0.9, 2.0)
+        self.assertEqual(t.foot_point, (148, 228))
+        self.assertEqual(t.keypoints_xy, [[148, 228]])
+        self.assertEqual(t.history[-1], (148, 228, 2.0))
+
+class PoseAnalyticsParityTests(unittest.TestCase):
+    def test_pose_refinement_updates_tripwire_history_same_frame(self):
+        t=Track(1,[100,50,160,220],.9,1)
+        t.set_pose(foot=(128,218))
+        self.assertEqual(t.history[-1],(128,218,1))

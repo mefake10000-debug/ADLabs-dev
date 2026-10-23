@@ -131,6 +131,14 @@ class RTMPoseFootEstimator:
                 backend="onnxruntime",
                 device=device if device in ("cpu", "cuda", "mps") else "cpu",
             )
+            # rtmlib otherwise gives every session an unrestricted CPU pool.
+            import onnxruntime as ort
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+            self._pose.session = ort.InferenceSession(
+                str(path), sess_options=options, providers=self._pose.session.get_providers()
+            )
             self._backend = "rtmlib"
             logger.info("RTMPose ready via rtmlib: %s", path.name)
         except Exception as e:  # noqa: BLE001
@@ -144,8 +152,11 @@ class RTMPoseFootEstimator:
             logger.warning("onnxruntime missing for RTMPose fallback: %s", e)
             return
         try:
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
             self._session = ort.InferenceSession(
-                str(path), providers=["CPUExecutionProvider"]
+                str(path), sess_options=options, providers=["CPUExecutionProvider"]
             )
             self._backend = "ort-simcc"
             logger.info("RTMPose ready via ORT SimCC: %s", path.name)

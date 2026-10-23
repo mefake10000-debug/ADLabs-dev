@@ -19,7 +19,7 @@ from src.perception.model_stack import demographics_env_enabled
 from src.perception.pose_estimator import PoseEstimator, match_pose_to_track
 from src.perception.rtmpose_estimator import RTMPoseFootEstimator, resolve_rtmpose_onnx
 from src.analytics.pose_fall_candidate import status as pose_fall_status
-from src.analytics.shelf_gap_geometry import snapshot as shelf_gap_snapshot
+from src.analytics.shelf_gap_geometry import snapshot_from_products as shelf_gap_snapshot
 from src.perception.face_detector import FaceDetector, face_inside_box, crop_face, align_face
 from src.perception.age_gender import AgeGenderEstimator
 from src.perception.head_pose import HeadPoseEstimator
@@ -481,6 +481,16 @@ class EdgePipeline:
                 )
             else:
                 self.model_errors["demographics"] = self.registry.error("demographics") or "unavailable"
+
+        mivolo_dir = demo_cfg.get("mivolo_directory")
+        if demo_cfg.get("enabled") and mivolo_dir:
+            try:
+                from src.perception.mivolo_estimator import MiVoloEstimator
+                self.age_gender = MiVoloEstimator(mivolo_dir)
+                logger.info("MiVOLO v2 demographics estimator loaded from %s", mivolo_dir)
+            except Exception as error:
+                self.model_errors["mivolo_v2"] = str(error)
+                logger.error("MiVOLO v2 failed: %s", error)
 
         if head_cfg.get("enabled", True):
             self.head_pose = HeadPoseEstimator(focal_scale=float(head_cfg.get("focal_scale", 1.0)))
@@ -1708,7 +1718,7 @@ class EdgePipeline:
             "safety": safety_block,
             "alerts": alerts_block,
             "fusion": fusion_block,
-            "shelf_gap": shelf_gap_snapshot([]),
+            "shelf_gap": shelf_gap_snapshot(list(ctx.get("last_overlay_objects_ov") or [])),
             "pose_fall": pose_fall_status(
                 pose_weights_on_disk=self._rtmpose_on_disk(),
                 wired=bool(getattr(self, "rtmpose", None)) or bool(self.pose_estimator),

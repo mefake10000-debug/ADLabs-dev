@@ -116,6 +116,10 @@ class Track:
                 nx = px * (1.0 - alpha) + nx * alpha
                 ny = py * (1.0 - alpha) + ny * alpha
             self.pose_foot = (nx, ny)
+            if self.history:
+                _, _, timestamp = self.history[-1]
+                self.history[-1] = (nx, ny, timestamp)
+                self._update_velocity()
         if keypoints is not None:
             self.keypoints = keypoints
         if keypoints_xy is not None:
@@ -165,6 +169,20 @@ class Track:
         return (fx + vx * dt, fy + vy * dt)
 
     def update(self, bbox: List[float], confidence: float, timestamp: float):
+        # Pose runs less often than detection. Carry cached geometry with the
+        # detected body instead of leaving ankle marks at old image coordinates.
+        old = self.bbox
+        dx = (bbox[0] + bbox[2] - old[0] - old[2]) * 0.5
+        dy = bbox[3] - old[3]
+        if self.pose_foot is not None:
+            self.pose_foot = (self.pose_foot[0] + dx, self.pose_foot[1] + dy)
+            if self.keypoints_xy is not None:
+                self.keypoints_xy = [[p[0] + dx, p[1] + dy] for p in self.keypoints_xy]
+            if self.keypoints is not None:
+                self.keypoints = {
+                    name: [point[0] + dx, point[1] + dy, *point[2:]]
+                    for name, point in self.keypoints.items()
+                }
         self.bbox = bbox
         self.confidence = confidence
         self.last_seen = timestamp

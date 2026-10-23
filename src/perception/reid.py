@@ -214,7 +214,10 @@ class SoftReIdExtractor:
             self.load_error = f"onnxruntime missing ({e})"
             return False
         try:
-            sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+            sess = ort.InferenceSession(path, sess_options=options, providers=["CPUExecutionProvider"])
             inp = sess.get_inputs()[0]
             self._session = sess
             self._input_name = inp.name
