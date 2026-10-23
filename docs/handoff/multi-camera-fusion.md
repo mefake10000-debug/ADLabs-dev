@@ -37,6 +37,6 @@ The displayed timestamp is the edge receive/decode time. It is a live-ish operat
 
 ## Current state in this repository
 
-The two sample camera feeds have independent pixel calibrations, no verified common `store_zone_id` assignment, and no floor homographies. Fusion is therefore correctly **GATED**; the sample clips are not evidence that two cameras saw the same people. Run both cameras to validate the per-camera path, then calibrate with known floor points and test an overlapping live/recorded segment before enabling fusion.
+The two sample camera feeds have independent pixel calibrations, no verified common `store_zone_id` assignment, and no floor homographies. Fusion is therefore correctly **GATED**; the sample clips are not evidence that two cameras saw the same people. In the current runtime, `checkout_sample.mp4` renders a color-bar test pattern rather than people, so it validates the second decoder/overlay only—not ReID or overlap deduplication. Replace it with a real second-angle recording, calibrate with known floor points, and test a synchronized overlapping segment before enabling fusion.
 
 The unit tests cover the algorithmic gates (same-zone match, time/similarity/floor rejection, homography projection, and aggregate union) with synthetic vectors. They do not claim production precision on real store footage.
