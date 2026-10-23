@@ -1,14 +1,15 @@
-"""Live-demo performance presets (fast vs quality).
+"""Live-demo performance presets (fast | balanced | quality).
 
 Docker on Mac ARM runs PyTorch CPU-only. Enabling pose / YuNet / YOLO-World+CLIP
-on every stream collapses infer FPS to ~0.3–1. The fast preset keeps person
-detect + ByteTrack + tripwire/zones only; quality restores the enrichment tier.
+on every stream collapses infer FPS to ~0.3–1. Fast keeps max display FPS;
+balanced (default for local demos) restores reliable person boxes; quality
+restores the enrichment tier (+ RF-DETR by default).
 
 Env (wins over yaml):
-  EDGE_PERF_MODE=fast|quality
+  EDGE_PERF_MODE=fast|balanced|quality
   EDGE_MAX_CAMERAS=<int>
   EDGESIGHT_DETECT_MODEL=<path>   # optional YOLO weight override
-  DETECTOR_BACKEND=yolo26|rfdetr  # fast→yolo26; quality→rfdetr (SOTA) unless set
+  DETECTOR_BACKEND=yolo26|rfdetr  # fast/balanced→yolo26; quality→rfdetr unless set
   RFDETR_VARIANT=nano|small
   RFDETR_WEIGHTS=<path|filename>
   OVERLAY_BOX_STYLE=parallel|aabb # peer overlay; visual-only, orthogonal to backend
@@ -26,13 +27,28 @@ from src.perception.detector_backend import (
     resolve_rfdetr_weights,
 )
 
+_VALID_MODES = ("fast", "balanced", "quality")
 
+# Max display FPS on Docker CPU — smaller letterbox, skip more frames.
+# Prefer EDGE_PERF_MODE=fast only when you accept missed people for speed.
 FAST_PRESET: Dict[str, Any] = {
     "mode": "fast",
     "model_name": "models/yolo26n.pt",
-    "imgsz": 320,           # Docker CPU sweet spot; raise to 416 if you have headroom
-    "infer_every_n": 3,     # Docker CPU: skip more decode frames → higher display FPS
+    "imgsz": 320,
+    "infer_every_n": 3,
     "display_every_n": 1,   # smooth MJPEG from last tracks between infer frames
+    "enrichment": False,
+    "reid": False,
+    "detector_backend": BACKEND_YOLO26,
+}
+
+# Local demo default: denser tracks + mid letterbox so people in frame are not missed.
+BALANCED_PRESET: Dict[str, Any] = {
+    "mode": "balanced",
+    "model_name": "models/yolo26n.pt",
+    "imgsz": 416,
+    "infer_every_n": 2,
+    "display_every_n": 1,
     "enrichment": False,
     "reid": False,
     "detector_backend": BACKEND_YOLO26,
@@ -49,20 +65,26 @@ QUALITY_PRESET: Dict[str, Any] = {
     "detector_backend": BACKEND_RFDETR,  # Apache SOTA default for quality
 }
 
+_PRESETS = {
+    "fast": FAST_PRESET,
+    "balanced": BALANCED_PRESET,
+    "quality": QUALITY_PRESET,
+}
+
 
 def resolve_perf_mode(pipeline_cfg: Dict[str, Any]) -> str:
     env = (os.environ.get("EDGE_PERF_MODE") or "").strip().lower()
-    if env in ("fast", "quality"):
+    if env in _VALID_MODES:
         return env
     cfg = pipeline_cfg.get("performance") or {}
-    mode = str(cfg.get("mode", "fast") or "fast").strip().lower()
-    return mode if mode in ("fast", "quality") else "fast"
+    mode = str(cfg.get("mode", "balanced") or "balanced").strip().lower()
+    return mode if mode in _VALID_MODES else "balanced"
 
 
 def resolve_performance(pipeline_cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Merge yaml + env into concrete knobs used by EdgePipeline."""
     mode = resolve_perf_mode(pipeline_cfg)
-    preset = dict(FAST_PRESET if mode == "fast" else QUALITY_PRESET)
+    preset = dict(_PRESETS[mode])
     perf_cfg = pipeline_cfg.get("performance") or {}
     p_cfg = pipeline_cfg.get("perception") or {}
 
@@ -88,12 +110,17 @@ def resolve_performance(pipeline_cfg: Dict[str, Any]) -> Dict[str, Any]:
     elif mode == "quality" and p_cfg.get("model_name"):
         # quality may keep an explicit heavier weight from yaml
         preset["model_name"] = p_cfg["model_name"]
-    elif mode == "fast":
+    elif mode in ("fast", "balanced"):
         # Prefer nano even if yaml still says yolo26s (legacy checkouts)
         preset["model_name"] = (
             perf_cfg.get("model_name")
-            or (p_cfg.get("model_name") if "yolo26n" in str(p_cfg.get("model_name", "")) or "yolo11n" in str(p_cfg.get("model_name", "")) else None)
-            or FAST_PRESET["model_name"]
+            or (
+                p_cfg.get("model_name")
+                if "yolo26n" in str(p_cfg.get("model_name", ""))
+                or "yolo11n" in str(p_cfg.get("model_name", ""))
+                else None
+            )
+            or _PRESETS[mode]["model_name"]
         )
 
     max_cams = os.environ.get("EDGE_MAX_CAMERAS")

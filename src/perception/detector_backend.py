@@ -7,8 +7,8 @@ Env (wins over yaml):
   RF_HOME / ROBOFLOW_HOME            # rfdetr weight cache (upstream)
 
 Defaults:
-  EDGE_PERF_MODE=fast     → yolo26 (YOLO26n)
-  EDGE_PERF_MODE=quality  → rfdetr (SOTA Apache path) unless DETECTOR_BACKEND set
+  EDGE_PERF_MODE=fast|balanced → yolo26 (YOLO26n)
+  EDGE_PERF_MODE=quality       → rfdetr (SOTA Apache path) unless DETECTOR_BACKEND set
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def resolve_detector_backend(
     pipeline_cfg: Optional[Dict[str, Any]] = None,
     perf_mode: Optional[str] = None,
 ) -> str:
-    """Pick yolo26 (fast default) or rfdetr (quality/SOTA default)."""
+    """Pick yolo26 (fast/balanced default) or rfdetr (quality/SOTA default)."""
     env = (os.environ.get("DETECTOR_BACKEND") or "").strip().lower()
     if env in _VALID_BACKENDS:
         return env

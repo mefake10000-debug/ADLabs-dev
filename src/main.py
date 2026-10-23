@@ -99,8 +99,8 @@ class EdgePipeline:
         self.live_dir = os.path.join(os.path.dirname(db_path), "live")
         os.makedirs(self.live_dir, exist_ok=True)
 
-        # Performance preset (EDGE_PERF_MODE / performance.mode). Fast is the Docker
-        # Mac ARM demo default — see docs/live-fps.md.
+        # Performance preset (EDGE_PERF_MODE / performance.mode). Balanced is the
+        # Docker Mac ARM demo default — see docs/live-fps.md.
         self.perf = resolve_performance(self.pipeline_cfg)
         self.perf_mode = self.perf["mode"]
         self.infer_every_n = int(self.perf["infer_every_n"])
@@ -192,7 +192,7 @@ class EdgePipeline:
         # untouched. These models add the retail-analytics detail the fast tier cannot
         # see: body behaviour, head orientation, population cohorts and products.
         self.models_cfg = self.pipeline_cfg.get("models", {}) or {}
-        # Enrichment tier is EXPLICIT: fast mode forces it off; quality mode keeps the
+        # Enrichment tier is EXPLICIT: fast/balanced force it off; quality keeps the
         # models.* yaml gating truthful (no silent re-enable). EDGE_ENRICHMENT overrides.
         _env_enrichment = os.environ.get("EDGE_ENRICHMENT")
         if _env_enrichment is not None:
@@ -201,7 +201,7 @@ class EdgePipeline:
                 f"EDGE_ENRICHMENT={_env_enrichment} env override — enrichment "
                 f"{'ON' if self.models_enabled else 'OFF'}"
             )
-        elif self.perf_mode == "fast":
+        elif self.perf_mode in ("fast", "balanced"):
             self.models_enabled = False
         else:
             self.models_enabled = bool(self.models_cfg.get("enabled", True))
@@ -223,8 +223,8 @@ class EdgePipeline:
             if self.models_enabled and self.enrichment_device == "cpu":
                 # Enrichment shares the machine with the detector — cap threads.
                 torch.set_num_threads(self.enrichment_threads)
-            elif self.perf_mode == "fast" and self.detector.device == "cpu":
-                # Fast tier alone: give YOLO more CPU (Docker Mac ARM).
+            elif self.perf_mode in ("fast", "balanced") and self.detector.device == "cpu":
+                # Light tiers alone: give YOLO more CPU (Docker Mac ARM).
                 torch.set_num_threads(max(4, int(os.environ.get("EDGE_TORCH_THREADS", "6") or 6)))
         except Exception:
             pass
@@ -240,7 +240,7 @@ class EdgePipeline:
             self._init_enrichment_models()
 
         reid_cfg = (self.models_cfg.get("reid") or {}) if getattr(self, "models_cfg", None) is not None else {}
-        # Fast mode keeps ReID off; quality still requires models.reid.enabled: true.
+        # Fast/balanced keep ReID off; quality still requires models.reid.enabled: true.
         reid_enabled = bool(reid_cfg.get("enabled", False)) and self.perf_mode == "quality"
         self.reid_cfg = reid_cfg
         self.reid_extractor = SoftReIdExtractor(
@@ -1488,7 +1488,7 @@ class EdgePipeline:
                 "detector_loaded": bool(getattr(self.detector, "is_loaded", False)),
                 "imgsz": int(getattr(self.detector, "imgsz", 0) or 0) or None,
                 "tracker": "bytetrack",
-                "perf_mode": getattr(self, "perf_mode", "fast"),
+                "perf_mode": getattr(self, "perf_mode", "balanced"),
                 "infer_every_n": int(getattr(self, "infer_every_n", 1) or 1),
                 "overlay_box_style": resolve_overlay_box_style(),
                 "enrichment": bool(getattr(self, "models_enabled", False)),
@@ -1499,7 +1499,7 @@ class EdgePipeline:
                 "face_identity": False,
                 "stack_policy": "docs/model-stack-policy.md",
                 "note": (
-                    f"perf={getattr(self, 'perf_mode', 'fast')}: "
+                    f"perf={getattr(self, 'perf_mode', 'balanced')}: "
                     f"backend={getattr(self.detector, 'backend', 'yolo26')}; "
                     "person detect+track+zones"
                     + ("; enrichment on" if getattr(self, "models_enabled", False) else "; enrichment off")
@@ -1507,7 +1507,7 @@ class EdgePipeline:
                     "Soft ReID session-scoped only. products_top = open-vocab categories, not POS SKUs."
                 ),
             },
-            "perf_mode": getattr(self, "perf_mode", "fast"),
+            "perf_mode": getattr(self, "perf_mode", "balanced"),
             "reid": {
                 "active": bool(reid_status.get("active")),
                 "backend": reid_status.get("backend"),
@@ -1741,7 +1741,7 @@ class EdgePipeline:
             "device_id": self.device_id,
             "device_name": f"{_platform.node()} (Edge Node)",
             "inference_engine": engine,
-            "perf_mode": getattr(self, "perf_mode", "fast"),
+            "perf_mode": getattr(self, "perf_mode", "balanced"),
             "cameras": len(self.camera_contexts),
             "python_version": _platform.python_version(),
             "torch_version": torch_version,

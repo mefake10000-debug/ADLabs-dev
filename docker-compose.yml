@@ -44,9 +44,9 @@ services:
       - PYTHONUNBUFFERED=1
       - PIPELINE_CONFIG=/app/configs/pipeline.yaml
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
-      # Live FPS preset: fast (default, Docker Mac ARM demos) | quality (enrichment on).
+      # Live FPS preset: balanced (default — reliable people boxes) | fast | quality.
       # See docs/live-fps.md. Default one cam on Docker CPU; set EDGE_MAX_CAMERAS= empty for all.
-      - EDGE_PERF_MODE=${EDGE_PERF_MODE:-fast}
+      - EDGE_PERF_MODE=${EDGE_PERF_MODE:-balanced}
       - EDGE_MAX_CAMERAS=${EDGE_MAX_CAMERAS:-1}
       # Person overlays: parallel (default, sheared parallelogram + footprint) | aabb (classic YOLO rect).
       # Visual only — see docs/overlay-parallel-boxes.md.

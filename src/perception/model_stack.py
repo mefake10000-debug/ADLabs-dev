@@ -322,11 +322,11 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
                 "(DETECTOR_BACKEND=yolo26). RF-DETR currently selected."
             )
         elif e.key in ("osnet_reid", "clip_vit_b32") and e.status == "LIVE":
-            perf = os.environ.get("EDGE_PERF_MODE", "fast").strip().lower()
+            perf = os.environ.get("EDGE_PERF_MODE", "balanced").strip().lower()
             if e.on_disk is False:
                 e.status = "PACKED"
                 e.notes = (e.notes or "") + " Weights not on probed path — waiting."
-            elif perf == "fast":
+            elif perf in ("fast", "balanced"):
                 e.status = "PACKED"
                 e.notes = (e.notes or "") + " Waiting: set EDGE_PERF_MODE=quality to run."
         elif e.key == "yoloe" and e.status == "LIVE" and e.on_disk is False:
@@ -339,7 +339,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             "ENABLE_DEMOGRAPHICS": os.environ.get("ENABLE_DEMOGRAPHICS", "0"),
             "DEMOGRAPHICS_DPIA_OK": os.environ.get("DEMOGRAPHICS_DPIA_OK", "0"),
             "demographics_runtime_allowed": demo_on,
-            "EDGE_PERF_MODE": os.environ.get("EDGE_PERF_MODE", "fast"),
+            "EDGE_PERF_MODE": os.environ.get("EDGE_PERF_MODE", "balanced"),
             "DETECTOR_BACKEND": resolve_detector_backend(),
             "RFDETR_VARIANT": resolve_rfdetr_variant(),
             "RFDETR_RUNTIME_LOADED": os.environ.get("RFDETR_RUNTIME_LOADED", "0"),

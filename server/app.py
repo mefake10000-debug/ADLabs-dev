@@ -1237,13 +1237,26 @@ def get_stream(camera_id: str):
     frame_path = os.path.join(frames_dir, f"{camera_id}.jpg")
 
     def frame_generator():
+        # Edge writes via tmp + os.replace; still skip incomplete/torn JPEGs and
+        # avoid re-yielding the same payload every tick (reduces MJPEG glitches).
+        last_bytes: Optional[bytes] = None
         while True:
             if os.path.exists(frame_path):
                 try:
                     with open(frame_path, "rb") as f:
                         frame_bytes = f.read()
-                    yield (b"--frame\r\n"
-                           b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+                    # Valid JPEG: SOI … EOI; reject partial annotates mid-write races.
+                    if (
+                        len(frame_bytes) >= 100
+                        and frame_bytes[:2] == b"\xff\xd8"
+                        and frame_bytes[-2:] == b"\xff\xd9"
+                        and frame_bytes != last_bytes
+                    ):
+                        last_bytes = frame_bytes
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+                        )
                 except Exception:
                     pass
             time.sleep(0.08)  # ~12 FPS streaming rate
