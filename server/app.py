@@ -420,6 +420,92 @@ def _read_live_snapshot(camera_id: Optional[str] = None) -> Optional[Dict[str, A
         return None
 
 
+def _lifetime_product_rollup(rows: Any, people_now: int) -> bool:
+    """True when products_top is an all-time SQL sum, not this frame.
+
+    Frame interest stays near the people on camera. Lifetime rollups are 10^4–10^5
+    viewers and must not be served as a live KPI.
+    """
+    if not isinstance(rows, list) or not rows:
+        return False
+    viewers = 0
+    detections = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            viewers = max(viewers, int(row.get("viewers") or 0))
+            detections = max(detections, int(row.get("detections") or 0))
+        except (TypeError, ValueError):
+            continue
+    cap = max(int(people_now or 0), 1) * 50
+    return viewers > max(cap, 200) or detections > max(cap * 4, 800)
+
+
+def _bind_live_cv(result: Dict[str, Any], cam_rows: List[Dict[str, Any]]) -> None:
+    """Present = active track ids. In/Out = session tripwire counts.
+
+    Store snapshots omit track_ids. Cam files have them. Never substitute the
+    SQLite day SUM when a fresh snapshot is the source.
+    """
+    if result.get("source") != "live_snapshot" or not cam_rows:
+        return
+    track_ids: List[Any] = []
+    seen = set()
+    saw_track_key = False
+    tripwires: List[Dict[str, Any]] = []
+    for row in cam_rows:
+        raw_ids = row.get("track_ids")
+        if isinstance(raw_ids, list):
+            saw_track_key = True
+            for tid in raw_ids:
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                track_ids.append(tid)
+        for tw in row.get("tripwires") or []:
+            if isinstance(tw, dict):
+                item = dict(tw)
+                item.setdefault("camera_id", row.get("camera_id"))
+                tripwires.append(item)
+        # Cam snapshot totals are tripwire session counts even when the array
+        # is absent for a beat (file replace). They are never the day SUM.
+        if not row.get("tripwires") and (
+            "session_in" in row or "total_visitors" in row or "session_out" in row or "total_exits" in row
+        ):
+            inn_raw = row.get("session_in") if row.get("session_in") is not None else row.get("total_visitors")
+            out_raw = row.get("session_out") if row.get("session_out") is not None else row.get("total_exits")
+            tripwires.append({
+                "id": "snapshot_session",
+                "name": "Session",
+                "camera_id": row.get("camera_id"),
+                "in_count": int(inn_raw or 0),
+                "out_count": int(out_raw or 0),
+            })
+    if saw_track_key:
+        result["track_ids"] = track_ids
+        result["active_tracks"] = len(track_ids)
+        result["people_now"] = len(track_ids)
+        result["net_occupancy"] = len(track_ids)
+        result["present_binding"] = "active_tracks"
+    if tripwires:
+        inn = sum(int(t.get("in_count") or 0) for t in tripwires)
+        out = sum(int(t.get("out_count") or 0) for t in tripwires)
+        result["tripwires"] = tripwires
+        result["total_visitors"] = inn
+        result["total_exits"] = out
+        result["session_in"] = inn
+        result["session_out"] = out
+        result["inout_binding"] = "session_tripwire"
+    people = int(result.get("people_now") or 0)
+    if _lifetime_product_rollup(result.get("products_top"), people):
+        result["products_top"] = None
+        result["products_top_withheld"] = "lifetime_rollup"
+    models = result.get("models") or {}
+    if isinstance(models, dict) and models.get("enrichment") is False:
+        result["engagement"] = None
+
+
 # Live Store Telemetry
 @app.get("/api/v1/live")
 def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None):
@@ -592,6 +678,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         # Skip cams not listed in store snapshot when max_cameras pruned the active set.
         live_dir = _live_dir()
         active_cams = set(snap.get("cameras") or []) if snap and not snap.get("_stale") else set()
+        cam_payloads: List[Dict[str, Any]] = []
         if os.path.isdir(live_dir):
             snap_cams = []
             for name in sorted(os.listdir(live_dir)):
@@ -607,6 +694,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                     continue
                 if camera_id and row.get("camera_id") != camera_id:
                     continue
+                cam_payloads.append(row)
                 vl = (row.get("video_loop") or {})
                 snap_cams.append({
                     "camera_id": row.get("camera_id"),
@@ -646,6 +734,8 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 else:
                     # No singular loop state exists for a multi-camera store.
                     result["video_loop"] = None
+
+        _bind_live_cv(result, cam_payloads)
 
         # NFC stub (optional hardware) + floor-role maturity. Industry vertical map is
         # deprecated alias only — Live hub features retail_roles, not fashion/etc tabs.

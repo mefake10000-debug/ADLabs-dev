@@ -8,6 +8,24 @@ import logging
 import threading
 from typing import Dict, List, Any, Optional
 
+
+def _lifetime_product_rows(rows: Any, people_now: int) -> bool:
+    """All-time product SQL sums are not a live frame KPI."""
+    if not isinstance(rows, list) or not rows:
+        return False
+    viewers = 0
+    detections = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            viewers = max(viewers, int(row.get("viewers") or 0))
+            detections = max(detections, int(row.get("detections") or 0))
+        except (TypeError, ValueError):
+            continue
+    cap = max(int(people_now or 0), 1) * 50
+    return viewers > max(cap, 200) or detections > max(cap * 4, 800)
+
 from src.ingestion.stream_reader import StreamReader
 from src.perception.detector import PersonDetector
 from src.perception.tracker import SimpleByteTracker, tracker_params_for_infer_gap
@@ -1415,11 +1433,8 @@ class EdgePipeline:
                     }
                     for p in products[:8]
                 ]
-        if not products_top:
-            try:
-                products_top = self.local_buffer.get_recent_products_top(cam_id, limit=8) or None
-            except Exception:
-                products_top = None
+        # Lifetime SQL sums (10^4 viewers) are not this frame. Leave products_top empty
+        # until the live product model writes a session snapshot.
         if products_top is not None and len(products_top) == 0:
             products_top = None
         reid_status = self.reid_extractor.status() if getattr(self, "reid_extractor", None) else {}
@@ -1564,12 +1579,16 @@ class EdgePipeline:
                 "multi_store": "FUTURE",
                 "display_interest": "LIVE" if products_top else "PARTIAL",
             },
-            "engagement": {
-                "avg_attention_score": attention.get("avg_attention_score", 0.0),
-                "facing_ratio": attention.get("facing_ratio", 0.0),
-                "engaged_ratio": attention.get("engaged_ratio", 0.0),
-                "group_count": groups.get("group_count", 0),
-            },
+            "engagement": (
+                None
+                if not getattr(self, "models_enabled", False)
+                else {
+                    "avg_attention_score": attention.get("avg_attention_score"),
+                    "facing_ratio": attention.get("facing_ratio"),
+                    "engaged_ratio": attention.get("engaged_ratio"),
+                    "group_count": groups.get("group_count"),
+                }
+            ),
             "models": {
                 "person_detector": backend_label(
                     getattr(self.detector, "backend", "yolo26"),
@@ -1661,9 +1680,14 @@ class EdgePipeline:
             "perf_mode": payload.get("perf_mode"),
             "engagement": payload.get("engagement"),
             "reid": payload.get("reid"),
-            "products_top": payload.get("products_top"),
+            "products_top": None,
+            "track_ids": [],
+            "tripwires": [],
+            "present_binding": "active_tracks",
+            "inout_binding": "session_tripwire",
         }
         dwell_acc = []
+        saw_track_ids = False
         active = set(self.camera_contexts.keys())
         for name in os.listdir(self.live_dir):
             if not name.endswith(".json") or name.startswith("store") or name.endswith(".tmp.json"):
@@ -1702,8 +1726,18 @@ class EdgePipeline:
                 store["engagement"] = row["engagement"]
             if row.get("reid"):
                 store["reid"] = row["reid"]
-            if row.get("products_top"):
-                store["products_top"] = row["products_top"]
+            raw_ids = row.get("track_ids")
+            if isinstance(raw_ids, list):
+                saw_track_ids = True
+                for tid in raw_ids:
+                    if tid not in store["track_ids"]:
+                        store["track_ids"].append(tid)
+            for tw in row.get("tripwires") or []:
+                if isinstance(tw, dict):
+                    store["tripwires"].append(tw)
+            prods = row.get("products_top")
+            if prods and not _lifetime_product_rows(prods, int(row.get("people_now") or 0)):
+                store["products_top"] = prods
             if row.get("entrance"):
                 store["entrance"] = row["entrance"]
                 store["stop_rate"] = row.get("stop_rate")
@@ -1721,6 +1755,26 @@ class EdgePipeline:
                 store["queues"] = row["queues"]
         if dwell_acc:
             store["avg_dwell_seconds"] = round(sum(dwell_acc) / len(dwell_acc), 1)
+        if saw_track_ids:
+            store["active_tracks"] = len(store["track_ids"])
+            store["people_now"] = store["active_tracks"]
+            store["net_occupancy"] = store["active_tracks"]
+        else:
+            store.pop("track_ids", None)
+            store.pop("present_binding", None)
+        if store["tripwires"]:
+            store["total_visitors"] = sum(int(t.get("in_count") or 0) for t in store["tripwires"])
+            store["total_exits"] = sum(int(t.get("out_count") or 0) for t in store["tripwires"])
+            store["session_in"] = store["total_visitors"]
+            store["session_out"] = store["total_exits"]
+        else:
+            store.pop("tripwires", None)
+            store.pop("inout_binding", None)
+        models = store.get("models") or {}
+        if isinstance(models, dict) and models.get("enrichment") is False:
+            store["engagement"] = None
+        if _lifetime_product_rows(store.get("products_top"), int(store.get("people_now") or 0)):
+            store["products_top"] = None
 
         store_tmp = os.path.join(self.live_dir, "store.tmp.json")
         store_path = os.path.join(self.live_dir, "store.json")
