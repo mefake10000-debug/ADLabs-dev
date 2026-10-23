@@ -964,21 +964,33 @@ def get_device_health():
     # clock_sync.ntp_ok stays null until chrony/systemd-timesyncd is verified on the host.
     # Frame stamps use host wall + monotonic; do not treat association windows as NTP-safe yet.
     snap = _read_live_snapshot()
-    pipeline_fps = 13.8
+    # Never invent FPS — null until a live snapshot exists.
+    pipeline_fps = None
     if snap and snap.get("infer_fps") is not None:
         pipeline_fps = float(snap.get("infer_fps") or 0)
     elif snap and snap.get("decode_fps") is not None:
         pipeline_fps = float(snap.get("decode_fps") or 0)
+    models = (snap or {}).get("models") or {}
+    perf_mode = (
+        (snap or {}).get("perf_mode")
+        or models.get("perf_mode")
+        or os.environ.get("EDGE_PERF_MODE")
+        or "fast"
+    )
+    # Honest engine label: Compose edge is CPU; do not claim Core ML inside Docker.
+    engine = "PyTorch CPU (Docker)" if os.path.exists("/.dockerenv") else "Core ML / ONNX Runtime FP16"
     return {
         "device_id": "edge_node_macmini_01",
         "device_name": "Apple Silicon Mac mini (Edge Node)",
         "cpu_usage_percent": cpu,
         "memory_usage_percent": mem,
-        "inference_engine": "Core ML / ONNX Runtime FP16",
+        "inference_engine": engine,
         "pipeline_fps": pipeline_fps,
         "decode_fps": snap.get("decode_fps") if snap else None,
         "infer_fps": snap.get("infer_fps") if snap else None,
         "people_now": snap.get("people_now") if snap else None,
+        "perf_mode": perf_mode,
+        "person_detector": models.get("person_detector") or models.get("detect_model"),
         "status": "Healthy (Online)",
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "live_source": "live_snapshot" if snap and not snap.get("_stale") else "none",
@@ -993,7 +1005,13 @@ def get_device_health():
             "active": bool((snap or {}).get("reid", {}).get("active")) if snap else None,
             "backend": (snap or {}).get("reid", {}).get("backend") if snap else None,
             "gallery_size": (snap or {}).get("reid", {}).get("gallery_size") if snap else None,
-            "flag": "models.reid.enabled: true + EDGE_PERF_MODE=quality (ONNX; session-scoped)",
-            "note": "Soft body ReID only — no face ID / multi-day. Fusion / global_person_id is Future.",
+            "flag": (
+                "models.reid.enabled: true + EDGE_PERF_MODE=quality "
+                "(ONNX OSNet/YouTu; session-scoped). Fast mode keeps ReID off for FPS."
+            ),
+            "note": (
+                "Soft body ReID only — no face ID / multi-day gallery. "
+                "Fusion / global_person_id is Future."
+            ),
         },
     }
