@@ -924,7 +924,11 @@ class EdgePipeline:
         """Reconciles running cameras with the config file: adds new cameras, removes
         deleted ones, restarts a camera whose source/FPS changed (fresh tracker and
         counters -- it's a different scene), and swaps calibration in place otherwise."""
-        new_cams = {c["id"]: c for c in new_cfg.get("cameras", []) if c.get("id")}
+        cams_list = [c for c in new_cfg.get("cameras", []) if c.get("id")]
+        # Honor EDGE_MAX_CAMERAS / performance.max_cameras on hot-reload too
+        # (otherwise calib saves re-add cams and collapse Docker CPU FPS).
+        cams_list = limit_cameras(cams_list, self.perf.get("max_cameras"))
+        new_cams = {c["id"]: c for c in cams_list}
 
         for cam_id in list(self.camera_contexts):
             if cam_id not in new_cams:
@@ -1117,19 +1121,21 @@ class EdgePipeline:
                 "enrichment": bool(getattr(self, "models_enabled", False)),
                 "pose": bool(getattr(self, "pose_estimator", None)),
                 "face_boxes": bool(getattr(self, "face_detector", None)),
+                "products": bool(getattr(self, "world_detector", None)) or bool(products_top),
                 "face_identity": False,
                 "note": (
                     f"perf={getattr(self, 'perf_mode', 'fast')}: "
                     "person detect+track+zones"
                     + ("; enrichment on" if getattr(self, "models_enabled", False) else "; enrichment off")
-                    + ". Face boxes (if on) = k-anon age/gender only — no face ID."
+                    + ". Face boxes (if on) = k-anon age/gender only — no face ID. "
+                    "Soft ReID session-scoped only. products_top = open-vocab categories, not POS SKUs."
                 ),
             },
             "perf_mode": getattr(self, "perf_mode", "fast"),
             "reid": {
                 "active": bool(reid_status.get("active")),
                 "backend": reid_status.get("backend"),
-                "gallery_size": self.reid_gallery.size(),
+                "gallery_size": self.reid_gallery.size() if self.reid_gallery else 0,
                 "session_scoped": True,
                 "cross_cam_fusion": False,
             },

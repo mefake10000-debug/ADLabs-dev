@@ -67,12 +67,24 @@ class OpenVocabProductDetector:
     def _ensure_classes(self):
         if self._classes_set or self._prompt_free:
             return
+        # Prefer openai-clip from requirements-edge.txt. Ultralytics otherwise retries
+        # `pip install git+CLIP` (needs git, kills Docker CPU FPS under EDGE_PERF_MODE=fast).
+        try:
+            import clip  # noqa: F401
+        except ImportError:
+            logger.warning(
+                "openai-clip missing — using prompt-free name filter "
+                "(keep products disabled in fast mode; rebuild edge image to bake openai-clip)"
+            )
+            self._prompt_free = True
+            self._classes_set = True
+            return
         try:
             self.model.set_classes(self.vocabulary)
             self._classes_set = True
             logger.info(f"Open-vocabulary detector set to {len(self.vocabulary)} categories")
         except Exception as e:
-            # YOLOE / missing CLIP — fall back to prompt-free name filtering.
+            # YOLOE / other set_classes failures — fall back to prompt-free name filtering.
             logger.warning(
                 "set_classes failed (%s); falling back to prompt-free name filter", e
             )
@@ -107,6 +119,8 @@ class OpenVocabProductDetector:
             )
         except Exception as e:
             logger.error(f"Open-vocabulary inference error: {e}")
+            # Stop retrying every slow-tier tick (CLIP autoinstall loops).
+            self.model = None
             return []
 
         if not results or len(results) == 0:

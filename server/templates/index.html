@@ -201,11 +201,12 @@
                     <div class="col-span-1 space-y-4">
                         <div class="bg-surface-card border border-surface-border rounded-xl p-4">
                             <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-3">Model status HUD</h3>
+                            <p class="text-[10px] text-gray-500 mb-2" id="perf-mode-line">perf: — · docs/live-fps.md</p>
                             <ul id="model-status-hud" class="space-y-2 text-[11px] text-gray-300">
-                                <li class="flex justify-between gap-2"><span>YOLO26s detect</span><span class="text-emerald-400 font-semibold">Live</span></li>
+                                <li class="flex justify-between gap-2"><span>Person detect (fast: n / quality: s)</span><span class="text-emerald-400 font-semibold">Live</span></li>
                                 <li class="flex justify-between gap-2"><span>ByteTrack</span><span class="text-emerald-400 font-semibold">Live</span></li>
-                                <li class="flex justify-between gap-2"><span>Pose / YuNet / age-gender</span><span class="text-emerald-400 font-semibold">Live</span></li>
-                                <li class="flex justify-between gap-2"><span>YOLO-World interest</span><span class="text-emerald-400 font-semibold">Live</span></li>
+                                <li class="flex justify-between gap-2"><span>Pose / YuNet / age-gender</span><span id="hud-enrich" class="text-amber-400 font-semibold">Gated</span></li>
+                                <li class="flex justify-between gap-2"><span>YOLO-World interest</span><span id="hud-world" class="text-amber-400 font-semibold">Gated</span></li>
                                 <li class="flex justify-between gap-2"><span>Window stop ≥4s</span><span class="text-amber-400 font-semibold">Partial</span></li>
                                 <li class="flex justify-between gap-2"><span>OSNet multi-cam ReID</span><span class="text-violet-300 font-semibold">Future</span></li>
                                 <li class="flex justify-between gap-2"><span>POS / basket / ROI</span><span class="text-gray-500 font-semibold">Not CV</span></li>
@@ -493,10 +494,28 @@
                 if (!res.ok) return;
                 const h = await res.json();
                 document.getElementById('device-name').innerText = h.device_name;
-                document.getElementById('device-fps').innerText = h.pipeline_fps + ' FPS';
+                const infer = h.infer_fps != null ? h.infer_fps : h.pipeline_fps;
+                const decode = h.decode_fps != null ? h.decode_fps : '—';
+                document.getElementById('device-fps').innerText = (infer != null ? infer : '—') + ' infer';
                 document.getElementById('device-cpu').innerText = Math.round(h.cpu_usage_percent) + '%';
                 const eng = document.getElementById('device-engine');
-                if (eng) eng.innerText = (h.inference_engine || 'Edge inference') + ' · ' + (h.status || '');
+                const mode = h.perf_mode || 'fast';
+                if (eng) eng.innerText = (h.inference_engine || 'Edge') + ' · decode ' + decode + ' · ' + mode;
+                const perfLine = document.getElementById('perf-mode-line');
+                if (perfLine) {
+                    perfLine.innerText = 'perf: ' + mode + ' · infer ' + infer + ' · decode ' + decode + ' · docs/live-fps.md';
+                }
+                const enrichOn = mode === 'quality';
+                const hudEnrich = document.getElementById('hud-enrich');
+                const hudWorld = document.getElementById('hud-world');
+                if (hudEnrich) {
+                    hudEnrich.innerText = enrichOn ? 'Quality on' : 'Gated (fast)';
+                    hudEnrich.className = enrichOn ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold';
+                }
+                if (hudWorld) {
+                    hudWorld.innerText = enrichOn ? 'Quality on' : 'Gated (fast)';
+                    hudWorld.className = enrichOn ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold';
+                }
                 const pill = document.getElementById('device-online-pill');
                 if (pill) {
                     const ok = String(h.status || '').toLowerCase().includes('healthy') || String(h.status || '').toLowerCase().includes('online');
@@ -507,7 +526,7 @@
                 }
                 const cam = cameraConfigs[currentCameraId] || {};
                 const resLabel = (cam.resolution && cam.resolution.length === 2) ? `${cam.resolution[0]}x${cam.resolution[1]}` : 'frame';
-                document.getElementById('stream-hud').innerText = `${resLabel} @ ${h.pipeline_fps} FPS`;
+                document.getElementById('stream-hud').innerText = `${resLabel} · infer ${infer} · decode ${decode}`;
             } catch (e) {}
         }
 
