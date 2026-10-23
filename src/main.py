@@ -10,7 +10,7 @@ from typing import Dict, List, Any, Optional
 
 from src.ingestion.stream_reader import StreamReader
 from src.perception.detector import PersonDetector
-from src.perception.tracker import SimpleByteTracker
+from src.perception.tracker import SimpleByteTracker, tracker_params_for_infer_gap
 from src.perception.performance import limit_cameras, resolve_performance
 from src.perception.detector_backend import BACKEND_RFDETR, backend_label
 from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_FAST, TIER_SLOW
@@ -592,8 +592,28 @@ class EdgePipeline:
             "glass_views": cam.get("glass_views", []),
         }, sort_keys=True)
 
+    def _make_tracker(self) -> SimpleByteTracker:
+        """ByteTrack knobs aligned with ``infer_every_n`` (skipped frames break IDs)."""
+        t_cfg = self.pipeline_cfg.get("tracking", {}) or {}
+        scaled = tracker_params_for_infer_gap(
+            int(getattr(self, "infer_every_n", 1) or 1),
+            track_buffer=int(t_cfg.get("track_buffer", 45)),
+            match_thresh=float(t_cfg.get("match_thresh", 0.45)),
+            min_hits=int(t_cfg.get("min_hits", 4)),
+            track_thresh=float(t_cfg.get("track_thresh", 0.5)),
+        )
+        return SimpleByteTracker(
+            max_age=scaled["max_age"],
+            iou_threshold=scaled["iou_threshold"],
+            min_hits=scaled["min_hits"],
+            stationary_policy=t_cfg.get("stationary_policy", "tag"),
+            track_thresh=scaled["track_thresh"],
+            dist_gate=scaled["dist_gate"],
+            pred_dist_gate=scaled["pred_dist_gate"],
+            infer_every_n=scaled["infer_every_n"],
+        )
+
     def _build_camera_context(self, cam: Dict[str, Any]) -> Dict[str, Any]:
-        t_cfg = self.pipeline_cfg.get("tracking", {})
         cam_id = cam["id"]
         source = cam.get("source", "")
         fps_target = int(cam.get("fps_target", 15))
@@ -630,13 +650,7 @@ class EdgePipeline:
             "fps_target": fps_target,
             "calibration_sig": self._calibration_signature(cam),
             "reader": StreamReader(camera_id=cam_id, source=source, fps_target=fps_target),
-            "tracker": SimpleByteTracker(
-                max_age=t_cfg.get("track_buffer", 30),
-                iou_threshold=t_cfg.get("match_thresh", 0.45),
-                min_hits=t_cfg.get("min_hits", 4),
-                stationary_policy=t_cfg.get("stationary_policy", "tag"),
-                track_thresh=t_cfg.get("track_thresh", 0.5)
-            ),
+            "tracker": self._make_tracker(),
             "tripwires": tripwires,
             "zones": zones,
             "queues": queues,
@@ -755,6 +769,9 @@ class EdgePipeline:
 
                         # 2. Tracking
                         active_tracks = ctx["tracker"].update(detections, frame_time)
+                        # Early tracks (≥2 hits): tripwire needs ground-point history during
+                        # min_hits confirmation or entrance crossings are lost forever.
+                        early_tracks = ctx["tracker"].early_tracks()
                         # Staff polygons first — sticky tags, then customer-only analytics
                         for staff_zone in ctx.get("staff_zones", []):
                             staff_zone.update(active_tracks, frame_time)
@@ -762,6 +779,12 @@ class EdgePipeline:
                                 if frame_time - entered >= self.staff_min_seconds:
                                     ctx["staff_ids"].add(tid)
                         customers = [t for t in active_tracks if t.track_id not in ctx["staff_ids"]]
+                        early_customers = [
+                            t for t in early_tracks if t.track_id not in ctx["staff_ids"]
+                        ]
+                        for t in customers:
+                            t.dwell_s = 0.0
+                            t.zone_id = None
                         ctx["current_active_tracks"] = customers
                         ctx["last_overlay_tracks"] = active_tracks
                         ctx["staff_visible"] = len(active_tracks) - len(customers)
@@ -776,7 +799,7 @@ class EdgePipeline:
                         # 3. Spatial Analytics (customers only)
                         crossing_events: List[Dict[str, Any]] = []
                         for tw in ctx["tripwires"]:
-                            crossing_events.extend(tw.update(customers, frame_time))
+                            crossing_events.extend(tw.update(early_customers, frame_time))
                         if crossing_events:
                             self._persist_crossing_events(cam_id, crossing_events)
                             recent = ctx.setdefault("recent_trip_in", {})
@@ -1258,7 +1281,10 @@ class EdgePipeline:
         zones_out = []
         dwells = []
         for z in ctx.get("zones", []):
-            m = z.get_metrics() if hasattr(z, "get_metrics") else {}
+            try:
+                m = z.get_metrics(now=frame_time) if hasattr(z, "get_metrics") else {}
+            except TypeError:
+                m = z.get_metrics() if hasattr(z, "get_metrics") else {}
             dwell = float(m.get("avg_dwell_seconds", 0.0) or 0.0)
             if dwell > 0:
                 dwells.append(dwell)
@@ -1271,6 +1297,8 @@ class EdgePipeline:
                 "visits": visits,
                 "total_visits": visits,
                 "avg_dwell_seconds": dwell,
+                "active_dwell_seconds": m.get("active_dwell_seconds") or [],
+                "dwell_by_track": m.get("dwell_by_track") or {},
             }
             for attr in ("journey_stage", "stage_tag"):
                 val = getattr(z, attr, None)
@@ -1423,9 +1451,13 @@ class EdgePipeline:
                     "name": getattr(tw, "name", "tripwire"),
                     "in_count": tw.in_count,
                     "out_count": tw.out_count,
+                    "session_in": int(getattr(tw, "session_in", tw.in_count) or 0),
+                    "session_out": int(getattr(tw, "session_out", tw.out_count) or 0),
                 }
                 for tw in ctx.get("tripwires", [])
             ],
+            "session_in": tripwire_in,
+            "session_out": tripwire_out,
             "queues": queues_out,
             "zones": zones_out,
             "staff_zones": staff_zones,
@@ -1516,6 +1548,17 @@ class EdgePipeline:
                 "cross_cam_fusion": False,
             },
             "track_ids": [t.track_id for t in customers[:40]],
+            "tracks": [
+                t.to_live_dict() if hasattr(t, "to_live_dict") else {
+                    "id": int(t.track_id),
+                    "track_id": int(t.track_id),
+                    "first_seen": float(getattr(t, "first_seen", 0) or 0),
+                    "last_seen": float(getattr(t, "last_seen", 0) or 0),
+                    "dwell_s": round(float(getattr(t, "dwell_s", 0) or 0), 2),
+                    "ground_point": list(getattr(t, "ground_point", getattr(t, "foot_point", (0, 0)))),
+                }
+                for t in customers[:40]
+            ],
         }
 
         cam_path = os.path.join(self.live_dir, f"{cam_id}.json")
@@ -1632,11 +1675,38 @@ class EdgePipeline:
         ctx["staff_ids"] = set()
 
         for tw in ctx.get("tripwires", []):
+            reset_tw = getattr(tw, "reset_pass", None)
+            if callable(reset_tw):
+                try:
+                    reset_tw()
+                    continue
+                except Exception:
+                    pass
             try:
                 tw.in_count = 0
                 tw.out_count = 0
+                if hasattr(tw, "session_in"):
+                    tw.session_in = 0
+                if hasattr(tw, "session_out"):
+                    tw.session_out = 0
+                crossed = getattr(tw, "_crossed_track_ids", None)
+                if crossed is not None:
+                    crossed.clear()
             except Exception:
                 pass
+
+        # Fresh identities on the next pass — lingering IDs across a video loop
+        # cause LOS/trajectory glitches and suppress re-crossings.
+        try:
+            tracker = ctx.get("tracker")
+            if tracker is not None and hasattr(tracker, "reset"):
+                tracker.reset()
+            else:
+                ctx["tracker"] = self._make_tracker()
+        except Exception:
+            ctx["tracker"] = self._make_tracker()
+        ctx["current_active_tracks"] = []
+        ctx["last_overlay_tracks"] = []
 
         for z in list(ctx.get("zones", []) or []) + list(ctx.get("staff_zones", []) or []):
             reset = getattr(z, "reset_pass", None)

@@ -202,10 +202,11 @@ class DebugOverlay:
                 cv2.polylines(canvas, [body], isClosed=True, color=color, thickness=2)
                 cv2.polylines(canvas, [foot_q], isClosed=True, color=color, thickness=1)
 
-            foot = (int(track.foot_point[0]), int(track.foot_point[1]))
+            gp = getattr(track, "ground_point", None) or track.foot_point
+            foot = (int(gp[0]), int(gp[1]))
             cv2.circle(canvas, foot, 4, (0, 0, 255), -1)
 
-            # Fade trajectory trail (older = dimmer)
+            # Fade trajectory trail / LOS (older = dimmer)
             hist = track.history
             n = len(hist)
             for i in range(1, n):
@@ -215,7 +216,14 @@ class DebugOverlay:
                 g = int(90 + 130 * t)
                 cv2.line(canvas, pt1, pt2, (g, g, g), 1)
 
-            label = f"ID:{track.track_id}" + (" STAFF" if is_staff else " (still)" if is_stationary else "")
+            dwell = float(getattr(track, "dwell_s", 0.0) or 0.0)
+            label = f"ID:{track.track_id}"
+            if is_staff:
+                label += " STAFF"
+            elif is_stationary:
+                label += " (still)"
+            if dwell >= 1.0:
+                label += f" {dwell:.0f}s"
             label_x = int(b[0] + shear)
             cv2.putText(
                 canvas,

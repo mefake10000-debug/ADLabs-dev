@@ -57,9 +57,13 @@ tracking:
   tracker_type: "bytetrack"
   track_thresh: 0.50          # Bar for STARTING a new track. Detections below this (but above
                                # perception.confidence_threshold) can only extend an existing track.
-  match_thresh: 0.45          # Tuned IoU matching to prevent ID switching & track fragmentation
-  track_buffer: 45            # Max frames to keep lost track alive
-  min_hits: 4                 # Temporal confirmation to eliminate 1-frame detector flicker
+  match_thresh: 0.45          # Base IoU match; EdgePipeline scales down when infer_every_n > 1
+  track_buffer: 60            # Update-ticks to keep a lost track (scaled up with infer_every_n).
+                               # Balanced (n=2) → ~81 ticks; fast (n=3) → ~102. Skipped decode
+                               # frames must not mint new IDs or tripwire/dwell break.
+  min_hits: 3                 # Confirm sooner under sparse infer; still drops 1-frame flicker.
+                               # Tripwire also sees early_tracks (≥2 hits) so crossings during
+                               # confirmation are not lost.
   stationary_policy: "tag"    # "tag": stationary tracks (e.g. someone standing still in a queue)
                                # are still returned, with is_stationary=True, so zones/queues can
                                # count them -- only the tripwire ignores the flag (it already did).

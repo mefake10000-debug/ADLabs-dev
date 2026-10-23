@@ -580,6 +580,10 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "field_status": snap.get("field_status"),
                 "journey": snap.get("journey"),
                 "tripwires": snap.get("tripwires"),
+                "tracks": snap.get("tracks"),
+                "track_ids": snap.get("track_ids"),
+                "session_in": _snap_int("session_in", _snap_int("total_visitors", 0)),
+                "session_out": _snap_int("session_out", _snap_int("total_exits", 0)),
             })
         elif snap and snap.get("_stale"):
             result["snapshot_stale"] = True

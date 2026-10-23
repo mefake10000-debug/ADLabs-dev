@@ -1,6 +1,35 @@
 import time
 from typing import List, Dict, Any, Tuple, Optional
 
+
+def tracker_params_for_infer_gap(
+    infer_every_n: int = 1,
+    *,
+    track_buffer: int = 45,
+    match_thresh: float = 0.45,
+    min_hits: int = 4,
+    track_thresh: float = 0.5,
+) -> Dict[str, Any]:
+    """Scale ByteTrack association for skipped detect frames.
+
+    ``infer_every_n`` > 1 means consecutive tracker updates are N decoded frames
+    apart. People move farther, IoU drops, and a tight distance gate mints new
+    IDs — which breaks dwell continuity and tripwire crossings. Buffer stays in
+    *update ticks* (not wall frames); distance gates grow with the gap.
+    """
+    n = max(1, int(infer_every_n or 1))
+    gap = n - 1
+    return {
+        "max_age": max(int(track_buffer), int(round(track_buffer * (1.0 + 0.35 * gap)))),
+        "iou_threshold": max(0.25, float(match_thresh) - 0.05 * gap),
+        "min_hits": max(2, int(min_hits) - gap),
+        "track_thresh": float(track_thresh),
+        "dist_gate": 65.0 * (1.0 + 0.55 * gap),
+        "pred_dist_gate": 80.0 * (1.0 + 0.55 * gap),
+        "infer_every_n": n,
+    }
+
+
 class Track:
     def __init__(self, track_id: int, bbox: List[float], confidence: float, timestamp: float):
         self.track_id = track_id
@@ -13,17 +42,41 @@ class Track:
         self.state = "active"
         self.is_stationary = False
         self.total_displacement = 0.0
+        # Zone / queue dwell while currently inside (seconds). Updated by analytics.
+        self.dwell_s: float = 0.0
+        self.zone_id: Optional[str] = None
 
         foot = ((bbox[0] + bbox[2]) / 2.0, bbox[3])
         self.initial_foot = foot
         self.history: List[Tuple[float, float, float]] = [(foot[0], foot[1], timestamp)]
 
-        # --- NEW: velocity estimate, in pixels/second, along each axis ---
+        # velocity estimate, pixels/second, along each axis
         self.velocity: Tuple[float, float] = (0.0, 0.0)
 
     @property
     def foot_point(self) -> Tuple[float, float]:
+        """Bbox bottom-center — contact with the ground plane in image space."""
         return ((self.bbox[0] + self.bbox[2]) / 2.0, self.bbox[3])
+
+    @property
+    def ground_point(self) -> Tuple[float, float]:
+        """Alias for foot_point (tripwire / zone / overlay contract)."""
+        return self.foot_point
+
+    def to_live_dict(self) -> Dict[str, Any]:
+        gx, gy = self.ground_point
+        return {
+            "id": int(self.track_id),
+            "track_id": int(self.track_id),
+            "first_seen": float(self.first_seen),
+            "last_seen": float(self.last_seen),
+            "dwell_s": round(float(self.dwell_s or 0.0), 2),
+            "ground_point": [round(float(gx), 1), round(float(gy), 1)],
+            "bbox": [round(float(v), 1) for v in self.bbox],
+            "confidence": round(float(self.confidence), 3),
+            "zone_id": self.zone_id,
+            "is_stationary": bool(self.is_stationary),
+        }
 
     def _update_velocity(self):
         """Estimate current velocity from the last few history points.
@@ -83,6 +136,7 @@ class Track:
         if self.time_since_update > max_age:
             self.state = "lost"
 
+
 class SimpleByteTracker:
     """Lightweight IoU + Spatial distance multi-object tracker with
     temporal confirmation, stationary tagging, and velocity-predicted
@@ -107,7 +161,10 @@ class SimpleByteTracker:
                                            # "suppress": old behaviour, drop them from the
                                            # returned list entirely (e.g. for known cardboard-
                                            # cutout/mannequin environments).
-        track_thresh: float = 0.5
+        track_thresh: float = 0.5,
+        dist_gate: float = 65.0,
+        pred_dist_gate: float = 80.0,
+        infer_every_n: int = 1,
     ):
         if stationary_policy not in ("tag", "suppress"):
             raise ValueError("stationary_policy must be 'tag' or 'suppress'")
@@ -116,7 +173,15 @@ class SimpleByteTracker:
         self.min_hits = min_hits
         self.stationary_policy = stationary_policy
         self.track_thresh = track_thresh
+        self.dist_gate = float(dist_gate)
+        self.pred_dist_gate = float(pred_dist_gate)
+        self.infer_every_n = max(1, int(infer_every_n or 1))
         self.tracks: List[Track] = []
+        self._next_id = 1
+
+    def reset(self):
+        """Clear identities (sample-video loop / session boundary)."""
+        self.tracks = []
         self._next_id = 1
 
     def update(self, detections: List[Dict[str, Any]], timestamp: float) -> List[Track]:
@@ -164,23 +229,33 @@ class SimpleByteTracker:
 
         return self._active_list()
 
-    def _active_list(self) -> List[Track]:
+    def _active_list(self, min_hits: Optional[int] = None) -> List[Track]:
+        need = self.min_hits if min_hits is None else int(min_hits)
         active_list = []
         for t in self.tracks:
             if t.state != "active":
                 continue
             if t.time_since_update > 1:
                 continue
-            if t.hits < self.min_hits:
+            if t.hits < need:
                 continue
             if self.stationary_policy == "suppress" and t.is_stationary:
                 continue
             active_list.append(t)
         return active_list
 
+    def early_tracks(self) -> List[Track]:
+        """Tracks visible this update with ≥2 hits (enough history for tripwire).
+
+        Confirmed ``min_hits`` filtering hides people during temporal confirmation.
+        Tripwire must still see their ground-point trail or entrance crossings are
+        lost forever (segment already same-side of the line when the ID appears).
+        """
+        return self._active_list(min_hits=2)
+
     def _match(self, track_indices: List[int], detections: List[Dict[str, Any]], timestamp: float):
-        """3-stage greedy matcher (IoU -> last-position distance -> velocity-predicted
-        distance) between the given subset of self.tracks (by index) and detections.
+        """3-stage greedy matcher (IoU -> last foot distance -> velocity-predicted
+        foot distance) between the given subset of self.tracks (by index) and detections.
         Returns (matched_track_idx, matched_det_idx, unmatched_det_idx, unmatched_track_idx)."""
         num_dets = len(detections)
         if num_dets == 0 or not track_indices:
@@ -209,23 +284,24 @@ class SimpleByteTracker:
             else:
                 break
 
-        # Stage 2: distance from LAST KNOWN position (catches small/recent jitter)
+        # Stage 2: distance from LAST KNOWN ground point (not box center — keeps
+        # association coherent with tripwire / zone / overlay foot dots).
         while len(unmatched_tracks) > 0 and len(unmatched_dets) > 0:
-            min_dist = 65.0
+            min_dist = self.dist_gate
             best_t, best_d = -1, -1
             for t in unmatched_tracks:
-                t_box = self.tracks[t].bbox
-                t_cx = (t_box[0] + t_box[2]) / 2.0
-                t_cy = (t_box[1] + t_box[3]) / 2.0
+                track = self.tracks[t]
+                t_fx, t_fy = track.foot_point
+                t_box = track.bbox
                 t_h = t_box[3] - t_box[1]
                 for d in unmatched_dets:
                     d_box = detections[d]["bbox"]
-                    d_cx = (d_box[0] + d_box[2]) / 2.0
-                    d_cy = (d_box[1] + d_box[3]) / 2.0
+                    d_fx = (d_box[0] + d_box[2]) / 2.0
+                    d_fy = d_box[3]
                     d_h = d_box[3] - d_box[1]
                     if abs(t_h - d_h) / max(1.0, t_h) > 0.4:
                         continue
-                    dist = ((t_cx - d_cx) ** 2 + (t_cy - d_cy) ** 2) ** 0.5
+                    dist = ((t_fx - d_fx) ** 2 + (t_fy - d_fy) ** 2) ** 0.5
                     if dist < min_dist:
                         min_dist = dist
                         best_t, best_d = t, d
@@ -237,9 +313,9 @@ class SimpleByteTracker:
             else:
                 break
 
-        # Stage 3: velocity-PREDICTED position distance (see predicted_foot_point)
+        # Stage 3: velocity-PREDICTED ground point distance
         while len(unmatched_tracks) > 0 and len(unmatched_dets) > 0:
-            min_dist = 80.0  # slightly more forgiving - prediction has some error
+            min_dist = self.pred_dist_gate
             best_t, best_d = -1, -1
             for t in unmatched_tracks:
                 track = self.tracks[t]

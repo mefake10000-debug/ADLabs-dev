@@ -354,7 +354,7 @@ class TestStaffZones(unittest.TestCase):
         self.pipeline.store_id = "test_store"
         self.pipeline.device_id = "test_edge"
         self.pipeline.local_buffer = LocalBuffer(db_path=self.db_path)
-        tripwires, zones, queues, staff_zones = self.pipeline._build_analytics({
+        tripwires, zones, queues, staff_zones, _glass = self.pipeline._build_analytics({
             "tripwires": [{"id": "door", "line": [[800, 0], [800, 700]], "in_direction": "top_to_bottom"}],
             "zones": [{"id": "counter", "polygon": self.STAFF_AREA, "type": "staff"},
                       {"id": "till", "polygon": self.QUEUE_AREA, "type": "queue"}],
