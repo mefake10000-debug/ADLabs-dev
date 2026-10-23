@@ -34,6 +34,7 @@ from src.analytics.glass_analyzer import GlassROIAnalyzer, build_glass_block
 from src.analytics.floor_analytics import FloorAnalytics
 from src.analytics.alerts_engine import AlertsEngine
 from src.analytics.safety_analytics import SafetyAnalytics
+from src.analytics.journey import build_journey_block
 from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
@@ -185,9 +186,16 @@ class EdgePipeline:
         # untouched. These models add the retail-analytics detail the fast tier cannot
         # see: body behaviour, head orientation, population cohorts and products.
         self.models_cfg = self.pipeline_cfg.get("models", {}) or {}
-        # Fast mode forces enrichment off. Quality turns the tier on and, if every
-        # sub-block is still at the fast-tier false default, enables the common set.
-        if self.perf_mode == "fast":
+        # Enrichment tier is EXPLICIT: fast mode forces it off; quality mode keeps the
+        # models.* yaml gating truthful (no silent re-enable). EDGE_ENRICHMENT overrides.
+        _env_enrichment = os.environ.get("EDGE_ENRICHMENT")
+        if _env_enrichment is not None:
+            self.models_enabled = _env_enrichment not in ("", "0", "false", "False")
+            logger.info(
+                f"EDGE_ENRICHMENT={_env_enrichment} env override — enrichment "
+                f"{'ON' if self.models_enabled else 'OFF'}"
+            )
+        elif self.perf_mode == "fast":
             self.models_enabled = False
         else:
             self.models_enabled = bool(self.models_cfg.get("enabled", True))
@@ -582,7 +590,27 @@ class EdgePipeline:
         t_cfg = self.pipeline_cfg.get("tracking", {})
         cam_id = cam["id"]
         source = cam.get("source", "")
-        fps_target = cam.get("fps_target", 15)
+        fps_target = int(cam.get("fps_target", 15))
+
+        # Never chase FPS the source cannot deliver (sample videos are 15 fps; decode
+        # and inference each add their own caps downstream). Clamp once, up front.
+        if source and not source.startswith(("rtsp://", "rtsps://", "http://")):
+            src_fps = 0.0
+            try:
+                probe = cv2.VideoCapture(source)
+                if probe.isOpened():
+                    src_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+                probe.release()
+            except Exception:
+                src_fps = 0.0
+            if src_fps >= 1.0:
+                clamped = int(min(fps_target, max(1, round(src_fps))))
+                if clamped != fps_target:
+                    logger.info(
+                        f"[{cam_id}] fps_target {fps_target} -> {clamped} "
+                        f"(source caps at {src_fps:.1f} fps)"
+                    )
+                    fps_target = clamped
 
         tripwires, zones, queues, staff_zones, glass_rois = self._build_analytics(cam)
 
@@ -614,6 +642,9 @@ class EdgePipeline:
             "staff_ids": set(),
             "staff_visible": 0,
             "tracked_ids_today": set(),
+            "reader_loop_seen": 0,
+            "unique_total_all_passes": 0,
+            "sim_pass_history": [],
             "heatmap": None,
             "last_heatmap_write": 0.0,
             "last_unique_count": 0,
@@ -728,6 +759,12 @@ class EdgePipeline:
                         ctx["current_active_tracks"] = customers
                         ctx["last_overlay_tracks"] = active_tracks
                         ctx["staff_visible"] = len(active_tracks) - len(customers)
+                        # Sample footage replays: on the loop boundary archive this pass's
+                        # uniques and reset per-pass counters (looping otherwise inflates).
+                        _reader = ctx.get("reader")
+                        _loops = int(getattr(_reader, "loop_count", 0) or 0)
+                        if _loops != ctx.get("reader_loop_seen", 0):
+                            self._reset_sim_pass(cam_id, ctx, _loops)
                         ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
 
                         # 3. Spatial Analytics (customers only)
@@ -1219,13 +1256,21 @@ class EdgePipeline:
             dwell = float(m.get("avg_dwell_seconds", 0.0) or 0.0)
             if dwell > 0:
                 dwells.append(dwell)
-            zones_out.append({
+            visits = int(m.get("total_visits", m.get("visits", 0)) or 0)
+            row = {
                 "id": getattr(z, "zone_id", None) or getattr(z, "id", "zone"),
                 "name": getattr(z, "name", "zone"),
                 "type": getattr(z, "zone_type", None) or getattr(z, "type", "dwell"),
                 "occupancy": m.get("current_occupancy", m.get("occupancy", 0)),
+                "visits": visits,
+                "total_visits": visits,
                 "avg_dwell_seconds": dwell,
-            })
+            }
+            for attr in ("journey_stage", "stage_tag"):
+                val = getattr(z, attr, None)
+                if val:
+                    row[attr] = val
+            zones_out.append(row)
 
         staff_zones = []
         staff_block_zones = []
@@ -1324,6 +1369,19 @@ class EdgePipeline:
             "camera_id": cam_id,
             "camera_name": ctx.get("name", cam_id),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "video_loop": {
+                "loop_count": int(getattr(ctx.get("reader"), "loop_count", 0) or 0),
+                "is_simulated": bool(getattr(ctx.get("reader"), "is_file", False)),
+                "unique_this_pass": len(ctx.get("tracked_ids_today", set()) or set()),
+                "unique_total_all_passes": int(ctx.get("unique_total_all_passes", 0) or 0),
+                "source_fps": float(getattr(ctx.get("reader"), "source_fps", 0.0) or 0.0),
+                "counting_mode": (
+                    "per_pass (sample video replays)"
+                    if getattr(ctx.get("reader"), "is_file", False)
+                    else "tripwire_cumulative"
+                ),
+            },
             "frame_time": frame_time,
             "people_now": len(customers),
             "staff_now": int(ctx.get("staff_visible", 0) or 0),
@@ -1358,6 +1416,9 @@ class EdgePipeline:
             "queues": queues_out,
             "zones": zones_out,
             "staff_zones": staff_zones,
+            "staff": {"zones": staff_zones},
+            "alerts": alerts_block,
+            "journey": build_journey_block(zones_out),
             "products_top": products_top,
             "entrance": entrance_block,
             "stop_rate": entrance_block.get("stop_rate"),
@@ -1536,6 +1597,102 @@ class EdgePipeline:
             json.dump(store, f)
         os.replace(store_tmp, store_path)
 
+    def _reset_sim_pass(self, cam_id: str, ctx: Dict[str, Any], loop_count: int):
+        """Loop boundary on a replaying sample video: archive this pass's uniques and
+        reset per-pass counters so 'unique shoppers' counts real new appearances only.
+
+        Cumulative style metrics (heatmap, attention, engagement) keep accruing;
+        everything answering 'how many shoppers today/entered' becomes per-pass + archived.
+        """
+        archived = len(ctx.get("tracked_ids_today", set()) or set())
+        ctx["unique_total_all_passes"] = int(ctx.get("unique_total_all_passes", 0) or 0) + archived
+        ctx["tracked_ids_today"] = set()
+        ctx["reader_loop_seen"] = loop_count
+        ctx["last_unique_count"] = 0
+        ctx["last_in_count"] = 0
+        ctx["last_out_count"] = 0
+        ctx["recent_trip_in"] = {}
+        ctx["staff_ids"] = set()
+
+        for tw in ctx.get("tripwires", []):
+            try:
+                tw.in_count = 0
+                tw.out_count = 0
+            except Exception:
+                pass
+
+        for z in list(ctx.get("zones", []) or []) + list(ctx.get("staff_zones", []) or []):
+            reset = getattr(z, "reset_pass", None)
+            if callable(reset):
+                try:
+                    reset()
+                except Exception:
+                    pass
+                continue
+            try:
+                z.active_tracks_in_zone.clear()
+                z.completed_dwells.clear()
+            except Exception:
+                pass
+
+        for q in list(ctx.get("queues", []) or []):
+            reset = getattr(q, "reset_pass", None)
+            if callable(reset):
+                try:
+                    reset()
+                except Exception:
+                    pass
+                continue
+            try:
+                q.zone.active_tracks_in_zone.clear()
+                q.zone.completed_dwells.clear()
+                q._episodes.clear()
+                q._completed.clear()
+                q._series.clear()
+                q.queue_length = 0
+                q.avg_wait_seconds = 0.0
+                q.alert_active = False
+            except Exception:
+                pass
+
+        ctx.setdefault("sim_pass_history", []).append({
+            "loop_count": loop_count,
+            "archived_unique": archived,
+            "total_all_passes": ctx["unique_total_all_passes"],
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+        logger.info(
+            f"[{cam_id}] Sample loop #{loop_count} boundary — per-pass counters reset "
+            f"({archived} uniques archived, {ctx['unique_total_all_passes']} total across passes)"
+        )
+
+    def _persist_analytic_events(self, cam_id: str, events: List[Dict[str, Any]]):
+        """Persist additive queue episode events (join/leave) on the durable channel.
+
+        Non-trip events reuse wire_id/direction columns (event name in direction) so
+        existing exporters and UIs keep working; unknown values are ignored by old UIs.
+        Transient per-frame thresholds (queue_wait_ms_reached) are skipped.
+        """
+        skip = {"queue_wait_ms_reached", "glass_stop_reached", "glass_roi_ping"}
+        for event in events:
+            et = event.get("event") or event.get("direction")
+            if et in skip:
+                continue
+            tid = event.get("track_id")
+            ts = event.get("timestamp") or time.time()
+            try:
+                self.local_buffer.save_event({
+                    "store_id": self.store_id,
+                    "device_id": self.device_id,
+                    "camera_id": cam_id,
+                    "wire_id": event.get("wire_id") or event.get("queue_id") or str(et or "analytic"),
+                    "track_id": int(tid or 0),
+                    "direction": str(et or event.get("direction") or "analytic"),
+                    "event_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(float(ts))),
+                })
+            except Exception as e:
+                logger.debug(f"Analytic event persist error: {e}")
+
     def _device_registration_loop(self):
         import time as _time
         while self.running:
@@ -1695,8 +1852,11 @@ class EdgePipeline:
 
         logger.info(
             f"[{cam_id}] People Count: {current_occupancy} live | "
-            f"New Shoppers: +{delta_in} | Total Unique: {len(ctx['tracked_ids_today'])} | "
-            f"Decode FPS: {getattr(ctx.get('reader'), 'fps_actual', 0.0)} | Inference FPS: {ctx.get('processed_fps', 0.0)}"
+            f"New Shoppers: +{delta_in} | Unique (pass): {len(ctx['tracked_ids_today'])} | "
+            f"Unique across passes: {int(ctx.get('unique_total_all_passes', 0) or 0)} | "
+            f"Loop: {int(getattr(ctx.get('reader'), 'loop_count', 0) or 0)} | "
+            f"Decode FPS: {getattr(ctx.get('reader'), 'fps_actual', 0.0)} | "
+            f"Inference FPS: {ctx.get('processed_fps', 0.0)}"
         )
         if ctx.get("slow_ticks", 0):
             logger.info(

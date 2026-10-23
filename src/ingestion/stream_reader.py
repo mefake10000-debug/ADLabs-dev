@@ -32,6 +32,10 @@ class StreamReader:
         self.fps_actual = 0.0
         self.dropped_frames = 0
         self.is_connected = False
+        # Sample-video loop detection: every EOF wrap bumps this. The pipeline uses it
+        # to reset per-pass counters (looping footage would otherwise inflate uniques).
+        self.loop_count = 0
+        self.source_fps = 0.0
 
     def start(self):
         if self.running:
@@ -69,6 +73,11 @@ class StreamReader:
             return False
 
         self.is_connected = True
+        if self.is_file:
+            try:
+                self.source_fps = round(float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0), 2)
+            except Exception:
+                self.source_fps = 0.0
         logger.info(f"Successfully connected to stream: {self.camera_id}")
         return True
 
@@ -95,6 +104,10 @@ class StreamReader:
                 if self.is_file:
                     # Loop video file continuously
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self.loop_count += 1
+                    logger.info(
+                        f"Loop #{self.loop_count} wrapped for {self.camera_id} (sample video replays)"
+                    )
                     time.sleep(0.05)
                     continue
                 else:

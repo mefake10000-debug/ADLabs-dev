@@ -1,4 +1,4 @@
-"""NFC tap stub + industry status on /api/v1/live — no synthetic taps."""
+"""NFC tap stub + retail_roles (floor) maturity on /api/v1/live — no synthetic taps."""
 
 import os
 import sys
@@ -40,9 +40,14 @@ class TestNfcIndustryApi(unittest.TestCase):
         self.assertEqual(data["nfc"]["recent_taps"], [])
         self.assertEqual(data["nfc"]["tap_count_session"], 0)
         self.assertIn("connect_hint", data["nfc"])
+        self.assertIn("retail_roles", data)
+        self.assertEqual(data["retail_roles"]["schema"], "floor_roles_v1")
+        self.assertEqual(data["retail_roles"]["entrance"]["stop_rate"], "FUTURE")
+        self.assertEqual(data["retail_roles"]["shelf"]["shelf_qa_moondream"], "FUTURE")
+        # Deprecated industry alias still present for older clients.
         self.assertIn("industry", data)
+        self.assertTrue(data["industry"].get("_deprecated"))
         self.assertEqual(data["industry"]["fashion"]["nfc_taps"], "NEEDS-HARDWARE")
-        self.assertEqual(data["industry"]["manufacturing"]["defects"], "FUTURE")
 
     def test_post_tap_then_live_lists_it(self):
         resp = self.client.post(
@@ -67,6 +72,7 @@ class TestNfcIndustryApi(unittest.TestCase):
         self.assertEqual(len(live["nfc"]["recent_taps"]), 1)
         self.assertEqual(live["nfc"]["recent_taps"][0]["product_id"], "SKU-RED-TEE-42")
         self.assertEqual(live["nfc"]["recent_taps"][0]["zone"], "fitting_wall_a")
+        self.assertEqual(live["retail_roles"]["shelf"]["nfc_optional"], "LIVE")
         self.assertEqual(live["industry"]["fashion"]["nfc_taps"], "LIVE")
 
     def test_empty_product_id_rejected(self):
