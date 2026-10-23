@@ -7,37 +7,40 @@ edge:
 
 # --- Live FPS / demo performance ----------------------------------------------
 # Docker on Mac ARM is CPU-only: pose + YuNet + YOLO-World/CLIP on every stream
-# collapses infer FPS to ~0.3–1. Default is **balanced** so people in frame are
-# detected reliably; use fast only when you need max display FPS and accept misses.
+# collapses infer FPS to ~0.3–1. Default is **detect** (yolo26s, imgsz 640,
+# infer every 2 frames, enrichment off) so people in frame are not missed.
+# fast/balanced are opt-in speed. quality turns enrichment on. RF-DETR is opt-in only.
 #
 # Switch modes (either works):
-#   EDGE_PERF_MODE=fast|balanced|quality # compose / shell env (wins over yaml)
-#   performance.mode: fast|balanced|quality  # this file
+#   EDGE_PERF_MODE=fast|balanced|detect|quality # compose / shell env (wins over yaml)
+#   performance.mode: fast|balanced|detect|quality  # this file
 #   EDGE_MAX_CAMERAS=2                   # all configured views; reduce only for a measured FPS budget
 #   EDGESIGHT_DETECT_MODEL=…             # optional YOLO weight override
-#   DETECTOR_BACKEND=yolo26|rfdetr       # fast/balanced→yolo26; quality→rfdetr (SOTA) unless set
+#   DETECTOR_BACKEND=yolo26|rfdetr       # Ultralytics unless rfdetr is set explicitly
 #   RFDETR_VARIANT=nano|small            # Apache-2.0 sizes only
 #   OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb  # default foot; nvidia optional
 #   ENABLE_RTMPOSE=1                     # ankle feet via RTMPose ONNX when packed
 #
 # See docs/live-fps.md, docs/foot-tracking-retail-models.md, docs/rfdetr-integration.md.
 performance:
-  mode: "balanced"            # balanced (local demo default) | fast | quality
-  imgsz: 416                  # Ultralytics letterbox; fast=320, quality YOLO=640; RF-DETR fixed
-  infer_every_n: 2            # denser tracks than fast(3); quality uses 1
+  mode: "detect"              # detect (demo default) | balanced | fast | quality
+  imgsz: 640                  # detect/quality letterbox; balanced=416, fast=320 when that mode is selected
+  infer_every_n: 2            # detect skips every other frame; fast uses 3; quality uses 1
   display_every_n: 1          # smooth MJPEG from last tracks between infer frames
   # Docker CPU demo: 1 cam. Peer fusion can raise EDGE_MAX_CAMERAS after measuring KPI floor.
   max_cameras: 1
 
 perception:
-  # Balanced/fast default: YOLO26n. Quality defaults to RF-DETR (Apache SOTA) unless
-  # DETECTOR_BACKEND=yolo26. Leave detector_backend unset to honor EDGE_PERF_MODE defaults.
+  # Demo default: Ultralytics YOLO26s. Nano is fast/balanced. RF-DETR only if
+  # DETECTOR_BACKEND=rfdetr. Leave detector_backend unset.
   # detector_backend: "yolo26"   # optional hard pin: yolo26 | rfdetr
   rfdetr_variant: "nano"         # nano | small (Apache-2.0 only; not XL/2XL)
-  model_name: "models/yolo26n.pt"
-  imgsz: 416
+  model_name: "models/yolo26s.pt"
+  imgsz: 640
   infer_every_n: 2
   display_every_n: 1
+  person_confidence: 0.22     # detect-mode person floor (clamped to 0.20–0.25)
+  object_confidence: 0.45     # store objects only; never fed to ByteTrack
   confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
                                # real person" bar is tracking.track_thresh below; detections between
                                # this floor and track_thresh can only extend a track that already

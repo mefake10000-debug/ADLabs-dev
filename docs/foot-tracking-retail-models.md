@@ -68,7 +68,8 @@ OVERLAY_BOX_STYLE=foot          # default
 ENABLE_RTMPOSE=1                # load ankles when ONNX present
 RTMPOSE_VARIANT=t               # t|s
 RTMPOSE_EVERY_N=4               # throttle for Docker CPU
-EDGE_PERF_MODE=balanced|quality # quality unlocks enrichment / YOLOE / ReID
+EDGE_PERF_MODE=detect          # demo default: yolo26s, imgsz 640, infer every 2
+                                # balanced|fast = nano speed; quality unlocks enrichment
 ```
 
 Prefer **rtmlib** (`pip install rtmlib`); ORT SimCC fallback if rtmlib missing.

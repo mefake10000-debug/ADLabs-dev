@@ -100,8 +100,8 @@ class EdgePipeline:
         self.live_dir = os.path.join(os.path.dirname(db_path), "live")
         os.makedirs(self.live_dir, exist_ok=True)
 
-        # Performance preset (EDGE_PERF_MODE / performance.mode). Balanced is the
-        # Docker Mac ARM demo default — see docs/live-fps.md.
+        # Performance preset (EDGE_PERF_MODE / performance.mode). Detect
+        # (yolo26s @ 640, infer every 2) is the Docker demo default — see docs/live-fps.md.
         self.perf = resolve_performance(self.pipeline_cfg)
         self.perf_mode = self.perf["mode"]
         self.infer_every_n = int(self.perf["infer_every_n"])
@@ -115,7 +115,12 @@ class EdgePipeline:
             or p_cfg.get("model_name")
             or "yolov8n.pt"
         )
-        conf_thresh = p_cfg.get("confidence_threshold", 0.50)
+        # Detect mode pins person conf to 0.20–0.25. Other modes keep yaml.
+        if self.perf.get("person_conf") is not None:
+            conf_thresh = float(self.perf["person_conf"])
+        else:
+            conf_thresh = p_cfg.get("confidence_threshold", 0.50)
+        object_conf = float(self.perf.get("object_conf") or p_cfg.get("object_confidence") or 0.45)
         iou_thresh = p_cfg.get("iou_threshold", 0.45)
         min_height = p_cfg.get("min_height", 85.0)
         min_width = p_cfg.get("min_width", 30.0)
@@ -141,7 +146,10 @@ class EdgePipeline:
             rfdetr_variant=self.perf.get("rfdetr_variant"),
             rfdetr_weights=self.perf.get("rfdetr_weights"),
             pipeline_cfg=self.pipeline_cfg,
+            object_conf=object_conf,
         )
+        self.person_conf = float(conf_thresh)
+        self.object_conf = float(object_conf)
 
         # Mirror person detector into the registry (ultralytics or rfdetr kind).
         self.registry = ModelRegistry(os.getcwd())
@@ -193,8 +201,8 @@ class EdgePipeline:
         # untouched. These models add the retail-analytics detail the fast tier cannot
         # see: body behaviour, head orientation, population cohorts and products.
         self.models_cfg = self.pipeline_cfg.get("models", {}) or {}
-        # Enrichment tier is EXPLICIT: fast/balanced force it off; quality keeps the
-        # models.* yaml gating truthful (no silent re-enable). EDGE_ENRICHMENT overrides.
+        # Enrichment tier is EXPLICIT: fast/balanced/detect force it off; quality keeps
+        # the models.* yaml gating truthful (no silent re-enable). EDGE_ENRICHMENT overrides.
         _env_enrichment = os.environ.get("EDGE_ENRICHMENT")
         if _env_enrichment is not None:
             self.models_enabled = _env_enrichment not in ("", "0", "false", "False")
@@ -202,7 +210,7 @@ class EdgePipeline:
                 f"EDGE_ENRICHMENT={_env_enrichment} env override — enrichment "
                 f"{'ON' if self.models_enabled else 'OFF'}"
             )
-        elif self.perf_mode in ("fast", "balanced"):
+        elif self.perf_mode in ("fast", "balanced", "detect") or not self.perf.get("enrichment"):
             self.models_enabled = False
         else:
             self.models_enabled = bool(self.models_cfg.get("enabled", True))
@@ -653,7 +661,11 @@ class EdgePipeline:
             track_buffer=int(t_cfg.get("track_buffer", 45)),
             match_thresh=float(t_cfg.get("match_thresh", 0.45)),
             min_hits=int(t_cfg.get("min_hits", 4)),
-            track_thresh=float(t_cfg.get("track_thresh", 0.5)),
+            track_thresh=float(
+                self.perf["track_thresh"]
+                if self.perf.get("track_thresh") is not None
+                else t_cfg.get("track_thresh", 0.5)
+            ),
         )
         return SimpleByteTracker(
             max_age=scaled["max_age"],
@@ -1588,6 +1600,8 @@ class EdgePipeline:
                 "tracker": "bytetrack",
                 "perf_mode": getattr(self, "perf_mode", "balanced"),
                 "infer_every_n": int(getattr(self, "infer_every_n", 1) or 1),
+                "person_conf": round(float(getattr(self, "person_conf", 0.0) or 0.0), 3),
+                "object_conf": round(float(getattr(self, "object_conf", 0.0) or 0.0), 3),
                 "overlay_box_style": resolve_overlay_box_style(),
                 "enrichment": bool(getattr(self, "models_enabled", False)),
                 "pose": bool(getattr(self, "rtmpose", None)) or bool(getattr(self, "pose_estimator", None)),

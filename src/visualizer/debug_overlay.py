@@ -45,6 +45,18 @@ _VALID_STYLES = frozenset({"foot", "skeleton", "nvidia", "parallel", "aabb"})
 _ALIAS = {"pallet": "nvidia"}
 
 
+def _iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
+    ix1, iy1 = max(float(a[0]), float(b[0])), max(float(a[1]), float(b[1]))
+    ix2, iy2 = min(float(a[2]), float(b[2])), min(float(a[3]), float(b[3]))
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(1.0, (float(a[2]) - float(a[0])) * (float(a[3]) - float(a[1])))
+    area_b = max(1.0, (float(b[2]) - float(b[0])) * (float(b[3]) - float(b[1])))
+    return inter / (area_a + area_b - inter)
+
+
 def resolve_overlay_box_style(env: Optional[Dict[str, str]] = None) -> str:
     """Default ``foot``. Accepts foot|skeleton|nvidia|parallel|aabb (+ pallet → nvidia)."""
     src = env if env is not None else os.environ
@@ -364,13 +376,16 @@ class DebugOverlay:
                 2,
             )
 
-        # 4a. Optional store objects (never person)
+        # 4a. Optional store objects (never person, never a second box on a body)
+        person_boxes = [list(t.bbox) for t in tracks if getattr(t, "bbox", None)]
         for det in objects or []:
             bbox = det.get("bbox")
             if not bbox or len(bbox) < 4:
                 continue
             name = object_label(det)
             if name.lower() in ("person", "people"):
+                continue
+            if any(_iou_xyxy(bbox, pb) >= 0.50 for pb in person_boxes):
                 continue
             if style == "nvidia":
                 width = max(1.0, float(bbox[2]) - float(bbox[0]))

@@ -1,4 +1,4 @@
-# Live annotated video FPS (fast | balanced | quality)
+# Live annotated video FPS (detect | balanced | fast | quality)
 
 ## Problem
 
@@ -8,21 +8,27 @@ measured **infer FPS was ~0.3–1** while decode stayed ~10–13. The portal MJP
 only updates when annotated JPEGs are written, so the live wall looked frozen.
 
 A later “tighten FPS” pass (`infer_every_n=3`, `imgsz=320` as the only demo
-default) improved display FPS but **missed people in frame**. Local demos now
-default to **balanced**.
+default) improved display FPS but **missed people in frame**. Balanced
+(`yolo26n` @ 416) still missed people on the client clips. Local demos now
+default to **detect**: Ultralytics **yolo26s**, `imgsz=640`, `infer_every_n=2`,
+enrichment off. Person confidence stays in **0.20–0.25**. Store objects use a
+higher bar and are never ByteTrack people. Overlay default is **foot**.
+RF-DETR is opt-in (`DETECTOR_BACKEND=rfdetr`) only.
 
 ## Presets
 
 `EDGE_PERF_MODE` / `performance.mode`:
 
-| Knob | Fast | **Balanced (default)** | Quality |
-|------|------|------------------------|---------|
-| Detector | `models/yolo26n.pt` | `models/yolo26n.pt` | `models/yolo26s.pt` (Ultralytics; RF-DETR only if `DETECTOR_BACKEND=rfdetr`) |
-| `imgsz` | 320 | **416** | 640 (YOLO) |
-| `infer_every_n` | 3 | **2** | 1 |
-| Enrichment (pose/face/CLIP/world) | off | **off** | on (yaml gates) |
-| Soft ReID | off | off | opt-in (`models.reid.enabled`) |
-| `max_cameras` | **1** (compose) | **1** (compose) | null = all yaml cams |
+| Knob | Fast | Balanced | **Detect (default)** | Quality |
+|------|------|----------|----------------------|---------|
+| Detector | `yolo26n` | `yolo26n` | **`yolo26s`** (nano if that file is missing) | `yolo26s` |
+| `imgsz` | 320 | 416 | **640** | 640 |
+| `infer_every_n` | 3 | 2 | **2** | 1 |
+| Person conf | yaml 0.25 | yaml 0.25 | **0.22** (clamped 0.20–0.25) | yaml |
+| Object conf | 0.45 | 0.45 | **0.45** (labels only) | 0.45 |
+| Track start | yaml 0.50 | yaml 0.50 | **0.25** (persons only) | yaml |
+| Enrichment | off | off | **off** | on (yaml gates) |
+| Backend | yolo26 | yolo26 | **yolo26** | yolo26 unless `DETECTOR_BACKEND=rfdetr` |
 
 Display stream is separate from analytics cadence: MJPEG JPEGs refresh every
 `display_every_n` decoded frames using the **last** tracks, so the portal stays
@@ -32,7 +38,10 @@ JPEGs and identical payloads to avoid torn / glitchy frames.
 ## How to switch
 
 ```bash
-# Balanced (local demo default — reliable people boxes)
+# Detect (local demo default — yolo26s @ 640, people not missed)
+EDGE_PERF_MODE=detect OVERLAY_BOX_STYLE=foot docker compose up -d --force-recreate edge-analyzer
+
+# Balanced (lighter nano letterbox)
 EDGE_PERF_MODE=balanced docker compose up -d edge-analyzer
 
 # Fast (max display FPS; may miss distant / small people)
@@ -51,8 +60,10 @@ EDGESIGHT_DETECT_MODEL=models/pack/01-detection/yolo11n.pt \
 
 Or edit `configs/pipeline.yaml` → `performance.mode` / `models.enabled`.
 
-Overlay style (visual only): `OVERLAY_BOX_STYLE=parallel|aabb` — see
-`docs/overlay-parallel-boxes.md`.
+Overlay style (visual only): `OVERLAY_BOX_STYLE=foot` (default) | `skeleton` |
+`nvidia` | `parallel` | `aabb`. Foot is the only person mark in the default
+style — pallet/parallel boxes are opt-in and were a second annotator on the
+body. See `docs/foot-tracking-retail-models.md`.
 
 ## Multi-cam tradeoffs
 
@@ -90,7 +101,8 @@ tier owns MPS (thread-safety). Do **not** run host edge and Compose edge togethe
 
 ```bash
 curl -s http://localhost:8000/api/v1/live | python3 -m json.tool | head -40
-# Look for perf_mode=balanced, imgsz=416, infer_every_n=2, person_detector=yolo26n
+# Look for perf_mode=detect, imgsz=640, infer_every_n=2, person_detector=yolo26s
+# person_conf ~0.22, object_conf ~0.45, overlay_box_style=foot
 # people_now should move with people visible on the MJPEG
 open http://localhost:8000/api/v1/stream/cam_entrance_01
 docker logs adlabs-edge-analyzer 2>&1 | grep -E 'Performance mode|Inference FPS'

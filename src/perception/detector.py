@@ -63,6 +63,7 @@ class PersonDetector:
         rfdetr_weights: Optional[str] = None,
         pipeline_cfg: Optional[Dict[str, Any]] = None,
         detect_store_objects: bool = True,
+        object_conf: float = 0.45,
     ):
         self.backend = (backend or BACKEND_YOLO26).strip().lower()
         if self.backend == BACKEND_YOLO11:
@@ -70,6 +71,8 @@ class PersonDetector:
         if self.backend not in (BACKEND_YOLO26, BACKEND_RFDETR):
             raise ValueError(f"Unknown detector backend '{backend}' (use yolo26|yolo11|rfdetr)")
         self.detect_store_objects = bool(detect_store_objects)
+        # Store fixtures/merch use a higher bar than people so chairs are not people.
+        self.object_conf = float(object_conf if object_conf is not None else 0.45)
 
         self.model_name = model_name
         self.conf_thresh = conf_thresh
@@ -242,6 +245,9 @@ class PersonDetector:
                             det["class_name"] = "person"
                             people.append(det)
                     elif self.detect_store_objects:
+                        # Higher bar than people — a chair must not enter ByteTrack.
+                        if conf < self.object_conf:
+                            continue
                         # Looser geometry for merchandising / fixtures (not anthropometric).
                         w = x2 - x1
                         h = y2 - y1
@@ -254,7 +260,9 @@ class PersonDetector:
                             "label": self._class_name(cls),
                             "class_name": self._class_name(cls),
                         })
-            return self._suppress_contained_duplicates(people), objects[:32]
+            people = self._suppress_contained_duplicates(people)
+            objects = self._drop_objects_on_people(people, objects)
+            return people, objects[:32]
         except Exception as e:
             logger.error(f"Detection error: {e}")
             return [], []
@@ -345,3 +353,47 @@ class PersonDetector:
                 keep.append(det)
 
         return keep
+
+    @staticmethod
+    def _iou(a: List[float], b: List[float]) -> float:
+        ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+        ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+        area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+        return inter / (area_a + area_b - inter)
+
+    @classmethod
+    def _drop_objects_on_people(
+        cls,
+        people: List[Dict[str, Any]],
+        objects: List[Dict[str, Any]],
+        iou_min: float = 0.50,
+    ) -> List[Dict[str, Any]]:
+        """Drop store-object boxes that are the same region as a person.
+
+        A second annotator on the body (person foot + a 'chair' rectangle on the
+        same pixels) reads as a glitch. Handheld items that only partly overlap
+        a person stay labeled.
+        """
+        if not people or not objects:
+            return objects
+        kept: List[Dict[str, Any]] = []
+        for obj in objects:
+            label = str(obj.get("label") or obj.get("class_name") or "").lower()
+            if label in ("person", "people"):
+                continue
+            ob = obj.get("bbox") or []
+            if len(ob) < 4:
+                continue
+            if any(
+                len(person.get("bbox") or []) >= 4
+                and cls._iou(ob, person["bbox"]) >= iou_min
+                for person in people
+            ):
+                continue
+            kept.append(obj)
+        return kept

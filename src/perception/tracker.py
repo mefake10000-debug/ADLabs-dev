@@ -2,6 +2,28 @@ import time
 from typing import List, Dict, Any, Tuple, Optional
 
 
+def is_person_detection(det: Dict[str, Any]) -> bool:
+    """True only for person boxes. Store objects must never open a person track.
+
+    Legacy payloads with bbox + confidence and no class/label stay people
+    (the historical person-only detector). A non-zero class id or a non-person
+    label is rejected even if confidence is high.
+    """
+    if not isinstance(det, dict):
+        return False
+    label = str(det.get("label") or det.get("class_name") or "").strip().lower()
+    cls = det.get("class_id", None)
+    if cls is not None:
+        try:
+            if int(cls) != 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    if label and label not in ("person", "people"):
+        return False
+    return True
+
+
 def tracker_params_for_infer_gap(
     infer_every_n: int = 1,
     *,
@@ -79,7 +101,21 @@ class Track:
         keypoints_xy: Optional[List[List[float]]] = None,
     ) -> None:
         if foot is not None:
-            self.pose_foot = (float(foot[0]), float(foot[1]))
+            nx, ny = float(foot[0]), float(foot[1])
+            if self.pose_foot is not None:
+                px, py = self.pose_foot
+                h = max(1.0, float(self.bbox[3]) - float(self.bbox[1]))
+                dx, dy = nx - px, ny - py
+                dist = (dx * dx + dy * dy) ** 0.5
+                # Clamp a single pose tick so the red foot does not teleport.
+                max_step = 0.28 * h
+                if dist > max_step and dist > 1.0:
+                    nx = px + dx / dist * max_step
+                    ny = py + dy / dist * max_step
+                alpha = 0.45
+                nx = px * (1.0 - alpha) + nx * alpha
+                ny = py * (1.0 - alpha) + ny * alpha
+            self.pose_foot = (nx, ny)
         if keypoints is not None:
             self.keypoints = keypoints
         if keypoints_xy is not None:
@@ -221,8 +257,10 @@ class SimpleByteTracker:
         self._next_id = 1
 
     def update(self, detections: List[Dict[str, Any]], timestamp: float) -> List[Track]:
-        high_dets = [d for d in detections if d["confidence"] >= self.track_thresh]
-        low_dets = [d for d in detections if d["confidence"] < self.track_thresh]
+        # Person-only. A chair/bag box must not mint or extend a person ID.
+        people = [d for d in detections if is_person_detection(d) and "confidence" in d and "bbox" in d]
+        high_dets = [d for d in people if d["confidence"] >= self.track_thresh]
+        low_dets = [d for d in people if d["confidence"] < self.track_thresh]
 
         if len(self.tracks) == 0:
             for det in high_dets:  # low-confidence detections never start a track on their own

@@ -5,6 +5,7 @@ See docs/model-stack-policy.md.
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -75,6 +76,27 @@ def _any_exists(base: Path, *rels: str) -> bool:
     return any(_exists(base, r) for r in rels if r)
 
 
+def _live_person_detector(base: Path) -> str:
+    """Person weight name from the newest live snapshot, if the edge has written one."""
+    live = base / "data" / "storage" / "live"
+    if not live.is_dir():
+        return ""
+    paths = []
+    store = live / "store.json"
+    if store.is_file():
+        paths.append(store)
+    paths.extend(sorted(live.glob("cam_*.json")))
+    for path in paths:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        det = str((data.get("models") or {}).get("person_detector") or "").strip()
+        if det:
+            return det
+    return ""
+
+
 def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
     """Catalog + disk probes for GET /api/v1/models/stack."""
     base = Path(base_dir or os.getcwd())
@@ -90,8 +112,20 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             license="AGPL-3.0",
             status="LIVE",
             path_hint="models/yolo26n.pt",
-            env_flag="DETECTOR_BACKEND=yolo26 (Ultralytics default, all perf modes)",
-            notes="Jan 2026 edge-optimized; ~38.9 ms CPU-ONNX. Default person detector.",
+            env_flag="EDGE_PERF_MODE=fast|balanced · DETECTOR_BACKEND=yolo26",
+            notes="Jan 2026 edge-optimized nano. Opt-in speed tier. Demo default is yolo26s (detect).",
+        ),
+        StackEntry(
+            key="yolo26s",
+            name="YOLO26s detector",
+            role="Person detect (demo)",
+            job="Finds people in the camera frame",
+            feeds_kpi="Present · In/Out (with entrance line)",
+            license="AGPL-3.0",
+            status="PACKED",
+            path_hint="models/yolo26s.pt",
+            env_flag="EDGE_PERF_MODE=detect (demo default) · Ultralytics only",
+            notes="imgsz 640, infer every 2 frames, person conf 0.22. RF-DETR is not the default.",
         ),
         StackEntry(
             key="yoloe",
@@ -224,6 +258,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
     for e in entries:
         if e.key == "yolo26n":
             e.on_disk = _any_exists(base, "models/yolo26n.pt")
+        elif e.key == "yolo26s":
+            e.on_disk = _any_exists(base, "models/yolo26s.pt", "models/pack/01-detection/yolo26s/yolo26s.pt")
         elif e.key == "yoloe":
             e.on_disk = _any_exists(
                 base,
@@ -334,9 +370,29 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
     # Do not flip YOLO to OFF on a failed path probe — Ultralytics may load from cache
     # while still producing live boxes (site strip also reconciles with live.models).
     backend = resolve_detector_backend()
+    live_det = _live_person_detector(base).lower()
     for e in entries:
+        if e.key in ("yolo26n", "yolo26s"):
+            if backend == BACKEND_RFDETR:
+                e.status = "PACKED" if e.on_disk else "OFF"
+                e.notes = (e.notes or "") + " RF-DETR selected (opt-in)."
+            elif e.key == "yolo26s" and "yolo26s" in live_det:
+                e.status = "LIVE" if e.on_disk else "OFF"
+            elif e.key == "yolo26n" and live_det and "yolo26s" not in live_det and "yolo" in live_det:
+                e.status = "LIVE" if e.on_disk else "OFF"
+            elif e.key == "yolo26n" and "yolo26s" in live_det:
+                e.status = "PACKED" if e.on_disk else "OFF"
+            elif e.key == "yolo26n" and not live_det:
+                perf_guess = os.environ.get("EDGE_PERF_MODE", "detect").strip().lower()
+                if perf_guess in ("", "detect", "quality"):
+                    e.status = "PACKED" if e.on_disk else "OFF"
+            elif e.key == "yolo26s" and not live_det and e.on_disk:
+                # Demo default until a snapshot names the loaded weight.
+                perf = os.environ.get("EDGE_PERF_MODE", "detect").strip().lower()
+                if perf in ("", "detect", "quality"):
+                    e.status = "LIVE"
         if e.key == "yolo26n" and backend == BACKEND_RFDETR:
-            e.status = "PACKED"
+            e.status = "PACKED" if e.on_disk else "OFF"
             e.notes = (
                 "Fast-path YOLO26n kept as selectable alternate "
                 "(DETECTOR_BACKEND=yolo26). RF-DETR currently selected."
