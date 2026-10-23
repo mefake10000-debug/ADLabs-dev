@@ -29,6 +29,16 @@ def dpia_gate_ok() -> bool:
     return os.environ.get("DEMOGRAPHICS_DPIA_OK", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
+def run_state_for(status: str) -> str:
+    """Operator-facing strip status: ON | OFF | WAITING (never invent LIVE demos)."""
+    s = (status or "").upper()
+    if s == "LIVE":
+        return "ON"
+    if s in ("PACKED", "PARTIAL"):
+        return "WAITING"
+    return "OFF"
+
+
 @dataclass
 class StackEntry:
     key: str
@@ -40,9 +50,15 @@ class StackEntry:
     env_flag: Optional[str] = None
     notes: str = ""
     on_disk: Optional[bool] = None
+    # Operator Models strip (plain English; no AGPL/path spam on primary UI)
+    job: str = ""
+    feeds_kpi: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["run_state"] = run_state_for(self.status)
+        d["job"] = self.job or self.role
+        return d
 
 
 def _exists(base: Path, rel: str) -> bool:
@@ -69,6 +85,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="yolo26n",
             name="YOLO26n detector",
             role="Person detect (fast / edge)",
+            job="Finds people in the camera frame",
+            feeds_kpi="Present · In/Out (with entrance line)",
             license="AGPL-3.0",
             status="LIVE",
             path_hint="models/yolo26n.pt",
@@ -79,6 +97,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="yoloe",
             name="YOLOE open-vocab",
             role="Shelf / product categories",
+            job="Names product categories on shelves",
+            feeds_kpi="Shelf / display interest",
             license="AGPL-3.0",
             status="LIVE",
             path_hint="models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
@@ -88,6 +108,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="osnet_reid",
             name="OSNet ReID",
             role="Session-scoped soft ReID",
+            job="Keeps the same person ID within a short visit",
+            feeds_kpi="Path / journey (same visit)",
             license="MIT",
             status="LIVE",
             path_hint="models/pack/03-reid/",
@@ -97,6 +119,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
         StackEntry(
             key="clip_vit_b32",
             name="CLIP ViT-B/32",
+            job="Matches on-screen objects to text labels",
+            feeds_kpi="Shelf category tags",
             role="Zero-shot text / shelf interest",
             license="MIT",
             status="LIVE",
@@ -106,6 +130,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="rtmpose",
             name="RTMPose-t/s/m ONNX (rtmlib)",
             role="Pose fall-candidate tier",
+            job="Flags unusual body poses (caution only)",
+            feeds_kpi="Safety cautions",
             license="Apache-2.0",
             status="PACKED",
             path_hint="models/pack/07-pose/",
@@ -115,6 +141,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="shelf_gap_geometry",
             name="Shelf gap / OSA geometry",
             role="Gap alerts from existing boxes",
+            job="Spots empty shelf gaps from boxes already drawn",
+            feeds_kpi="Shelf gap alerts",
             license="N/A (no new weights)",
             status="PARTIAL",
             path_hint="src/analytics/shelf_gap_geometry.py",
@@ -124,6 +152,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="mivolo_v2",
             name="MiVOLO v2 age/gender",
             role="Demographics (body-only OK)",
+            job="Age/gender groups only after privacy gate",
+            feeds_kpi="Age & groups (when enabled)",
             license="Apache-2.0",
             status="GATED" if not demo_on else "PACKED",
             path_hint="models/pack/08-demographics/mivolo_v2/",
@@ -134,6 +164,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="moondream",
             name="Moondream lean VLM",
             role="Nightly shelf-photo QA",
+            job="Nightly photo check of shelf look",
+            feeds_kpi="Shelf QA (nightly)",
             license="Apache-2.0",
             status="FUTURE",
             path_hint="models/pack/09-vlm/moondream2/",
@@ -143,6 +175,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="p2pnet",
             name="P2PNet crowd density",
             role="Crush-density edge cases",
+            job="Crowd density (research only — skipped)",
+            feeds_kpi="—",
             license="Tencent academic-research-only",
             status="SKIP",
             path_hint="models/pack/10-crowd/P2PNet-STUB.txt",
@@ -152,6 +186,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="sku110k",
             name="SKU-110K shelf weights",
             role="Closed-set shelf detect",
+            job="Closed-set SKU detect (skipped — non-commercial)",
+            feeds_kpi="—",
             license="Non-commercial",
             status="SKIP",
             notes="Use geometry OSA or Roboflow CC BY 4.0 gap datasets.",
@@ -160,6 +196,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="locateanything_3b",
             name="LocateAnything-3B",
             role="Open-vocab grounding VLM",
+            job="Grounding VLM (not installed)",
+            feeds_kpi="—",
             license="NVIDIA non-commercial",
             status="FUTURE",
             notes="Do not download. Stay FUTURE.",
@@ -168,6 +206,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             key="rfdetr",
             name="RF-DETR-N/S (Roboflow)",
             role="Person detect (SOTA / Apache alternate)",
+            job="Finds people (alternate detector)",
+            feeds_kpi="Present · In/Out (with entrance line)",
             license="Apache-2.0",
             status="PACKED",
             path_hint="models/pack/01-detection/rfdetr/",
@@ -270,14 +310,28 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
                 f"models/pack/01-detection/rfdetr/{weight_name}"
             )
 
-    # Honest YOLO LIVE only when yolo backend is active (RF-DETR selected → yolo stays LIVE as fast default available)
+    # Honest detector LIVE only for the selected backend.
+    # Do not flip YOLO to OFF on a failed path probe — Ultralytics may load from cache
+    # while still producing live boxes (site strip also reconciles with live.models).
     backend = resolve_detector_backend()
     for e in entries:
         if e.key == "yolo26n" and backend == BACKEND_RFDETR:
+            e.status = "PACKED"
             e.notes = (
                 "Fast-path YOLO26n kept as selectable alternate "
                 "(DETECTOR_BACKEND=yolo26). RF-DETR currently selected."
             )
+        elif e.key in ("osnet_reid", "clip_vit_b32") and e.status == "LIVE":
+            perf = os.environ.get("EDGE_PERF_MODE", "fast").strip().lower()
+            if e.on_disk is False:
+                e.status = "PACKED"
+                e.notes = (e.notes or "") + " Weights not on probed path — waiting."
+            elif perf == "fast":
+                e.status = "PACKED"
+                e.notes = (e.notes or "") + " Waiting: set EDGE_PERF_MODE=quality to run."
+        elif e.key == "yoloe" and e.status == "LIVE" and e.on_disk is False:
+            e.status = "PACKED"
+            e.notes = (e.notes or "") + " Weights not on probed path — waiting."
 
     return {
         "policy": "docs/model-stack-policy.md",
