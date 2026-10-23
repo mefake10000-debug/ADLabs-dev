@@ -694,14 +694,15 @@ class EdgePipeline:
     def _make_tracker(self) -> SimpleByteTracker:
         """ByteTrack knobs aligned with ``infer_every_n`` (skipped frames break IDs)."""
         t_cfg = self.pipeline_cfg.get("tracking", {}) or {}
+        perf_cfg = getattr(self, "perf", {}) or {}
         scaled = tracker_params_for_infer_gap(
             int(getattr(self, "infer_every_n", 1) or 1),
             track_buffer=int(t_cfg.get("track_buffer", 45)),
             match_thresh=float(t_cfg.get("match_thresh", 0.45)),
             min_hits=int(t_cfg.get("min_hits", 4)),
             track_thresh=float(
-                self.perf["track_thresh"]
-                if self.perf.get("track_thresh") is not None
+                perf_cfg["track_thresh"]
+                if perf_cfg.get("track_thresh") is not None
                 else t_cfg.get("track_thresh", 0.5)
             ),
         )
