@@ -2,6 +2,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import time
 import json
 import logging
@@ -42,7 +43,13 @@ app.add_middleware(
     allow_headers=["Accept", "Content-Type", "X-API-Key"],
 )
 
-from server.nfc_store import industry_status_block, nfc_live_block, record_tap
+from server.nfc_store import (
+    industry_status_block,
+    nfc_live_block,
+    record_tap,
+    retail_roles_block,
+)
+from src.analytics.journey import build_journey_block, zones_from_snapshot_rows
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -518,6 +525,13 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "staff_zones": snap.get("staff_zones"),
                 "queues": snap.get("queues"),
                 "field_status": snap.get("field_status"),
+                "entrance": snap.get("entrance"),
+                "stop_rate": snap.get("stop_rate"),
+                "floor": snap.get("floor"),
+                "staff": snap.get("staff"),
+                "safety": snap.get("safety"),
+                "alerts": snap.get("alerts"),
+                "journey": snap.get("journey"),
             })
         elif snap and snap.get("_stale"):
             result["snapshot_stale"] = True
@@ -558,11 +572,20 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
             if snap_cams:
                 result["per_camera"] = snap_cams
 
-        # Industry modes: NFC buffer + honest status map (never invent sample taps / defect %).
+        # NFC stub (optional hardware) + floor-role maturity. Industry vertical map is
+        # deprecated alias only — Live hub features retail_roles, not fashion/etc tabs.
         fresh_snap = snap if snap and not snap.get("_stale") else None
         nfc = nfc_live_block(20)
         result["nfc"] = nfc
-        result["industry"] = industry_status_block(fresh_snap, nfc)
+        result["retail_roles"] = retail_roles_block(fresh_snap, nfc)
+        result["industry"] = industry_status_block(fresh_snap, nfc)  # deprecated
+
+        # Service journey / dead-zones — always present with 0 defaults (never invent traction).
+        if result.get("journey") is None:
+            zone_rows = []
+            if fresh_snap:
+                zone_rows = zones_from_snapshot_rows([fresh_snap])
+            result["journey"] = build_journey_block(zone_rows)
 
         # Frame-synced provenance for the portal (ISO timestamp + sample-loop state).
         result["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -573,7 +596,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
 
 @app.post("/api/v1/nfc/tap")
 def post_nfc_tap(payload: NfcTapPayload):
-    """Fashion NFC reader webhook. Does not invent taps — only records POSTed events."""
+    """Optional NFC reader webhook. Does not invent taps — only records POSTed events."""
     try:
         tap = record_tap(
             payload.product_id,
@@ -610,7 +633,10 @@ def get_live_snapshot(camera_id: Optional[str] = None):
     nfc = nfc_live_block(20)
     out = dict(snap)
     out["nfc"] = nfc
-    out["industry"] = industry_status_block(snap, nfc)
+    out["retail_roles"] = retail_roles_block(snap, nfc)
+    out["industry"] = industry_status_block(snap, nfc)  # deprecated
+    if out.get("journey") is None:
+        out["journey"] = build_journey_block(zones_from_snapshot_rows([snap]))
     return out
 
 
@@ -874,8 +900,11 @@ def get_model_stack():
     Never invents LIVE age/gender. See docs/model-stack-policy.md.
     """
     try:
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        if root not in sys.path:
+            sys.path.insert(0, root)
         from src.perception.model_stack import build_model_stack
-        return build_model_stack(os.getcwd())
+        return build_model_stack(root)
     except Exception as e:
         logger.exception("model stack catalog failed")
         return JSONResponse(

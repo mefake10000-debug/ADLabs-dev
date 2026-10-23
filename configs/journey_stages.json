@@ -1,0 +1,55 @@
+{
+  "schema": "adlabs.journey_stages.v1",
+  "metaphor": "buffet",
+  "note": "Buffet stage labels map to a retail path. Match zones by name tags (case-insensitive substring) or cameras.yaml zone.journey_stage / stage_tag.",
+  "dead_zone": {
+    "max_occupancy": 0,
+    "max_visits": 0,
+    "max_avg_dwell_seconds": 0.0,
+    "note": "Marked (zone matched) but cold → dead_zone. No match → missing."
+  },
+  "stages": [
+    {
+      "id": "welcome_drink",
+      "label": "Welcome drink",
+      "retail_label": "Entrance welcome",
+      "tags": ["welcome", "welcome drink", "entrance", "door", "lobby", "front door"],
+      "how_to_implement": "Draw a dwell polygon at the entrance greeting area and name it with welcome or entrance."
+    },
+    {
+      "id": "starter",
+      "label": "Starter",
+      "retail_label": "Front aisle",
+      "tags": ["starter", "front aisle", "entry aisle", "new arrivals", "front"],
+      "how_to_implement": "Mark the first browsing strip after entry (front aisle / new arrivals)."
+    },
+    {
+      "id": "appetizer",
+      "label": "Appetizer",
+      "retail_label": "Mid-floor browse",
+      "tags": ["appetizer", "mid", "browse", "mid-floor", "middle", "discovery"],
+      "how_to_implement": "Polygon the mid-floor discovery / browse area shoppers pass through."
+    },
+    {
+      "id": "main",
+      "label": "Main",
+      "retail_label": "Hero / focal",
+      "tags": ["main", "hero", "focal", "feature", "vitrine", "key wall"],
+      "how_to_implement": "Calibrate the hero display / focal wall where dwell should concentrate."
+    },
+    {
+      "id": "dessert",
+      "label": "Dessert",
+      "retail_label": "Impulse / near checkout",
+      "tags": ["dessert", "impulse", "near checkout", "addon", "counter edge"],
+      "how_to_implement": "Zone the impulse strip beside checkout before the queue."
+    },
+    {
+      "id": "fruit",
+      "label": "Fruit",
+      "retail_label": "Exit / farewell",
+      "tags": ["fruit", "exit", "farewell", "outflow", "goodbye"],
+      "how_to_implement": "Mark the exit path / farewell area after checkout."
+    }
+  ]
+}

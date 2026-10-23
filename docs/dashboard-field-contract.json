@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "meta": {
+    "title": "AD Labs EdgeSight — Dashboard Field Contract",
+    "generated": "2026-10-23",
+    "stack": { "portal": "Next.js :3000", "calibration_api": "FastAPI :8000", "edge": "EdgeSight native/Docker" },
+    "privacy_basis": [
+      "No facial identification. Face detection (YuNet) is redaction-only.",
+      "Re-ID is session-scoped (OSNet embeddings, in-memory gallery, TTL prune). No cross-session persistence, no face-ID.",
+      "Demographics are k-anonymized (k >= 10) and render only when publishable=true.",
+      "Product interest = open-vocab display categories (YOLO-World). Never claimed as POS SKUs or revenue.",
+      "Staff tagging is role-based geometry (`staff` zones + dwell threshold), not biometrics.",
+      "Track IDs are session-scoped integers from the tracker; never used as customer identities."
+    ]
+  },
+
+  "endpoints": {
+    "GET /api/v1/live": {
+      "purpose": "Frame-synced store+camera live state (matches the YOLO MJPEG HUD). Poll 2s.",
+      "fields": ["store_id", "camera_id", "total_visitors", "total_exits", "net_occupancy", "people_now", "staff_now",
+                 "avg_dwell_seconds", "queue_length", "avg_queue_wait_seconds", "queue_alert_active", "last_updated",
+                 "occupancy_mode", "occupancy_note", "infer_fps", "decode_fps", "display_fps", "perf_mode", "source",
+                 "models", "engagement", "cameras", "reid", "products_top", "per_camera[]"]
+    },
+    "GET /api/v1/live/snapshot?camera_id=<id>": {
+      "purpose": "Per-camera frame-synced snapshot (same writer as the HUD). Poll 2s.",
+      "fields": ["people_now", "staff_now", "unique_tracks_today", "total_visitors", "total_exits", "net_occupancy",
+                 "avg_dwell_seconds", "queue_length", "avg_queue_wait_seconds", "queue_alert_active", "zone_rows", "queues", "staff_zones",
+                 "engagement", "models", "decode_fps", "infer_fps", "display_fps", "perf_mode", "frame_time"]
+    },
+    "GET /api/v1/stream/{camera_id}": { "purpose": "Annotated MJPEG (tripwires, zones, IDs, HUD).", "cadence": "decoded-frame painting (~FEED fps shown in HUD)" },
+    "GET /api/v1/snapshot/{camera_id}": { "purpose": "Single annotated JPEG." },
+    "GET /api/v1/heatmap/{camera_id}": { "purpose": "Cumulative foot-traffic heatmap JPEG (bbox aggregates).", "cadence": "periodic (heatmap_write_seconds)" },
+    "POST /api/v1/telemetry": { "purpose": "Edge rollup ingestion (10s window)." },
+    "POST /api/v1/telemetry/products": { "purpose": "Edge display-interest ingestion." },
+    "POST /api/v1/telemetry/events": { "purpose": "Tripwire crossing events (durable, event-driven)." },
+    "GET /api/v1/events": { "purpose": "Crossing event feed." },
+    "GET /api/v1/history": { "purpose": "Rollup rows (10s granularity)." },
+    "GET /api/v1/analytics/summary": { "purpose": "Hourly footfall aggregates." },
+    "GET /api/v1/analytics/engagement": { "purpose": "Attention/engagement windows." },
+    "GET /api/v1/analytics/demographics": { "purpose": "k-anonymized cohort aggregates." },
+    "GET /api/v1/analytics/products": { "purpose": "Display-interest aggregates by category." },
+    "GET /api/v1/config/cameras": { "purpose": "Read calibration (cameras +/- tripwires/zones, privacy-safe subset)." },
+    "POST /api/v1/config/cameras": { "purpose": "Write calibration; edge hot-reloads cameras & tripwires within ~3s." }
+  },
+
+  "ingestion_models": {
+    "POST /api/v1/telemetry": {
+      "store_id": "string",
+      "device_id": "string",
+      "camera_id": "string",
+      "timestamp_start": "string (ISO)",
+      "timestamp_end": "string (ISO)",
+      "in_count": "int (tripwire delta for window)",
+      "out_count": "int (tripwire delta for window)",
+      "current_occupancy": "int (LIVE customers on floor now = active tracks, matches HUD)",
+      "avg_dwell_seconds": "float",
+      "queue_length": "int",
+      "avg_queue_wait_seconds": "float",
+      "queue_alert_active": "int (0/1)",
+      "avg_attention_score": "float (enrichment-gated; honest 0.0 when enrichment off)",
+      "facing_ratio": "float (enrichment-gated)",
+      "phone_usage_rate": "float (enrichment-gated)",
+      "engaged_ratio": "float (enrichment-gated)",
+      "group_count": "int (enrichment-gated)",
+      "people_in_groups": "int (enrichment-gated)",
+      "demographics_json": "string (JSON of k-anonymized demographics window)"
+    },
+    "POST /api/v1/telemetry/products": {
+      "store_id": "string", "device_id": "string", "camera_id": "string",
+      "windows": [{ "category": "string", "viewers": "int", "detections": "int", "total_dwell_seconds": "float", "avg_dwell_seconds": "float" }]
+    },
+    "POST /api/v1/telemetry/events": {
+      "store_id": "string", "device_id": "string", "camera_id": "string",
+      "wire_id": "string", "track_id": "int (session-scoped)", "direction": "in|out",
+      "event_timestamp": "string (ISO)"
+    }
+  },
+
+  "status_legend": {
+    "LIVE": "Real data today from the named pipeline; renders actual values.",
+    "PARTIAL": "Pipeline/model exists but display is suppressed by privacy thresholds or config; UI shows honest empty state, never a fabricated number.",
+    "FUTURE": "Not implemented for this deployment; field has a defined destination but no producer yet."
+  },
+
+  "sections": [
+    {
+      "section": "Entrance (glass view, stop-rate)",
+      "metrics": [
+        { "name": "Live occupancy (on-floor customers)", "json_path": "/api/v1/live:people_now | per_camera[].occupancy", "source": "YOLO person boxes + session ByteTrack IDs (active customers)", "cadence": "frame-synced (~7 Hz JSON; MJPEG per decoded frame)", "status": "LIVE", "privacy_note": "Session-scoped integer track IDs only; no identity." },
+        { "name": "Glass-view annotated video", "json_path": "/api/v1/stream/{camera_id}", "source": "MJPEG annotated帧 (boxes, IDs, tripwires, zones, HUD FEED/MODEL fps)", "cadence": "per decoded frame", "status": "LIVE", "privacy_note": "IDs are numeric session scope; optional YuNet face redaction." },
+        { "name": "Footfall in/out (session)", "json_path": "/api/v1/live:total_visitors/total_exits | POST /api/v1/telemetry:in_count/out_count", "source": "Tripwire line crossings (well camera calibration)", "cadence": "event-driven; rollup every 10s", "status": "LIVE", "privacy_note": "Counts + wire IDs only." },
+        { "name": "Footfall history (hourly)", "json_path": "/api/v1/analytics/summary:hourly_breakdown[]", "source": " ingested telemetry_rollups (10s rollups → hourly buckets)", "cadence": "10s rollups; hourly buckets", "status": "LIVE", "privacy_note": "Aggregate counts only." },
+        { "name": "Stop-rate (dwell threshold in entrance zone)", "json_path": "-", "source": "Tracker computes stationary seconds; dashboard field not exposed yet", "cadence": "-", "status": "FUTURE", "privacy_note": "Will use zone-dwell aggregates, no identity." }
+      ]
+    },
+    {
+      "section": "Floor (routes/traction/zones/shelves)",
+      "metrics": [
+        { "name": "Zone traction (occupancy + avg dwell per zone)", "json_path": "/api/v1/live:snapshot:zones[] {occupancy, avg_dwell_seconds}", "source": "Zone polygons + track foot-point membership; 10s rollups", "cadence": "frame-synced snapshot + 10s rollup", "status": "LIVE", "privacy_note": "Aggregates; no paths per person persisted." },
+        { "name": "Traction heatmap", "json_path": "/api/v1/heatmap/{camera_id}", "source": "Cumulative bbox foot-point density render", "cadence": "periodic (heatmap_write_seconds)", "status": "LIVE", "privacy_note": "Pure aggregate pixels; no PII." },
+        { "name": "Movement routes (OD arcs)", "json_path": "-", "source": "No route model deployed", "cadence": "-", "status": "FUTURE", "privacy_note": "Would aggregate by zone-to-zone counts." },
+        { "name": "Shelf/display category interest (floor)", "json_path": "/api/v1/live:products_top | /api/v1/analytics/products:categories[]", "source": "YOLO-World open-vocab + dwell windows", "cadence": "slow-tier (~every 16 processed frames per config); rollup 10s", "status": "LIVE", "privacy_note": "Open-vocab categories, not SKUs; no revenue claims." }
+      ]
+    },
+    {
+      "section": "Queue (timestamps)",
+      "metrics": [
+        { "name": "Queue length + avg wait", "json_path": "/api/v1/live:queue_length/avg_queue_wait_seconds | snapshot:queues[]", "source": "Queue-zone occupancy + stationary dwell", "cadence": "frame-synced snapshot; 10s rollup", "status": "LIVE", "privacy_note": "Aggregate only." },
+        { "name": "Queue congestion alert", "json_path": "/api/v1/live:queue_alert_active | snapshot:queues[].alert_active", "source": "Comfort threshold on queue length/wait", "cadence": "rollup 10s", "status": "LIVE", "privacy_note": "Operational flag only." },
+        { "name": "Per-counter service timestamps", "json_path": "-", "source": "Not modeled", "cadence": "-", "status": "FUTURE", "privacy_note": "-" }
+      ]
+    },
+    {
+      "section": "Alerts (industry actions)",
+      "metrics": [
+        { "name": "Crossing event feed", "json_path": "/api/v1/events:events[] {wire_id, track_id, direction, event_timestamp}", "source": "Tripwire crossings persisted durably", "cadence": "event-driven", "status": "LIVE", "privacy_note": "Session-scoped track_id; no identity." },
+        { "name": "Queue congestion alerts", "json_path": "/api/v1/live:queue_alert_active", "source": "Queue analyzer thresholds", "cadence": "10s", "status": "LIVE", "privacy_note": "-" },
+        { "name": "Dwell-spike / lingering alerts", "json_path": "-", "source": "No alert rule deployed", "cadence": "-", "status": "FUTURE", "privacy_note": "Would use zone dwell aggregates only." },
+        { "name": "Safety alerts (fall / crowd surge)", "json_path": "-", "source": "No safety model on node", "cadence": "-", "status": "FUTURE", "privacy_note": "Will never render fabricated alerts." }
+      ]
+    },
+    {
+      "section": "Staffing",
+      "metrics": [
+        { "name": "Staff now (visible on floor)", "json_path": "/api/v1/live:staff_now", "source": "Staff-zone geometry + sticky dwell tagging (min dwell)", "cadence": "frame-synced snapshot", "status": "LIVE", "privacy_note": "Role-based geometric tag; no biometrics." },
+        { "name": "Hardware per staff zone", "json_path": "/api/v1/live/snapshot:staff_zones[].tagged_ids", "source": "Active tracks inside staff polygons", "cadence": "frame-synced snapshot", "status": "LIVE", "privacy_note": "Counts only." },
+        { "name": "Shift/roster optimizer", "json_path": "-", "source": "Requires roster data not provided", "cadence": "-", "status": "FUTURE", "privacy_note": "-" }
+      ]
+    },
+    {
+      "section": "Safety",
+      "metrics": [
+        { "name": "Crowd density surface", "json_path": "/api/v1/heatmap/{camera_id} (proxy for crowd density)", "source": "Traction heatmap density", "cadence": "periodic", "status": "LIVE", "privacy_note": "Aggregate density only; no incident detection." },
+        { "name": "Fall / surge / intrusion detection", "json_path": "-", "source": "No safety model deployed", "cadence": "-", "status": "FUTURE", "privacy_note": "Dedicated camera+model required; watchdog NOT pretended today." }
+      ]
+    },
+    {
+      "section": "Retail intelligence (cohort/mix, privacy-safe)",
+      "metrics": [
+        { "name": "Demographic cohorts (age bands, gender split)", "json_path": "/api/v1/analytics/demographics:demographics {sample_size, age_bands[], gender_split[], publishable}", "source": "Face-box (redaction-only) → INT8 age/gender ONNX → k-anonymity gate (k>=10)", "cadence": "window-based rollups (10s)", "status": "PARTIAL", "privacy_note": "k-anonymized; publishable=false suppresses display; no face ID stored ever." },
+        { "name": "Attention (facing / engagement)", "json_path": "/api/v1/analytics/engagement:avg_attention_score, facing_ratio, engaged_ratio", "source": "Pose + head-pose enrichment on face boxes", "cadence": "10s windows", "status": "PARTIAL", "privacy_note": "Enrichment currently disabled in fast perf mode; fields stay honest zeros." },
+        { "name": "Groups (people-in-company)", "json_path": "/api/v1/analytics/engagement:group_count, people_in_groups", "source": "Proximity clustering on tracks", "cadence": "10s", "status": "PARTIAL", "privacy_note": "Aggregates; enables only with enrichment." },
+        { "name": "Phone usage rate", "json_path": "/api/v1/analytics/engagement:phone_usage_rate", "source": "Pose+head-pose heuristics", "cadence": "10s", "status": "PARTIAL", "privacy_note": "Enrichment-gated." }
+      ]
+    },
+    {
+      "section": "Store intelligence + multi-store compare",
+      "metrics": [
+        { "name": "Store OWL occupancy (active)", "json_path": "/api/v1/live:net_occupancy (mode=active_tracks)", "source": "Sum of per-camera active customers", "cadence": "frame-synced snapshot; 10s rollup", "status": "LIVE", "privacy_note": "Overlapping FOVs double-count until consensus ships (documented in occupancy_note)." },
+        { "name": "Store flow (in/out session)", "json_path": "/api/v1/live:total_visitors/total_exits | per_camera[].in_count", "source": "Tripwire session totals + event feed", "cadence": "frame-synced + events", "status": "LIVE", "privacy_note": "-" },
+        { "name": "Net footfall (tripwire net IN-OUT)", "json_path": "POST /api/v1/telemetry:in_count-out_count", "source": "Tripwire net", "cadence": "10s", "status": "LIVE", "privacy_note": "Documented separately from live occupancy; looping sample video yields low net." },
+        { "name": "Multi-store comparison", "json_path": "-", "source": "Schema supports store_id; second store not deployed", "cadence": "-", "status": "FUTURE", "privacy_note": "-" }
+      ]
+    },
+    {
+      "section": "Display interest",
+      "metrics": [
+        { "name": "Category viewers / detections / dwell", "json_path": "/api/v1/analytics/products:categories[{category, viewers, detections, total_dwell_seconds, avg_dwell_seconds}] | live:products_top", "source": "YOLO-World open-vocab labeled boxes + dwell windows", "cadence": "slow-tier + 10s rollup", "status": "LIVE", "privacy_note": "Display categories only; explicitly NOT POS SKUs, never revenue." }
+      ]
+    }
+  ],
+
+  "empty_state_copy": {
+    "stop_rate": "Stop-rate unlocks once entrance-zone dwell thresholds are exposed. The tracker already computes stationary seconds — we show nothing rather than estimate.",
+    "demographics": "Cohort counts unlock after ≥10 anonymous samples inside the privacy window (k-anonymity). The real model runs — we suppress below the threshold by design, not by error.",
+    "engagement": "Attention metrics (facing/phone/groups) activate with pose + head-pose enrichment on this node. Rows show honest zeros today so the queue and footfall numbers are never contaminated.",
+    "multi_store": "Single-store deployment. Multi-store compare activates as soon as a second device registers — store_id is already ingest-ready across the schema.",
+    "safety": "No safety model on this edge node. We will not render fabricated alerts; fall/crowd-surge will only come from a dedicated model.",
+    "service_timestamps": "Per-counter service timestamps need counter-level calibration, which hasn't been drawn yet.",
+    "routes": "Traction is real today (zones + heatmap). Movement-route arcs need the route model and will not be approximated.",
+    "pos_sku": "These are display-interest signals (what shoppers look at), not sales. Connecting a POS feed is a separate, consented integration.",
+    "reid_cross_cam": "Session-scoped person tracker only today. Cross-camera identity fusion requires the ReID gallery task — and stays anonymous unless policy changes."
+  },
+
+  "notes": [
+    "people_now/net_occupancy = active customer tracks on the floor (matches the YOLO overlay). Tripwire IN/OUT are cumulative session counters.",
+    "Rollup occupancy for tripwire cameras was fixed on 2026-10-23: it now uses active tracks instead of IN−OUT net so DB → cloud → dashboard match the HUD.",
+    "FEED fps = display_fps (annotated JPEG refresh, what users see). MODEL fps = infer_fps (detection cadence). decode_fps cached decode rate.",
+    "Sample footage loops (~20-30s); historical DB rows from earlier runs are real collected data and dated accordingly.",
+    "Enrichment tier (pose/face/demographics/products) is config-gated per camera (pipeline.yaml models.*.enabled) plus EDGE_PERF_MODE."
+  ]
+}
