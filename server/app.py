@@ -462,16 +462,23 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "models": snap.get("models"),
                 "engagement": snap.get("engagement"),
                 "cameras": snap.get("cameras"),
+                "reid": snap.get("reid"),
+                "products_top": snap.get("products_top"),
             })
         elif snap and snap.get("_stale"):
             result["snapshot_stale"] = True
 
         # Prefer per-camera rows from frame-synced files when present (fresher than rollups).
+        # Skip cams not listed in store snapshot when max_cameras pruned the active set.
         live_dir = _live_dir()
+        active_cams = set(snap.get("cameras") or []) if snap and not snap.get("_stale") else set()
         if os.path.isdir(live_dir):
             snap_cams = []
             for name in sorted(os.listdir(live_dir)):
                 if not name.endswith(".json") or name in ("store.json",) or name.endswith(".tmp.json"):
+                    continue
+                cam_key = name[: -len(".json")]
+                if active_cams and cam_key not in active_cams:
                     continue
                 try:
                     with open(os.path.join(live_dir, name)) as f:

@@ -200,8 +200,26 @@ class EdgePipeline:
         # Camera context pipelines
         self.camera_contexts: Dict[str, Dict[str, Any]] = {}
         self._init_cameras()
+        self._prune_stale_live_snapshots()
 
         self.running = False
+
+    def _prune_stale_live_snapshots(self):
+        """Drop per-cam live/*.json for cameras not in the active set (e.g. after max_cameras)."""
+        active = set(self.camera_contexts.keys())
+        try:
+            for name in os.listdir(self.live_dir):
+                if not name.endswith(".json") or name.startswith("store") or name.endswith(".tmp.json"):
+                    continue
+                cam_id = name[: -len(".json")]
+                if cam_id not in active:
+                    try:
+                        os.remove(os.path.join(self.live_dir, name))
+                        logger.info("Pruned stale live snapshot %s (camera not active)", name)
+                    except OSError:
+                        pass
+        except FileNotFoundError:
+            pass
 
     # ------------------------------------------------------------------ models
     def _resolve_enrichment_device(self) -> str:
