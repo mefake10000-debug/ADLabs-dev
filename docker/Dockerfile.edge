@@ -2,7 +2,11 @@ FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    # Prefer baked openai-clip (requirements-edge.txt). Never let Ultralytics
+    # retry `pip install git+CLIP` at runtime (no git in image; kills FPS).
+    YOLO_AUTOINSTALL=false \
+    YOLO_CONFIG_DIR=/tmp/Ultralytics
 
 # Install runtime dependencies for OpenCV and video decoding
 RUN apt-get update && apt-get install -y --no-install-recommends \

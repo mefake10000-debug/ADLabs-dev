@@ -194,6 +194,38 @@ class LocalBuffer:
         finally:
             conn.close()
 
+    def get_recent_products_top(
+        self, camera_id: str, limit: int = 8
+    ) -> List[Dict[str, Any]]:
+        """Aggregate product_interest rows for live_snapshot products_top (not POS SKUs)."""
+        query = """
+        SELECT category,
+               SUM(viewers) AS viewers,
+               SUM(detections) AS detections,
+               AVG(avg_dwell_seconds) AS avg_dwell_seconds
+        FROM product_interest
+        WHERE camera_id = ?
+        GROUP BY category
+        ORDER BY SUM(viewers) DESC, SUM(detections) DESC
+        LIMIT ?
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(query, (camera_id, limit))
+            rows = []
+            for row in cursor.fetchall():
+                rows.append({
+                    "category": row["category"],
+                    "viewers": int(row["viewers"] or 0),
+                    "detections": int(row["detections"] or 0),
+                    "avg_dwell_seconds": round(float(row["avg_dwell_seconds"] or 0.0), 1),
+                })
+            return rows
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
     def mark_products_as_exported(self, product_ids: List[int]):
         if not product_ids:
             return
