@@ -30,7 +30,7 @@ from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
 from src.visualizer.debug_overlay import DebugOverlay
-from src.perception.reid import SoftReIdExtractor, SoftReIdGallery
+from src.perception.reid import ReIdEmbedding, SoftReIdExtractor, SoftReIdGallery
 
 try:
     import cv2
@@ -173,8 +173,10 @@ class EdgePipeline:
         reid_cfg = (self.models_cfg.get("reid") or {}) if getattr(self, "models_cfg", None) is not None else {}
         # Fast mode keeps ReID off; quality still requires models.reid.enabled: true.
         reid_enabled = bool(reid_cfg.get("enabled", False)) and self.perf_mode == "quality"
+        self.reid_cfg = reid_cfg
         self.reid_extractor = SoftReIdExtractor(
             weights=reid_cfg.get("weights"),
+            onnx_weights=reid_cfg.get("onnx_weights"),
             device=str(reid_cfg.get("device", "cpu")),
             enabled=reid_enabled,
             base_dir=os.getcwd(),
@@ -277,12 +279,24 @@ class EdgePipeline:
                 },
             ))
         if prod_cfg.get("enabled", True):
-            prod_path = self._first_existing_weight(
-                prod_cfg.get("weights", "models/yolov8s-worldv2.pt"),
-                "models/yolov8s-worldv2.pt",
-                "models/pack/05-open-vocab/yolov8s-worldv2.pt",
-                "models/pack/07-openvocab/yolov8s-worldv2.pt",
-            ) or prod_cfg.get("weights", "models/yolov8s-worldv2.pt")
+            backend = str(prod_cfg.get("backend", "world") or "world").lower()
+            if backend == "yoloe":
+                prod_path = self._first_existing_weight(
+                    prod_cfg.get("shelf_weights") or prod_cfg.get("weights"),
+                    "models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
+                    "models/yolov8s-worldv2.pt",
+                    "models/pack/05-open-vocab/yolov8s-worldv2.pt",
+                ) or "models/pack/06-shelf/yoloe-v8s-seg-pf.pt"
+            else:
+                prod_path = self._first_existing_weight(
+                    prod_cfg.get("weights", "models/yolov8s-worldv2.pt"),
+                    "models/yolov8s-worldv2.pt",
+                    "models/pack/05-open-vocab/yolov8s-worldv2.pt",
+                    "models/pack/07-openvocab/yolov8s-worldv2.pt",
+                    "models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
+                ) or prod_cfg.get("weights", "models/yolov8s-worldv2.pt")
+            self._products_backend = backend
+            self._products_weights = prod_path
             self.registry.register(ModelSpec(
                 key="products", kind="ultralytics", path=prod_path,
                 capability="product", tier=TIER_SLOW,
@@ -338,6 +352,7 @@ class EdgePipeline:
                     vocabulary=prod_cfg.get("vocabulary"),
                     conf_threshold=float(prod_cfg.get("confidence", 0.20)),
                     device=self.enrichment_device,
+                    mode=getattr(self, "_products_backend", "world"),
                 )
             else:
                 self.model_errors["products"] = self.registry.error("products") or "unavailable"
@@ -828,6 +843,7 @@ class EdgePipeline:
             )
             max_products = int(slow_cfg.get("max_products_per_tick", 24))
             ctx["products"].observe(detections[:max_products], tracks, frame_time)
+        self._sample_soft_reid(cam_id, ctx, tracks, frame, frame_time)
 
         # --- 7. Housekeeping -------------------------------------------------
         active_ids = [t.track_id for t in tracks]
@@ -835,6 +851,40 @@ class EdgePipeline:
         attention.prune(active_ids)
         ctx["groups"].prune(active_ids)
         ctx["products"].prune(active_ids)
+
+
+    def _sample_soft_reid(self, cam_id, ctx, tracks, frame, frame_time):
+        if not self.reid_extractor.active or not tracks:
+            return
+        interval = int(getattr(self, "reid_cfg", {}).get("interval_frames", 16))
+        last = int(ctx.get("last_reid_frame_idx", -10**9))
+        frame_idx = int(ctx.get("last_slow_frame_idx", 0) or 0)
+        if frame_idx - last < interval:
+            return
+        ctx["last_reid_frame_idx"] = frame_idx
+        max_crops = int(getattr(self, "reid_cfg", {}).get("max_crops_per_tick", 4))
+        h, w = frame.shape[:2]
+        crops, chosen = [], []
+        for track in tracks[:max_crops]:
+            x1, y1, x2, y2 = [int(v) for v in track.bbox]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 - x1 < 16 or y2 - y1 < 32:
+                continue
+            crops.append(frame[y1:y2, x1:x2].copy())
+            chosen.append(track)
+        if not crops:
+            return
+        feats = self.reid_extractor.extract_crops(crops)
+        if feats is None:
+            return
+        for track, emb in zip(chosen, feats):
+            foot = getattr(track, "foot_point", None)
+            self.reid_gallery.add(ReIdEmbedding(
+                camera_id=cam_id, track_id=int(track.track_id), embedding=emb,
+                capture_ts_utc=float(frame_time),
+                foot_xy=(float(foot[0]), float(foot[1])) if foot is not None else None,
+            ))
 
     @staticmethod
     def _track_in_zone(ctx: Dict[str, Any], track: Any) -> bool:
@@ -987,6 +1037,29 @@ class EdgePipeline:
         attention = ctx["attention"].snapshot() if ctx.get("attention") else {}
         groups = ctx["groups"].snapshot() if ctx.get("groups") else {}
 
+        products_top = None
+        if ctx.get("products"):
+            prod_snap = ctx["products"].snapshot()
+            products = prod_snap.get("products") or []
+            if products:
+                products_top = [
+                    {
+                        "category": p["category"],
+                        "viewers": int(p.get("viewers", 0) or 0),
+                        "avg_dwell_seconds": float(p.get("avg_dwell_seconds", 0.0) or 0.0),
+                        "detections": int(p.get("detections", 0) or 0),
+                    }
+                    for p in products[:8]
+                ]
+        if not products_top:
+            try:
+                products_top = self.local_buffer.get_recent_products_top(cam_id, limit=8) or None
+            except Exception:
+                products_top = None
+        if products_top is not None and len(products_top) == 0:
+            products_top = None
+        reid_status = self.reid_extractor.status() if getattr(self, "reid_extractor", None) else {}
+
         payload = {
             "store_id": self.store_id,
             "device_id": self.device_id,
@@ -1026,6 +1099,7 @@ class EdgePipeline:
             "queues": queues_out,
             "zones": zones_out,
             "staff_zones": staff_zones,
+            "products_top": products_top,
             "engagement": {
                 "avg_attention_score": attention.get("avg_attention_score", 0.0),
                 "facing_ratio": attention.get("facing_ratio", 0.0),
@@ -1052,6 +1126,13 @@ class EdgePipeline:
                 ),
             },
             "perf_mode": getattr(self, "perf_mode", "fast"),
+            "reid": {
+                "active": bool(reid_status.get("active")),
+                "backend": reid_status.get("backend"),
+                "gallery_size": self.reid_gallery.size(),
+                "session_scoped": True,
+                "cross_cam_fusion": False,
+            },
             "track_ids": [t.track_id for t in customers[:40]],
         }
 

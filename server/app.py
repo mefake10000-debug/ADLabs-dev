@@ -989,6 +989,11 @@ def get_device_health():
         },
         "reid": {
             "cross_cam_fusion": False,
-            "note": "Soft OSNet pack weight may be on disk; fusion / global_person_id is Future.",
+            "session_scoped": True,
+            "active": bool((snap or {}).get("reid", {}).get("active")) if snap else None,
+            "backend": (snap or {}).get("reid", {}).get("backend") if snap else None,
+            "gallery_size": (snap or {}).get("reid", {}).get("gallery_size") if snap else None,
+            "flag": "models.reid.enabled: true + EDGE_PERF_MODE=quality (ONNX; session-scoped)",
+            "note": "Soft body ReID only — no face ID / multi-day. Fusion / global_person_id is Future.",
         },
     }

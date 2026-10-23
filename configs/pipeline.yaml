@@ -133,11 +133,10 @@ models:
     focal_scale: 1.0          # 1.0 => focal length equals frame width
 
   products:
-    enabled: false            # YOLO-World+CLIP thrash on Docker CPU (pip git+clip retries)
-    # Category interest via YOLO-World prompts — not POS / closed-set grocery SKUs.
-    # Pack: models/pack/05-open-vocab/yolov8s-worldv2.pt (+ yolov8l-worldv2.pt offline).
-    # Shelf masks: models/pack/06-shelf/yoloe-v8s-seg-pf.pt (not wired yet — see pack README).
+    enabled: false            # quality mode re-enables; yoloe avoids CLIP thrash
+    backend: "yoloe"
     weights: "models/yolov8s-worldv2.pt"
+    shelf_weights: "models/pack/06-shelf/yoloe-v8s-seg-pf.pt"
     confidence: 0.20
     max_person_overlap: 0.5   # drop detections that are really a shopper wearing the item
     engagement_radius_px: 160 # how close a shopper must be to count as viewing a product
@@ -162,9 +161,11 @@ models:
   # Soft body ReID (OSNet). Default OFF — DPDP / no face ReID / no multi-day gallery.
   # Session-scoped embeddings only; SoftReIdExtractor also probes verified pack paths.
   # Cross-cam global_person_id still requires NTP + overlap + fusion (not shipped).
+  # Soft ReID: enabled true + EDGE_PERF_MODE=quality (fast keeps off). Session-scoped ONNX.
   reid:
-    enabled: false
+    enabled: true
     weights: "models/pack/03-reid/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+    onnx_weights: "models/pack/03-reid/osnet_x0_25_msmt17.onnx"
     # Alternatives (same SoftReIdExtractor fallback chain):
     #   models/pack/03-reid/osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth
     #   models/pack/03-reid/osnet-x0_25/osnet_x0_25_msmt17.pt   # legacy nested
