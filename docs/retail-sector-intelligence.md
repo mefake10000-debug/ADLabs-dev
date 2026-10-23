@@ -1,6 +1,6 @@
 # Retail sector intelligence (EdgeSight)
 
-Companion to the portal Live hub. Floor roles replace the retired industry vertical taxonomy (fashion NFC / restaurant tables / manufacturing conveyor / jewelry touchpoints).
+Companion to the portal Live hub drawer. Floor roles replace the retired industry vertical taxonomy (fashion NFC / restaurant tables / manufacturing conveyor / jewelry touchpoints).
 
 ## `/api/v1/live` additions
 
@@ -28,4 +28,4 @@ GET  /api/v1/nfc/taps
 
 `tests/test_nfc_industry.py` — empty NFC → NEEDS-HARDWARE; real POST → LIVE; `retail_roles.schema == floor_roles_v1`.
 
-See also portal `docs/retail-sector-intelligence.md` when present.
+See also portal `docs/retail-sector-intelligence.md`.
