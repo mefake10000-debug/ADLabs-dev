@@ -24,8 +24,8 @@ performance:
   imgsz: 320                  # Ultralytics letterbox; quality YOLO uses 640; RF-DETR is fixed
   infer_every_n: 3            # Docker CPU: every 3rd frame; set 2 for denser tracks
   display_every_n: 1          # smooth MJPEG from last tracks between infer frames
-  # Process both configured camera views; each is reported separately until fusion gates pass.
-  max_cameras: 2
+  # Docker CPU demo: 1 cam. Peer fusion can raise EDGE_MAX_CAMERAS after measuring KPI floor.
+  max_cameras: 1
 
 perception:
   # Fast-tier default: YOLO26n. Quality defaults to RF-DETR (Apache SOTA) unless
