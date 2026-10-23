@@ -1,0 +1,4 @@
+P2PNet — SKIP for commercial EdgeSight.
+Upstream LICENSE restricts use to academic research.
+Upstream: https://github.com/TencentYoutuResearch/CrowdCounting-P2PNet
+Prefer raising detector max_det before any crowd-count model.

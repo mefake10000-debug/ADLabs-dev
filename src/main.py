@@ -13,7 +13,10 @@ from src.perception.detector import PersonDetector
 from src.perception.tracker import SimpleByteTracker
 from src.perception.performance import limit_cameras, resolve_performance
 from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_SLOW
+from src.perception.model_stack import demographics_env_enabled
 from src.perception.pose_estimator import PoseEstimator, match_pose_to_track
+from src.analytics.pose_fall_candidate import status as pose_fall_status
+from src.analytics.shelf_gap_geometry import snapshot as shelf_gap_snapshot
 from src.perception.face_detector import FaceDetector, face_inside_box, crop_face, align_face
 from src.perception.age_gender import AgeGenderEstimator
 from src.perception.head_pose import HeadPoseEstimator
@@ -265,9 +268,19 @@ class EdgePipeline:
         """
         pose_cfg = self.models_cfg.get("pose", {}) or {}
         face_cfg = self.models_cfg.get("face", {}) or {}
-        demo_cfg = self.models_cfg.get("demographics", {}) or {}
+        demo_cfg = dict(self.models_cfg.get("demographics", {}) or {})
         head_cfg = self.models_cfg.get("head_pose", {}) or {}
         prod_cfg = self.models_cfg.get("products", {}) or {}
+
+        # DPIA / k-anon latch: ENABLE_DEMOGRAPHICS defaults off — never load MiVOLO/age path live.
+        if not demographics_env_enabled():
+            demo_cfg["enabled"] = False
+            self.models_cfg["demographics"] = demo_cfg
+            logger.info(
+                "Demographics model gated off (ENABLE_DEMOGRAPHICS=%s). "
+                "Set ENABLE_DEMOGRAPHICS=1 and DEMOGRAPHICS_DPIA_OK=1 after DPIA + k≥10 wiring.",
+                os.environ.get("ENABLE_DEMOGRAPHICS", "0"),
+            )
 
         if pose_cfg.get("enabled", True):
             self.registry.register(ModelSpec(
@@ -393,6 +406,13 @@ class EdgePipeline:
             if os.path.isfile(path) and os.path.getsize(path) > 1000:
                 return rel if not os.path.isabs(rel) else path
         return None
+
+    @staticmethod
+    def _rtmpose_on_disk() -> bool:
+        pose_dir = os.path.join(os.getcwd(), "models", "pack", "07-pose")
+        if not os.path.isdir(pose_dir):
+            return False
+        return any(name.endswith(".onnx") for name in os.listdir(pose_dir))
 
     def _resolve_demographics_weights(self, demo_cfg: Dict[str, Any]) -> str:
         """Picks the demographics checkpoint to load.
@@ -1122,6 +1142,20 @@ class EdgePipeline:
             "zones": zones_out,
             "staff_zones": staff_zones,
             "products_top": products_top,
+            "shelf_gap": shelf_gap_snapshot([]),
+            "pose_fall": pose_fall_status(
+                pose_weights_on_disk=self._rtmpose_on_disk(),
+                wired=bool(self.pose_estimator),
+            ),
+            "field_status": {
+                "demographics": "GATED" if not demographics_env_enabled() else "PARTIAL",
+                "shelf_gap_geometry": "PARTIAL",
+                "pose_fall_candidate": pose_fall_status(
+                    pose_weights_on_disk=self._rtmpose_on_disk(),
+                    wired=bool(self.pose_estimator),
+                ).get("status", "FUTURE"),
+                "locateanything_3b": "FUTURE",
+            },
             "engagement": {
                 "avg_attention_score": attention.get("avg_attention_score", 0.0),
                 "facing_ratio": attention.get("facing_ratio", 0.0),
@@ -1140,7 +1174,9 @@ class EdgePipeline:
                 "pose": bool(getattr(self, "pose_estimator", None)),
                 "face_boxes": bool(getattr(self, "face_detector", None)),
                 "products": bool(getattr(self, "world_detector", None)) or bool(products_top),
+                "demographics_enabled": demographics_env_enabled(),
                 "face_identity": False,
+                "stack_policy": "docs/model-stack-policy.md",
                 "note": (
                     f"perf={getattr(self, 'perf_mode', 'fast')}: "
                     "person detect+track+zones"
@@ -1320,6 +1356,8 @@ class EdgePipeline:
             "group_count": group_metrics.get("group_count", 0),
             "people_in_groups": group_metrics.get("people_in_companies", 0),
             "demographics_json": json.dumps(demographics_metrics),
+            "loop_count": int(getattr(ctx.get("reader"), "loop_count", 0) or 0),
+            "is_simulated": 1 if getattr(ctx.get("reader"), "is_file", False) else 0,
         }
 
         self.local_buffer.save_rollup(rollup)

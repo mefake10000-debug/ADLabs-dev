@@ -1,0 +1,2 @@
+LocateAnything-3B — FUTURE / do not download (NVIDIA non-commercial).
+See docs/locateanything-3b-integration.md and docs/model-stack-policy.md.

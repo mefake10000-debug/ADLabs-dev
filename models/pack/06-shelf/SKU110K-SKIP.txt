@@ -1,0 +1,2 @@
+SKU-110K shelf weights — SKIP (non-commercial).
+Prefer shelf_gap_geometry from existing boxes, or Roboflow Universe CC BY 4.0 gap datasets.

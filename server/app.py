@@ -662,6 +662,23 @@ def get_engagement_analytics(
             "series": series,
         }
 
+@app.get("/api/v1/models/stack")
+def get_model_stack():
+    """Honest model-stack catalog (LIVE|PACKED|PARTIAL|GATED|FUTURE|SKIP).
+
+    Never invents LIVE age/gender. See docs/model-stack-policy.md.
+    """
+    try:
+        from src.perception.model_stack import build_model_stack
+        return build_model_stack(os.getcwd())
+    except Exception as e:
+        logger.exception("model stack catalog failed")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "policy": "docs/model-stack-policy.md"},
+        )
+
+
 @app.get("/api/v1/analytics/demographics")
 def get_demographics_analytics(
     store_id: str = "store_mumbai_001",
@@ -671,7 +688,22 @@ def get_demographics_analytics(
 
     The edge node only sends cohorts that already cleared the k-anonymity
     threshold, so everything in this response describes at least k individuals.
+    Gated by ENABLE_DEMOGRAPHICS (default 0) — returns EMPTY when off.
     """
+    if os.environ.get("ENABLE_DEMOGRAPHICS", "0").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return {
+            "store_id": store_id,
+            "camera_id": camera_id,
+            "available": False,
+            "status": "GATED",
+            "reason": (
+                "ENABLE_DEMOGRAPHICS=0 (default). "
+                "Demographics stay EMPTY/FUTURE until DPIA + k≥10 gate is wired."
+            ),
+            "demographics": None,
+        }
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         query = """
