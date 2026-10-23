@@ -990,6 +990,33 @@ def update_camera_calibration(camera_id: str, body: CalibrationUpdate):
     _write_config(config)
     return {"status": "success", "camera": _redact_camera(cam)}
 
+def _resolve_overlay_box_style(snap: Optional[Dict[str, Any]] = None) -> str:
+    """Read overlay style from live snapshot (edge) or local env; default parallel."""
+    if snap:
+        style = snap.get("overlay_box_style") or (snap.get("models") or {}).get("overlay_box_style")
+        if style in ("parallel", "aabb"):
+            return style
+    raw = (os.environ.get("OVERLAY_BOX_STYLE") or "parallel").strip().lower()
+    return raw if raw in ("parallel", "aabb") else "parallel"
+
+
+@app.get("/api/v1/overlay")
+def get_overlay_settings():
+    """Visual overlay flags only (no KPIs). Edge applies OVERLAY_BOX_STYLE on annotated MJPEG."""
+    snap = _read_live_snapshot()
+    style = _resolve_overlay_box_style(snap)
+    return {
+        "overlay_box_style": style,
+        "options": ["parallel", "aabb"],
+        "default": "parallel",
+        "note": (
+            "Set OVERLAY_BOX_STYLE=parallel|aabb on edge-analyzer (Compose) and restart. "
+            "Visual change only — detection/tracking unchanged."
+        ),
+        "docs": "docs/overlay-parallel-boxes.md",
+    }
+
+
 # Device Hardware Health Endpoint
 @app.get("/api/v1/device/health")
 def get_device_health():
@@ -1029,6 +1056,7 @@ def get_device_health():
         "infer_fps": snap.get("infer_fps") if snap else None,
         "people_now": snap.get("people_now") if snap else None,
         "perf_mode": perf_mode,
+        "overlay_box_style": _resolve_overlay_box_style(snap),
         "person_detector": models.get("person_detector") or models.get("detect_model"),
         "status": "Healthy (Online)",
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),

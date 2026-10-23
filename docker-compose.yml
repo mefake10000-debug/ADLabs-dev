@@ -48,6 +48,9 @@ services:
       # See docs/live-fps.md. Default one cam on Docker CPU; set EDGE_MAX_CAMERAS= empty for all.
       - EDGE_PERF_MODE=${EDGE_PERF_MODE:-fast}
       - EDGE_MAX_CAMERAS=${EDGE_MAX_CAMERAS:-1}
+      # Person overlays: parallel (default, sheared parallelogram + footprint) | aabb (classic YOLO rect).
+      # Visual only — see docs/overlay-parallel-boxes.md.
+      - OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-parallel}
       - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}
       # Block Ultralytics `pip install git+CLIP` thrash (needs git; kills Docker CPU FPS).
       # openai-clip baked via requirements-edge.txt + Dockerfile ENV YOLO_AUTOINSTALL=false.

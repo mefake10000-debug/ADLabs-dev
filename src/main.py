@@ -32,7 +32,7 @@ from src.analytics.product_interest import ProductInterestAnalyzer
 from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
-from src.visualizer.debug_overlay import DebugOverlay
+from src.visualizer.debug_overlay import DebugOverlay, resolve_overlay_box_style
 from src.perception.reid import ReIdEmbedding, SoftReIdExtractor, SoftReIdGallery
 
 try:
@@ -1129,6 +1129,7 @@ class EdgePipeline:
             "decode_fps": round(float(getattr(ctx.get("reader"), "fps_actual", 0.0) or 0.0), 1),
             "infer_fps": round(float(ctx.get("processed_fps", 0.0) or 0.0), 1),
             "display_fps": round(float(ctx.get("display_fps", 0.0) or 0.0), 1),
+            "overlay_box_style": resolve_overlay_box_style(),
             "tripwires": [
                 {
                     "id": getattr(tw, "wire_id", None) or getattr(tw, "id", "tw"),
@@ -1170,6 +1171,7 @@ class EdgePipeline:
                 "tracker": "bytetrack",
                 "perf_mode": getattr(self, "perf_mode", "fast"),
                 "infer_every_n": int(getattr(self, "infer_every_n", 1) or 1),
+                "overlay_box_style": resolve_overlay_box_style(),
                 "enrichment": bool(getattr(self, "models_enabled", False)),
                 "pose": bool(getattr(self, "pose_estimator", None)),
                 "face_boxes": bool(getattr(self, "face_detector", None)),

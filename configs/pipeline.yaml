@@ -14,8 +14,9 @@ edge:
 #   performance.mode: fast|quality       # this file
 #   EDGE_MAX_CAMERAS=1                   # optional: one cam ≈ 2× FPS vs two cams
 #   EDGESIGHT_DETECT_MODEL=…             # optional weight override
+#   OVERLAY_BOX_STYLE=parallel|aabb      # MJPEG person boxes (default parallel); visual only
 #
-# See docs/live-fps.md for measured tradeoffs and native-macOS MPS notes.
+# See docs/live-fps.md and docs/overlay-parallel-boxes.md.
 performance:
   mode: "fast"                # fast (demo) | quality (enrichment on)
   imgsz: 320                  # Ultralytics letterbox; quality uses 640
