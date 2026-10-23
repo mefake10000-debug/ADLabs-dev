@@ -162,6 +162,7 @@ def init_db():
         _add_column(conn, "telemetry_rollups", "demographics_json", "TEXT")
         _add_column(conn, "telemetry_rollups", "loop_count", "INTEGER DEFAULT 0")
         _add_column(conn, "telemetry_rollups", "is_simulated", "INTEGER DEFAULT 0")
+        _add_column(conn, "telemetry_rollups", "source_session_id", "TEXT")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS device_registry (
             device_id TEXT PRIMARY KEY,
@@ -235,6 +236,7 @@ class RollupItem(BaseModel):
     # Sample-video provenance (loop_count > 0 => replaying sample footage, not live RTSP)
     loop_count: Optional[int] = 0
     is_simulated: Optional[int] = 0
+    source_session_id: Optional[str] = None
 
 class TelemetryPayload(BaseModel):
     batch_size: int
@@ -325,15 +327,15 @@ def receive_telemetry(payload: TelemetryPayload):
                 queue_length, avg_queue_wait_seconds, queue_alert_active,
                 avg_attention_score, facing_ratio, phone_usage_rate, engaged_ratio,
                 group_count, people_in_groups, demographics_json,
-                loop_count, is_simulated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                loop_count, is_simulated, source_session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 r.store_id, r.device_id, r.camera_id, r.timestamp_start, r.timestamp_end,
                 r.in_count, r.out_count, r.current_occupancy, r.avg_dwell_seconds,
                 r.queue_length, r.avg_queue_wait_seconds, r.queue_alert_active,
                 r.avg_attention_score, r.facing_ratio, r.phone_usage_rate, r.engaged_ratio,
                 r.group_count, r.people_in_groups, r.demographics_json,
-                r.loop_count or 0, r.is_simulated or 0
+                r.loop_count or 0, r.is_simulated or 0, r.source_session_id
             ))
         conn.commit()
     return {"status": "success", "processed_records": len(payload.rollups)}
@@ -459,14 +461,28 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         FROM telemetry_rollups
         WHERE store_id = ? AND date(received_at) = date('now')
           AND (
-              COALESCE(is_simulated, 0) = 0
-              OR loop_count = (
-                  SELECT MAX(r2.loop_count)
-                  FROM telemetry_rollups r2
-                  WHERE r2.store_id = telemetry_rollups.store_id
-                    AND r2.camera_id = telemetry_rollups.camera_id
-                    AND date(r2.received_at) = date('now')
-                    AND COALESCE(r2.is_simulated, 0) = 1
+              (COALESCE(is_simulated, 0) = 0 AND source_session_id IS NOT NULL)
+              OR (
+                  COALESCE(is_simulated, 0) = 1
+                  AND source_session_id = (
+                      SELECT r2.source_session_id
+                      FROM telemetry_rollups r2
+                      WHERE r2.store_id = telemetry_rollups.store_id
+                        AND r2.camera_id = telemetry_rollups.camera_id
+                        AND date(r2.received_at) = date('now')
+                        AND COALESCE(r2.is_simulated, 0) = 1
+                        AND r2.source_session_id IS NOT NULL
+                      ORDER BY r2.id DESC LIMIT 1
+                  )
+                  AND loop_count = (
+                      SELECT MAX(r3.loop_count)
+                      FROM telemetry_rollups r3
+                      WHERE r3.store_id = telemetry_rollups.store_id
+                        AND r3.camera_id = telemetry_rollups.camera_id
+                        AND r3.source_session_id = telemetry_rollups.source_session_id
+                        AND date(r3.received_at) = date('now')
+                        AND COALESCE(r3.is_simulated, 0) = 1
+                  )
               )
           )
         """
@@ -557,8 +573,8 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "perf_mode": snap.get("perf_mode") or (snap.get("models") or {}).get("perf_mode"),
                 "last_updated": snap.get("timestamp") or result["last_updated"],
                 "source": "live_snapshot",
-                "occupancy_mode": "active_tracks",
-                "occupancy_note": (
+                "occupancy_mode": snap.get("occupancy_mode") or "active_tracks",
+                "occupancy_note": snap.get("occupancy_note") or (
                     "people_now = active customer tracks (matches YOLO overlay). "
                     "Tripwire IN/OUT are session/pass totals from the live snapshot "
                     "(0 is real — not a day rollup). Multi-cam still sums cameras."
@@ -567,6 +583,7 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "engagement": snap.get("engagement"),
                 "cameras": snap.get("cameras"),
                 "reid": snap.get("reid"),
+                "fusion": snap.get("fusion"),
                 "products_top": snap.get("products_top"),
                 "zones": snap.get("zones"),
                 "staff_zones": snap.get("staff_zones"),
@@ -1511,8 +1528,7 @@ def get_device_health():
     except ImportError:
         cpu = 14.2
         mem = 38.5
-    # clock_sync.ntp_ok stays null until chrony/systemd-timesyncd is verified on the host.
-    # Frame stamps use host wall + monotonic; do not treat association windows as NTP-safe yet.
+    # Camera clocks are not phase-locked. Fusion uses same-edge receive monotonic timestamps.
     snap = _read_live_snapshot()
     # Never invent FPS — null until a live snapshot exists.
     pipeline_fps = None
@@ -1521,6 +1537,7 @@ def get_device_health():
     elif snap and snap.get("decode_fps") is not None:
         pipeline_fps = float(snap.get("decode_fps") or 0)
     models = (snap or {}).get("models") or {}
+    fusion = (snap or {}).get("fusion") or {}
     perf_mode = (
         (snap or {}).get("perf_mode")
         or models.get("perf_mode")
@@ -1557,10 +1574,11 @@ def get_device_health():
         "clock_sync": {
             "ntp_ok": None,
             "max_estimated_skew_ms": None,
-            "note": "Host NTP not probed yet. Frames carry capture_ts_utc (wall) + capture_ts_mono.",
+            "note": "Host NTP not probed. Fusion uses same-edge receive monotonic timestamps; camera exposure sync is not verified.",
         },
+        "fusion": fusion or None,
         "reid": {
-            "cross_cam_fusion": False,
+            "cross_cam_fusion": bool(fusion.get("enabled")),
             "session_scoped": True,
             "active": bool((snap or {}).get("reid", {}).get("active")) if snap else None,
             "backend": (snap or {}).get("reid", {}).get("backend") if snap else None,
@@ -1571,7 +1589,8 @@ def get_device_health():
             ),
             "note": (
                 "Soft body ReID only — no face ID / multi-day gallery. "
-                "Fusion / global_person_id is Future."
+                f"Fusion state: {fusion.get('status', 'NO_SNAPSHOT')}; "
+                f"gate: {fusion.get('gate_reason') or 'none'}."
             ),
         },
     }

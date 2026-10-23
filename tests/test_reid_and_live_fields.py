@@ -114,15 +114,23 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
         """Replay rollups from earlier loops must not inflate today's sample-video footfall."""
         now = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
         with sqlite3.connect(self.db_path) as conn:
-            for loop_count, in_count in ((1, 4), (1, 2), (2, 3)):
+            for session_id, loop_count, in_count in (
+                ("previous-session", 9, 100),
+                ("current-session", 1, 4),
+                ("current-session", 1, 2),
+                ("current-session", 2, 3),
+            ):
                 conn.execute(
                     """INSERT INTO telemetry_rollups (
                         store_id, device_id, camera_id, timestamp_start, timestamp_end,
                         in_count, out_count, current_occupancy, avg_dwell_seconds,
                         queue_length, avg_queue_wait_seconds, queue_alert_active,
-                        is_simulated, loop_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 1, ?)""",
-                    ("store_mumbai_001", "test-edge", "sim_cam", now, now, in_count, loop_count),
+                        is_simulated, loop_count, source_session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 1, ?, ?)""",
+                    (
+                        "store_mumbai_001", "test-edge", "sim_cam", now, now,
+                        in_count, loop_count, session_id,
+                    ),
                 )
             conn.commit()
 

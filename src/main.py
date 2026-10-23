@@ -6,6 +6,7 @@ import signal
 import yaml
 import logging
 import threading
+import uuid
 from typing import Dict, List, Any, Optional
 
 from src.ingestion.stream_reader import StreamReader
@@ -62,6 +63,7 @@ class EdgePipeline:
 
         self.store_id = self.pipeline_cfg.get("edge", {}).get("store_id", "store_default")
         self.device_id = self.pipeline_cfg.get("edge", {}).get("device_id", "edge_01")
+        self.source_session_id = uuid.uuid4().hex
         self.alerts_engine = AlertsEngine()
         self.staff_response = StaffQueueResponseTracker(
             response_timeout_seconds=float(
@@ -2015,6 +2017,7 @@ class EdgePipeline:
             "demographics_json": json.dumps(demographics_metrics),
             "loop_count": int(getattr(ctx.get("reader"), "loop_count", 0) or 0),
             "is_simulated": 1 if getattr(ctx.get("reader"), "is_file", False) else 0,
+            "source_session_id": self.source_session_id,
         }
 
         self.local_buffer.save_rollup(rollup)
@@ -2097,4 +2100,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
