@@ -1,5 +1,9 @@
 # Helper handoff wiring — implementation status
 
+**Edge tip:** `3a75b22` (+ journey-import fix commit) on `cursor/helper-handoff-wire-ec43-v2` / `mefake/integration`  
+**Site tip:** `dfa5269` on matching branches  
+**Anti-hallucination:** null / omit + PARTIAL/FUTURE badges when not computed. No fake demographics, identity, multi-store, or stop-rate without glass ROI.
+
 **Branch tip:** `cursor/helper-handoff-wire-ec43-v2` → FF `mefake/integration` (EdgeSight). Portal on matching site branch.  
 **Anti-hallucination:** null / omit + PARTIAL/FUTURE badges when not computed. No fake demographics, identity, multi-store, or stop-rate without glass ROI.
 

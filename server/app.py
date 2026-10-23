@@ -49,7 +49,20 @@ from server.nfc_store import (
     record_tap,
     retail_roles_block,
 )
-from src.analytics.journey import build_journey_block, zones_from_snapshot_rows
+try:
+    from src.analytics.journey import build_journey_block, zones_from_snapshot_rows
+except ImportError:
+    # cloud-dashboard image mounts ./server only — journey helpers live under ./src.
+    def zones_from_snapshot_rows(rows):  # type: ignore[misc]
+        return []
+
+    def build_journey_block(zone_rows=None):  # type: ignore[misc]
+        return {
+            "status": "PARTIAL",
+            "badge_copy": "Journey block needs edge src mount or live snapshot journey.",
+            "stages": [],
+            "dead_zones": [],
+        }
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
