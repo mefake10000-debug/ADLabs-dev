@@ -1230,7 +1230,8 @@ class EdgePipeline:
             delta_out = current_out - ctx["last_out_count"]
             ctx["last_in_count"] = current_in
             ctx["last_out_count"] = current_out
-            current_occupancy = max(0, current_in - current_out)
+            # People on floor now (= YOLO HUD), not tripwire IN−OUT net (looping demos).
+            current_occupancy = len(ctx.get("current_active_tracks", []))
         else:
             # Pure Computer Vision People Tracking and Counting
             total_unique = len(ctx["tracked_ids_today"])
