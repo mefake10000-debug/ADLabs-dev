@@ -5,6 +5,11 @@ Heavy AABB / pallet boxes are optional (``parallel`` / ``aabb``). ``skeleton`` d
 thin joint lines when RTMPose / YOLO-pose keypoints are on the track.
 
 ``OVERLAY_BOX_STYLE=foot|skeleton|parallel|aabb`` (default **foot**).
+
+Models / overlay own **people vs store objects** only. Queue / staff / territory /
+dwell polygons are **client-owned calibration** — this module draws whatever the
+edge already loaded from cameras.yaml; it must never invent, auto-mark, or rewrite
+those polygons.
 """
 from __future__ import annotations
 
