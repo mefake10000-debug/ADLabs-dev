@@ -1,10 +1,11 @@
 """Debug / live MJPEG overlays for EdgeSight.
 
 Default person UI is **foot** tracking: red ground-contact mark + faint ID + trail.
-Heavy AABB / pallet boxes are optional (``parallel`` / ``aabb``). ``skeleton`` draws
-thin joint lines when RTMPose / YOLO-pose keypoints are on the track.
+Optional heavy styles: ``nvidia`` (LocateAnything pallet look-alike), ``parallel``,
+``aabb``. ``skeleton`` draws thin joint lines when RTMPose keypoints are present.
 
-``OVERLAY_BOX_STYLE=foot|skeleton|parallel|aabb`` (default **foot**).
+``OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb`` (default **foot**).
+``pallet`` aliases to ``nvidia``.
 """
 from __future__ import annotations
 
@@ -29,18 +30,18 @@ PERSON_COLOR = (0, 255, 255)  # cyan
 STILL_COLOR = (120, 160, 120)
 FOOT_COLOR = (0, 0, 255)  # red — primary position mark
 SKELETON_COLOR = (180, 180, 180)
+OBJECT_COLOR = (0, 200, 120)
 
 _SHEAR_SPEED_MIN = 8.0
 _MAX_SHEAR_FRAC = 0.45
 _ISO_SHEAR_FRAC = 0.18
 
-_VALID_STYLES = frozenset({"foot", "skeleton", "parallel", "aabb"})
-# Aliases kept for peers / older compose files
-_ALIAS = {"nvidia": "parallel", "pallet": "parallel"}
+_VALID_STYLES = frozenset({"foot", "skeleton", "nvidia", "parallel", "aabb"})
+_ALIAS = {"pallet": "nvidia"}
 
 
 def resolve_overlay_box_style(env: Optional[Dict[str, str]] = None) -> str:
-    """Default ``foot``. Accepts foot|skeleton|parallel|aabb (+ nvidia/pallet → parallel)."""
+    """Default ``foot``. Accepts foot|skeleton|nvidia|parallel|aabb (+ pallet → nvidia)."""
     src = env if env is not None else os.environ
     raw = (src.get("OVERLAY_BOX_STYLE") or "foot").strip().lower()
     raw = _ALIAS.get(raw, raw)
@@ -100,6 +101,106 @@ def parallel_footprint_quad(bbox: Sequence[float], shear: float) -> Any:
         ],
         dtype=np.int32,
     )
+
+
+def inset_parallel_quad(quad: Any, inset: float = 4.0) -> Any:
+    """Shrink a parallelogram toward its centroid (inner pallet rail)."""
+    pts = np.asarray(quad, dtype=np.float32)
+    c = pts.mean(axis=0)
+    out = []
+    for p in pts:
+        v = p - c
+        n = float(np.linalg.norm(v)) or 1.0
+        scale = max(0.55, 1.0 - float(inset) / n)
+        out.append(c + v * scale)
+    return np.asarray(out, dtype=np.int32)
+
+
+def _draw_corner_caps(canvas: Any, quad: Any, color: Tuple[int, int, int], frac: float = 0.22) -> None:
+    """Short L-caps at each parallelogram corner (NVIDIA / Metropolis cue)."""
+    pts = np.asarray(quad, dtype=np.int32)
+    n = len(pts)
+    for i in range(n):
+        p = pts[i]
+        prev_p = pts[(i - 1) % n]
+        next_p = pts[(i + 1) % n]
+        for q in (prev_p, next_p):
+            dx = int(q[0] - p[0])
+            dy = int(q[1] - p[1])
+            ex = int(p[0] + dx * frac)
+            ey = int(p[1] + dy * frac)
+            cv2.line(canvas, (int(p[0]), int(p[1])), (ex, ey), color, 2, cv2.LINE_AA)
+
+
+def _draw_label_bar(canvas: Any, quad: Any, label: str, color: Tuple[int, int, int]) -> None:
+    """Solid label strip above the top-left of the parallelogram."""
+    pts = np.asarray(quad, dtype=np.int32)
+    x = int(min(pts[0][0], pts[1][0]))
+    y = int(min(pts[0][1], pts[1][1]))
+    text = str(label)[:48]
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+    pad_x, pad_y = 4, 3
+    x1 = max(0, x)
+    y1 = max(0, y - th - 2 * pad_y - 2)
+    x2 = min(canvas.shape[1] - 1, x1 + tw + 2 * pad_x)
+    y2 = min(canvas.shape[0] - 1, y1 + th + 2 * pad_y)
+    cv2.rectangle(canvas, (x1, y1), (x2, y2), (18, 18, 18), -1)
+    cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 1)
+    cv2.putText(
+        canvas,
+        text,
+        (x1 + pad_x, y2 - pad_y - 1),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (240, 240, 240),
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def draw_nvidia_pallet_box(
+    canvas: Any,
+    bbox: Sequence[float],
+    shear: float,
+    color: Tuple[int, int, int],
+    label: str,
+) -> None:
+    """LocateAnything-style parallel / palletized frame + class label (OpenCV)."""
+    body = parallel_body_quad(bbox, shear)
+    foot_q = parallel_footprint_quad(bbox, shear)
+    inner = inset_parallel_quad(
+        body, inset=max(3.0, 0.06 * max(float(bbox[2]) - float(bbox[0]), 1.0))
+    )
+    cv2.polylines(canvas, [body], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+    cv2.polylines(canvas, [inner], isClosed=True, color=color, thickness=1, lineType=cv2.LINE_AA)
+    cv2.polylines(canvas, [foot_q], isClosed=True, color=color, thickness=1, lineType=cv2.LINE_AA)
+    _draw_corner_caps(canvas, body, color)
+    if label:
+        _draw_label_bar(canvas, body, label, color)
+
+
+def person_label(track: Track, is_staff: bool = False) -> str:
+    """Person-priority label text for overlays (ID + optional dwell)."""
+    base = f"person ID:{track.track_id}"
+    dwell = float(getattr(track, "dwell_s", 0.0) or 0.0)
+    if dwell >= 0.5:
+        base = f"{base} {dwell:.0f}s"
+    if is_staff:
+        return f"{base} STAFF"
+    if getattr(track, "is_stationary", False):
+        return f"{base} (still)"
+    return base
+
+
+def object_label(det: Dict[str, Any]) -> str:
+    """Store-object class name (COCO / YOLOE / YOLO-World)."""
+    name = (
+        det.get("label")
+        or det.get("class_name")
+        or det.get("name")
+        or f"class_{det.get('class_id', '?')}"
+    )
+    return str(name).strip() or "object"
 
 
 def _draw_skeleton(canvas: Any, track: Track, color: Tuple[int, int, int] = SKELETON_COLOR) -> None:
@@ -258,22 +359,25 @@ class DebugOverlay:
                 2,
             )
 
-        # 4a. Optional store objects (never person) — light AABB only
+        # 4a. Optional store objects (never person)
         for det in objects or []:
             bbox = det.get("bbox")
             if not bbox or len(bbox) < 4:
                 continue
-            name = str(
-                det.get("label") or det.get("class_name") or det.get("name") or "object"
-            ).strip()
+            name = object_label(det)
             if name.lower() in ("person", "people"):
                 continue
-            x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 200, 120), 1)
-            cv2.putText(
-                canvas, name[:18], (x1, max(12, y1 - 4)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 120), 1,
-            )
+            if style == "nvidia":
+                width = max(1.0, float(bbox[2]) - float(bbox[0]))
+                shear = _ISO_SHEAR_FRAC * width
+                draw_nvidia_pallet_box(canvas, bbox, shear, OBJECT_COLOR, name)
+            else:
+                x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), OBJECT_COLOR, 1)
+                cv2.putText(
+                    canvas, name[:18], (x1, max(12, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, OBJECT_COLOR, 1,
+                )
 
         # 4b. People — style-dependent (foot default = no heavy boxes)
         for track in tracks:
@@ -287,6 +391,12 @@ class DebugOverlay:
 
             if style == "aabb":
                 cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2)
+            elif style == "nvidia":
+                width = max(1, b[2] - b[0])
+                shear = heading_shear_px(track, width)
+                draw_nvidia_pallet_box(
+                    canvas, track.bbox, shear, color, person_label(track, is_staff)
+                )
             elif style == "parallel":
                 width = max(1, b[2] - b[0])
                 shear = heading_shear_px(track, width)
@@ -302,11 +412,16 @@ class DebugOverlay:
             _draw_trail(canvas, track)
             _draw_faint_id(canvas, track, foot, is_staff)
 
-            # Heavier ID only for box styles (foot/skeleton stay faint)
+            # Heavier ID for light box styles (nvidia already has label bar)
             if style in ("aabb", "parallel"):
-                label = f"ID:{track.track_id}" + (
-                    " STAFF" if is_staff else " (still)" if is_stationary else ""
-                )
+                dwell = float(getattr(track, "dwell_s", 0.0) or 0.0)
+                label = f"ID:{track.track_id}"
+                if is_staff:
+                    label += " STAFF"
+                elif is_stationary:
+                    label += " (still)"
+                if dwell >= 1.0:
+                    label += f" {dwell:.0f}s"
                 cv2.putText(
                     canvas, label, (b[0], max(14, b[1] - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,

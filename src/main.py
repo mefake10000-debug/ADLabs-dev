@@ -667,7 +667,6 @@ class EdgePipeline:
         )
 
     def _build_camera_context(self, cam: Dict[str, Any]) -> Dict[str, Any]:
-        t_cfg = self.pipeline_cfg.get("tracking", {})
         cam_id = cam["id"]
         source = cam.get("source", "")
         fps_target = int(cam.get("fps_target", 15))

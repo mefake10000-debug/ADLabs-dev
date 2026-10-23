@@ -12,7 +12,7 @@ Env (wins over yaml):
   DETECTOR_BACKEND=yolo26|rfdetr  # fast/balanced→yolo26; quality→rfdetr unless set
   RFDETR_VARIANT=nano|small
   RFDETR_WEIGHTS=<path|filename>
-  OVERLAY_BOX_STYLE=foot|skeleton|parallel|aabb  # default foot (red ground mark)
+  OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb  # default foot; nvidia optional
   ENABLE_RTMPOSE=1|0                             # ankle feet when ONNX on disk
 """
 from __future__ import annotations

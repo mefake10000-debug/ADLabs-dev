@@ -9,10 +9,11 @@ Retail intelligence pack expands with license-clean phase-2 downloads.
 |-------|----------|
 | **`foot`** (default) | Red mark at ground contact + faint ID + trail. No heavy person box. |
 | `skeleton` | Thin joint lines (when RTMPose keypoints present) + red foot. |
-| `parallel` | Sheared parallelogram + footprint (peer option). |
+| `nvidia` | LocateAnything pallet look-alike (inset rails + corner caps). Optional. |
+| `parallel` | Sheared parallelogram + footprint (lighter peer option). |
 | `aabb` | Classic YOLO rectangles. |
 
-Aliases: `nvidia` / `pallet` → `parallel`.
+Alias: `pallet` → `nvidia`.
 
 Primary position for tripwire IN/OUT, zone dwell, and trajectories is always
 `track.foot_point` (pose ankles when available, else bbox bottom-center).

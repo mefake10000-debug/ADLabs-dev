@@ -15,14 +15,14 @@ class OverlayFootStyleTests(unittest.TestCase):
         self.assertEqual(resolve_overlay_box_style({}), "foot")
 
     def test_env_styles(self):
-        for style in ("foot", "skeleton", "parallel", "aabb"):
+        for style in ("foot", "skeleton", "nvidia", "parallel", "aabb"):
             self.assertEqual(
                 resolve_overlay_box_style({"OVERLAY_BOX_STYLE": style}), style
             )
 
-    def test_nvidia_alias_to_parallel(self):
+    def test_pallet_alias_to_nvidia(self):
         self.assertEqual(
-            resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "nvidia"}), "parallel"
+            resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "pallet"}), "nvidia"
         )
 
     def test_unknown_falls_back_to_foot(self):

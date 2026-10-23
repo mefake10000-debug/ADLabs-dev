@@ -580,6 +580,10 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "field_status": snap.get("field_status"),
                 "journey": snap.get("journey"),
                 "tripwires": snap.get("tripwires"),
+                "tracks": snap.get("tracks"),
+                "track_ids": snap.get("track_ids"),
+                "session_in": _snap_int("session_in", _snap_int("total_visitors", 0)),
+                "session_out": _snap_int("session_out", _snap_int("total_exits", 0)),
             })
         elif snap and snap.get("_stale"):
             result["snapshot_stale"] = True
@@ -1462,8 +1466,8 @@ def update_camera_calibration(camera_id: str, body: CalibrationUpdate):
     _write_config(config)
     return {"status": "success", "camera": _redact_camera(cam)}
 
-_OVERLAY_STYLES = frozenset({"foot", "skeleton", "parallel", "aabb"})
-_OVERLAY_ALIASES = {"nvidia": "parallel", "pallet": "parallel"}
+_OVERLAY_STYLES = frozenset({"foot", "skeleton", "nvidia", "parallel", "aabb"})
+_OVERLAY_ALIASES = {"pallet": "nvidia"}
 
 
 def _resolve_overlay_box_style(snap: Optional[Dict[str, Any]] = None) -> str:
@@ -1486,12 +1490,12 @@ def get_overlay_settings():
     style = _resolve_overlay_box_style(snap)
     return {
         "overlay_box_style": style,
-        "options": ["foot", "skeleton", "parallel", "aabb"],
+        "options": ["foot", "skeleton", "nvidia", "parallel", "aabb"],
         "default": "foot",
         "note": (
-            "Set OVERLAY_BOX_STYLE=foot|skeleton|parallel|aabb on edge-analyzer (Compose) and restart. "
-            "Default foot = red ground mark + trail (tripwire/dwell use the same point). "
-            "parallel/aabb keep heavier boxes as options."
+            "Set OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb on edge-analyzer (Compose) "
+            "and restart. Default foot = red ground mark + trail (tripwire/dwell use the same "
+            "point). nvidia = LocateAnything pallet look-alike (optional); pallet aliases to nvidia."
         ),
         "docs": "docs/foot-tracking-retail-models.md",
     }
