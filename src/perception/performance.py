@@ -31,7 +31,7 @@ FAST_PRESET: Dict[str, Any] = {
     "mode": "fast",
     "model_name": "models/yolo26n.pt",
     "imgsz": 320,           # Docker CPU sweet spot; raise to 416 if you have headroom
-    "infer_every_n": 2,
+    "infer_every_n": 3,     # Docker CPU: skip more decode frames → higher display FPS
     "display_every_n": 1,   # smooth MJPEG from last tracks between infer frames
     "enrichment": False,
     "reid": False,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -89,6 +90,13 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
             "total_exits": 6,
             "timestamp": __import__("time").strftime("%Y-%m-%d %H:%M:%S"),
             "infer_fps": 11.5,
+            "video_loop": {
+                "loop_count": 3,
+                "is_simulated": True,
+                "unique_this_pass": 7,
+                "unique_total_all_passes": 18,
+                "counting_mode": "per_pass (sample video replays)",
+            },
         }
         with open(os.path.join(live_dir, "cam_entrance_01.json"), "w") as f:
             json.dump(cam, f)
@@ -99,6 +107,67 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
         self.assertEqual(live.get("source"), "live_snapshot")
         self.assertEqual(live.get("people_now"), 3)
         self.assertTrue(any(c.get("camera_id") == "cam_entrance_01" for c in live.get("per_camera", [])))
+        self.assertEqual(live.get("video_loop", {}).get("loop_count"), 3)
+        self.assertEqual(live.get("video_loop_by_camera", {}).get("cam_entrance_01", {}).get("is_simulated"), True)
+
+    def test_simulated_footfall_uses_latest_pass_only(self):
+        """Replay rollups from earlier loops must not inflate today's sample-video footfall."""
+        now = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
+        with sqlite3.connect(self.db_path) as conn:
+            for loop_count, in_count in ((1, 4), (1, 2), (2, 3)):
+                conn.execute(
+                    """INSERT INTO telemetry_rollups (
+                        store_id, device_id, camera_id, timestamp_start, timestamp_end,
+                        in_count, out_count, current_occupancy, avg_dwell_seconds,
+                        queue_length, avg_queue_wait_seconds, queue_alert_active,
+                        is_simulated, loop_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 1, ?)""",
+                    ("store_mumbai_001", "test-edge", "sim_cam", now, now, in_count, loop_count),
+                )
+            conn.commit()
+
+        live = self.client.get("/api/v1/live?camera_id=sim_cam").json()
+        self.assertEqual(live.get("total_visitors"), 3)
+
+    def test_live_zero_tripwire_not_replaced_by_db_rollup(self):
+        """Fresh snap with IN=0 must win — never `0 or day_SUM` (~200 fake In)."""
+        live_dir = os.path.join(os.path.dirname(self.db_path), "live")
+        os.makedirs(live_dir, exist_ok=True)
+        now = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO telemetry_rollups (
+                    store_id, device_id, camera_id, timestamp_start, timestamp_end,
+                    in_count, out_count, current_occupancy, avg_dwell_seconds,
+                    queue_length, avg_queue_wait_seconds, queue_alert_active,
+                    is_simulated, loop_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0)""",
+                ("store_mumbai_001", "test-edge", "cam_entrance_01", now, now, 200, 111),
+            )
+            conn.commit()
+
+        cam = {
+            "camera_id": "cam_entrance_01",
+            "people_now": 4,
+            "net_occupancy": 4,
+            "queue_length": 0,
+            "avg_dwell_seconds": 8.0,
+            "total_visitors": 0,
+            "total_exits": 0,
+            "timestamp": now,
+            "infer_fps": 5.0,
+            "tripwires": [{"id": "entrance", "name": "Entrance", "in_count": 0, "out_count": 0}],
+        }
+        with open(os.path.join(live_dir, "cam_entrance_01.json"), "w") as f:
+            json.dump(cam, f)
+        with open(os.path.join(live_dir, "store.json"), "w") as f:
+            json.dump({**cam, "cameras": ["cam_entrance_01"], "source": "live_snapshot"}, f)
+
+        live = self.client.get("/api/v1/live").json()
+        self.assertEqual(live.get("source"), "live_snapshot")
+        self.assertEqual(live.get("people_now"), 4)
+        self.assertEqual(live.get("total_visitors"), 0)
+        self.assertEqual(live.get("total_exits"), 0)
 
 
 if __name__ == "__main__":

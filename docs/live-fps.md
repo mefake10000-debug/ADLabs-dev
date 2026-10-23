@@ -15,7 +15,7 @@ only updates when annotated JPEGs are written, so the live wall looked frozen.
 |------|------|---------|
 | Detector | `models/yolo26n.pt` | `models/yolo26s.pt` |
 | `imgsz` | 320 | 640 |
-| `infer_every_n` | 2 | 1 |
+| `infer_every_n` | 3 (Docker CPU) | 1 |
 | Enrichment (pose/face/CLIP/world) | **off** | on |
 | Soft ReID | off | opt-in (`models.reid.enabled`) |
 | `max_cameras` | **1** (demo default) | null = all yaml cams |

@@ -337,6 +337,10 @@
                         <button onclick="clearCalibrationCanvas()" class="bg-surface-hover text-gray-300 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-surface-border transition">
                             Clear
                         </button>
+                        <button onclick="applyEntranceTemplate()" title="One-click: horizontal entrance tripwire + queue + dwell rectangles for 1270×720 sample" class="bg-amber-600/90 hover:bg-amber-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center space-x-1.5 transition">
+                            <i data-lucide="layout-template" class="w-3.5 h-3.5"></i>
+                            <span>Apply entrance template</span>
+                        </button>
                         <button onclick="saveCalibration()" class="bg-brand-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded-lg text-xs font-bold flex items-center space-x-1.5 transition shadow-lg shadow-emerald-500/20">
                             <i data-lucide="check" class="w-4 h-4"></i>
                             <span>Save & Hot-Apply</span>
@@ -879,6 +883,37 @@
                 for (let i = 1; i < calibPoints.length; i++) ctx.lineTo(calibPoints[i][0], calibPoints[i][1]);
                 ctx.stroke();
             }
+        }
+
+        /** One-click demo layout for 1270×720 entrance sample (edit after Apply if needed). */
+        function applyEntranceTemplate() {
+            const dir = document.getElementById('calib-direction')?.value || 'bottom_to_top';
+            calibLines = [{
+                id: 'entrance_tripwire',
+                name: 'Entrance',
+                line: [[160, 520], [1110, 520]],
+                in_direction: dir
+            }];
+            // Keep non-template polygons (e.g. peer dwell) if already drawn; replace queue/staff defaults.
+            const keep = (calibPolygons || []).filter(z => z.type === 'dwell' || (z.id || '').includes('e2e'));
+            calibPolygons = [
+                {
+                    id: 'queue_zone_entrance',
+                    name: 'Checkout Queue',
+                    type: 'queue',
+                    polygon: [[420, 360], [780, 360], [820, 620], [380, 620]]
+                },
+                {
+                    id: 'staff_zone_entrance',
+                    name: 'Staff Area',
+                    type: 'staff',
+                    polygon: [[40, 180], [280, 180], [280, 520], [40, 520]]
+                },
+                ...keep
+            ];
+            calibPoints = [];
+            redrawCalibration();
+            alert('Template loaded (Entrance line + Queue + Staff). Clear & redraw if FOV differs, then Save & Hot-Apply.');
         }
 
         async function saveCalibration() {

@@ -458,6 +458,17 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         SELECT SUM(in_count) as total_visitors, SUM(out_count) as total_exits, AVG(avg_dwell_seconds) as avg_dwell
         FROM telemetry_rollups
         WHERE store_id = ? AND date(received_at) = date('now')
+          AND (
+              COALESCE(is_simulated, 0) = 0
+              OR loop_count = (
+                  SELECT MAX(r2.loop_count)
+                  FROM telemetry_rollups r2
+                  WHERE r2.store_id = telemetry_rollups.store_id
+                    AND r2.camera_id = telemetry_rollups.camera_id
+                    AND date(r2.received_at) = date('now')
+                    AND COALESCE(r2.is_simulated, 0) = 1
+              )
+          )
         """
         footfall_params: List[Any] = [store_id]
         if camera_id:
@@ -505,17 +516,39 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         }
 
         # Prefer frame-synced snapshot when fresh — numbers match the YOLO MJPEG HUD.
+        # IMPORTANT: live tripwire totals may be 0 (no crossing this pass). Never use
+        # `0 or db_rollup` — that resurrects day SUM (~200) and makes In/Out look fake.
         if snap and not snap.get("_stale"):
+            def _snap_int(key: str, fallback: int) -> int:
+                if key in snap and snap[key] is not None:
+                    try:
+                        return int(snap[key])
+                    except (TypeError, ValueError):
+                        return fallback
+                return fallback
+
+            def _snap_float(key: str, fallback: float) -> float:
+                if key in snap and snap[key] is not None:
+                    try:
+                        return float(snap[key])
+                    except (TypeError, ValueError):
+                        return fallback
+                return fallback
+
             result.update({
-                "total_visitors": int(snap.get("total_visitors", result["total_visitors"]) or result["total_visitors"]),
-                "total_exits": int(snap.get("total_exits", result["total_exits"]) or result["total_exits"]),
-                "net_occupancy": int(snap.get("net_occupancy", snap.get("people_now", result["net_occupancy"])) or 0),
-                "people_now": int(snap.get("people_now", 0) or 0),
-                "staff_now": int(snap.get("staff_now", 0) or 0),
-                "avg_dwell_seconds": float(snap.get("avg_dwell_seconds", result["avg_dwell_seconds"]) or 0),
-                "queue_length": int(snap.get("queue_length", result["queue_length"]) or 0),
-                "avg_queue_wait_seconds": float(
-                    snap.get("avg_queue_wait_seconds", result["avg_queue_wait_seconds"]) or 0
+                "total_visitors": _snap_int("total_visitors", int(result["total_visitors"] or 0)),
+                "total_exits": _snap_int("total_exits", int(result["total_exits"] or 0)),
+                "net_occupancy": _snap_int(
+                    "net_occupancy",
+                    _snap_int("people_now", int(result["net_occupancy"] or 0)),
+                ),
+                "people_now": _snap_int("people_now", 0),
+                "staff_now": _snap_int("staff_now", 0),
+                "avg_dwell_seconds": _snap_float("avg_dwell_seconds", float(result["avg_dwell_seconds"] or 0)),
+                "queue_length": _snap_int("queue_length", int(result["queue_length"] or 0)),
+                "avg_queue_wait_seconds": _snap_float(
+                    "avg_queue_wait_seconds",
+                    float(result["avg_queue_wait_seconds"] or 0),
                 ),
                 "queue_alert_active": bool(snap.get("queue_alert_active", result["queue_alert_active"])),
                 "infer_fps": snap.get("infer_fps"),
@@ -527,7 +560,8 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "occupancy_mode": "active_tracks",
                 "occupancy_note": (
                     "people_now = active customer tracks (matches YOLO overlay). "
-                    "Tripwire IN/OUT are cumulative. Multi-cam still sums cameras."
+                    "Tripwire IN/OUT are session/pass totals from the live snapshot "
+                    "(0 is real — not a day rollup). Multi-cam still sums cameras."
                 ),
                 "models": snap.get("models"),
                 "engagement": snap.get("engagement"),
@@ -544,13 +578,8 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 "safety": snap.get("safety"),
                 "alerts": snap.get("alerts"),
                 "field_status": snap.get("field_status"),
-                "entrance": snap.get("entrance"),
-                "stop_rate": snap.get("stop_rate"),
-                "floor": snap.get("floor"),
-                "staff": snap.get("staff"),
-                "safety": snap.get("safety"),
-                "alerts": snap.get("alerts"),
                 "journey": snap.get("journey"),
+                "tripwires": snap.get("tripwires"),
             })
         elif snap and snap.get("_stale"):
             result["snapshot_stale"] = True
@@ -594,6 +623,25 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
                 })
             if snap_cams:
                 result["per_camera"] = snap_cams
+                video_loop_by_camera = {
+                    row["camera_id"]: {
+                        "loop_count": row.get("loop_count"),
+                        "is_simulated": row.get("is_simulated"),
+                        "unique_this_pass": row.get("unique_this_pass"),
+                        "unique_total_all_passes": row.get("unique_total_all_passes"),
+                        "source_fps": row.get("source_fps"),
+                        "counting_mode": row.get("counting_mode"),
+                    }
+                    for row in snap_cams
+                }
+                result["video_loop_by_camera"] = video_loop_by_camera
+                if camera_id and camera_id in video_loop_by_camera:
+                    result["video_loop"] = video_loop_by_camera[camera_id]
+                elif len(video_loop_by_camera) == 1:
+                    result["video_loop"] = next(iter(video_loop_by_camera.values()))
+                else:
+                    # No singular loop state exists for a multi-camera store.
+                    result["video_loop"] = None
 
         # NFC stub (optional hardware) + floor-role maturity. Industry vertical map is
         # deprecated alias only — Live hub features retail_roles, not fashion/etc tabs.
@@ -1296,6 +1344,8 @@ class ZoneConfig(BaseModel):
     id: str
     name: Optional[str] = None
     polygon: List[List[float]]
+    # Shared physical store-zone key; only an identical key across cameras is eligible for fusion.
+    store_zone_id: Optional[str] = None
     type: str = "dwell"
     max_comfortable_queue: Optional[int] = Field(default=None, ge=1)
     congestion_threshold_seconds: Optional[float] = Field(default=None, gt=0)
@@ -1342,6 +1392,23 @@ class CalibrationUpdate(BaseModel):
     tripwires: Optional[List[TripwireConfig]] = None
     zones: Optional[List[ZoneConfig]] = None
     glass_views: Optional[List[GlassViewConfig]] = None
+    # 3x3 image-pixel → shared store-floor coordinates, measured during calibration.
+    floor_homography: Optional[List[List[float]]] = None
+
+    @field_validator("floor_homography")
+    @classmethod
+    def _floor_homography(cls, v):
+        if v is None:
+            return v
+        if len(v) != 3 or any(len(row) != 3 for row in v):
+            raise ValueError("floor_homography must be a 3x3 matrix")
+        try:
+            for row in v:
+                for value in row:
+                    float(value)
+        except (TypeError, ValueError):
+            raise ValueError("floor_homography entries must be numeric")
+        return v
 
 # Selectable video files for the camera source switcher
 @app.get("/api/v1/config/sources")
@@ -1377,6 +1444,8 @@ def update_camera_calibration(camera_id: str, body: CalibrationUpdate):
         cam["zones"] = [z.model_dump(exclude_none=True) for z in body.zones]
     if body.glass_views is not None:
         cam["glass_views"] = [g.model_dump(exclude_none=True) for g in body.glass_views]
+    if body.floor_homography is not None:
+        cam["floor_homography"] = body.floor_homography
     _write_config(config)
     return {"status": "success", "camera": _redact_camera(cam)}
 

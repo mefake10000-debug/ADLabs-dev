@@ -12,7 +12,7 @@ edge:
 # Switch modes (either works):
 #   EDGE_PERF_MODE=fast|quality          # compose / shell env (wins over yaml)
 #   performance.mode: fast|quality       # this file
-#   EDGE_MAX_CAMERAS=1                   # optional: one cam ≈ 2× FPS vs two cams
+#   EDGE_MAX_CAMERAS=2                   # all configured views; reduce only for a measured FPS budget
 #   EDGESIGHT_DETECT_MODEL=…             # optional YOLO weight override
 #   DETECTOR_BACKEND=yolo26|rfdetr       # fast→yolo26; quality→rfdetr (SOTA) unless set
 #   RFDETR_VARIANT=nano|small            # Apache-2.0 sizes only
@@ -22,10 +22,10 @@ edge:
 performance:
   mode: "fast"                # fast (demo) | quality (enrichment on + RF-DETR default)
   imgsz: 320                  # Ultralytics letterbox; quality YOLO uses 640; RF-DETR is fixed
-  infer_every_n: 2            # run detect+track every Nth decoded frame
+  infer_every_n: 3            # Docker CPU: every 3rd frame; set 2 for denser tracks
   display_every_n: 1          # smooth MJPEG from last tracks between infer frames
-  # Docker CPU + 2 cams ≈ 0.5 infer FPS; one cam ≈ 3–8. Override EDGE_MAX_CAMERAS=.
-  max_cameras: 1
+  # Process both configured camera views; each is reported separately until fusion gates pass.
+  max_cameras: 2
 
 perception:
   # Fast-tier default: YOLO26n. Quality defaults to RF-DETR (Apache SOTA) unless
@@ -34,7 +34,7 @@ perception:
   rfdetr_variant: "nano"         # nano | small (Apache-2.0 only; not XL/2XL)
   model_name: "models/yolo26n.pt"
   imgsz: 320
-  infer_every_n: 2
+  infer_every_n: 3
   display_every_n: 1
   confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
                                # real person" bar is tracking.track_thresh below; detections between
@@ -69,6 +69,16 @@ analytics:
   zone_exit_grace_seconds: 3.0  # A track missing from a dwell/queue zone for less than this is still
                                   # counted as present, so a single dropped detection doesn't reset
                                   # dwell time or make someone flicker in and out of a queue count.
+
+# Cross-camera identity is opt-in and fail-closed. Enable only after each shared
+# physical zone has the same store_zone_id in every covering camera and every camera
+# has a pixel→store-floor homography in cameras.yaml. ReID is session-only; IDs never leave memory.
+cross_camera_fusion:
+  enabled: false
+  association_window_seconds: 1.5
+  cosine_similarity_min: 0.86
+  max_floor_distance_m: 2.5
+  gallery_ttl_seconds: 20
 
 # --- Perception model tier ------------------------------------------------------
 # Everything above this line is the "fast tier": person detection + tracking +
