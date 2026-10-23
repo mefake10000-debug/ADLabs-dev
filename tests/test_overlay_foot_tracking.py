@@ -4,6 +4,7 @@ import unittest
 
 from src.perception.tracker import Track
 from src.perception.rtmpose_estimator import bbox_foot, foot_from_ankles, resolve_rtmpose_onnx
+from src.visualizer import debug_overlay
 from src.visualizer.debug_overlay import resolve_overlay_box_style
 
 
@@ -11,8 +12,8 @@ class OverlayFootStyleTests(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("OVERLAY_BOX_STYLE", None)
 
-    def test_default_is_foot(self):
-        self.assertEqual(resolve_overlay_box_style({}), "foot")
+    def test_default_is_clean_aabb(self):
+        self.assertEqual(resolve_overlay_box_style({}), "aabb")
 
     def test_env_styles(self):
         for style in ("foot", "skeleton", "nvidia", "parallel", "aabb"):
@@ -25,8 +26,35 @@ class OverlayFootStyleTests(unittest.TestCase):
             resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "pallet"}), "nvidia"
         )
 
-    def test_unknown_falls_back_to_foot(self):
-        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "obb"}), "foot")
+    def test_unknown_falls_back_to_clean_aabb(self):
+        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "obb"}), "aabb")
+
+    def test_person_boxes_are_clipped_to_the_frame(self):
+        clip = getattr(debug_overlay, "clip_bbox_to_frame", None)
+        self.assertTrue(callable(clip), "clean live boxes must share a clipping helper")
+        self.assertEqual(clip([-10, 8, 120, 100], 100, 80), (0, 8, 99, 79))
+        self.assertIsNone(clip([40, 50, 20, 60], 100, 80))
+
+    def test_aabb_live_style_has_person_boxes_but_no_default_foot_or_object_clutter(self):
+        if debug_overlay.cv2 is None or debug_overlay.np is None:
+            self.skipTest("OpenCV/numpy unavailable")
+        track = Track(7, [10, 10, 50, 80], 0.9, 1.0)
+        track.history = [(20, 60, 1.0), (20, 70, 1.1), (20, 80, 1.2)]
+        frame = debug_overlay.np.zeros((100, 100, 3), dtype=debug_overlay.np.uint8)
+        rendered = debug_overlay.DebugOverlay.draw_pipeline(
+            frame=frame,
+            tracks=[track],
+            tripwires=[],
+            zones=[],
+            queues=[],
+            fps=12,
+            infer_fps=3,
+            box_style="aabb",
+            objects=[{"bbox": [60, 55, 90, 90], "label": "crate"}],
+        )
+        self.assertEqual(tuple(int(v) for v in rendered[50, 10]), debug_overlay.PERSON_COLOR)
+        self.assertNotEqual(tuple(int(v) for v in rendered[80, 30]), debug_overlay.FOOT_COLOR)
+        self.assertEqual(tuple(int(v) for v in rendered[60, 60]), (0, 0, 0))
 
 
 class TrackFootTests(unittest.TestCase):

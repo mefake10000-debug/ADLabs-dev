@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import importlib.util
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -126,6 +127,28 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             path_hint="models/yolo26s.pt",
             env_flag="EDGE_PERF_MODE=detect (demo default) · Ultralytics only",
             notes="imgsz 640, infer every 2 frames, person conf 0.22. RF-DETR is not the default.",
+        ),
+        StackEntry(
+            key="yolo26m_pose",
+            name="YOLO26m pose",
+            role="Body pose / engagement",
+            license="AGPL-3.0",
+            status="PACKED",
+            path_hint="models/yolo26m-pose.pt",
+            notes="Pose keypoints used by the enrichment worker.",
+            job="Estimates body pose and activity cues",
+            feeds_kpi="Engagement · safety cues",
+        ),
+        StackEntry(
+            key="yolo_world_clip",
+            name="YOLO-World + CLIP ViT-B/32",
+            role="Open vocabulary display interest",
+            license="AGPL-3.0 + MIT",
+            status="PACKED",
+            path_hint="models/yolov8s-worldv2.pt + weights/clip/ViT-B-32.pt",
+            notes="Product category detections use CLIP text embeddings.",
+            job="Finds retail product categories",
+            feeds_kpi="Shelf / display interest",
         ),
         StackEntry(
             key="yoloe",
@@ -266,6 +289,14 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
                 "models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
                 "models/yolov8s-worldv2.pt",
             )
+        elif e.key == "yolo26m_pose":
+            e.on_disk = _any_exists(base, "models/yolo26m-pose.pt")
+        elif e.key == "yolo_world_clip":
+            e.on_disk = _any_exists(base, "models/yolov8s-worldv2.pt") and _any_exists(
+                base,
+                "weights/clip/ViT-B-32.pt",
+                "models/pack/05-open-vocab/clip-vit-base-patch32/pytorch_model.bin",
+            )
         elif e.key == "osnet_reid":
             reid_dir = base / "models/pack/03-reid"
             e.on_disk = _any_exists(base, "models/pack/03-reid/osnet_x0_25_msmt17.onnx")
@@ -307,6 +338,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             e.on_disk = _any_exists(
                 base,
                 "models/pack/08-demographics/mivolo_v2/model.safetensors",
+                "models-extra/mivolo_v2/model.safetensors",
             )
             if not demo_on:
                 e.status = "GATED"
@@ -318,6 +350,9 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             variant = resolve_rfdetr_variant()
             weight_name = RFDETR_WEIGHT_IDS.get(variant, RFDETR_WEIGHT_IDS["nano"])
             pack_path = base / "models/pack/01-detection/rfdetr" / weight_name
+            local_path = base / "models-extra/rfdetr" / weight_name
+            if local_path.is_file() and local_path.stat().st_size > 100:
+                pack_path = local_path
             rf_home = Path(
                 os.path.expanduser(
                     os.environ.get("RF_HOME")
@@ -330,7 +365,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             e.on_disk = _exists(base, str(pack_path)) or (
                 cache_path.is_file() and cache_path.stat().st_size > 1000
             )
-            import_ok, import_detail = rfdetr_runtime_probe()
+            import_ok = importlib.util.find_spec("rfdetr") is not None
+            import_detail = "rfdetr package installed" if import_ok else "rfdetr package missing"
             selected = resolve_detector_backend() == BACKEND_RFDETR
             runtime_loaded = os.environ.get("RFDETR_RUNTIME_LOADED", "").strip() in (
                 "1", "true", "yes", "on",

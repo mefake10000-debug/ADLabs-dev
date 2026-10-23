@@ -100,6 +100,7 @@ class RTMPoseFootEstimator:
         self._backend = "none"
         self._pose = None
         self._session = None
+        self.calls = 0
         self.onnx_path: Optional[Path] = None
         path = Path(onnx_path) if onnx_path else resolve_rtmpose_onnx(prefer=prefer)
         if path is None:
@@ -172,6 +173,8 @@ class RTMPoseFootEstimator:
         """Return one pose dict per bbox (keypoints, foot_point, scores)."""
         if frame is None or not bboxes:
             return []
+        if self.active:
+            self.calls += 1
         if self._pose is not None:
             return self._estimate_rtmlib(frame, bboxes)
         if self._session is not None:

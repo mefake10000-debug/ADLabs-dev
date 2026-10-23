@@ -1217,7 +1217,63 @@ def get_model_stack():
         if root not in sys.path:
             sys.path.insert(0, root)
         from src.perception.model_stack import build_model_stack
-        return build_model_stack(root)
+        result = build_model_stack(root)
+        audit_path = os.path.join(root, "local-runtime", "rfdetr-state.json")
+        try:
+            with open(audit_path, "r") as stream:
+                audit = json.load(stream)
+            audit_fresh = time.time() - float(audit.get("last_success", 0) or 0) <= 15
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            audit, audit_fresh = {}, False
+        if audit_fresh and int(audit.get("successful_inferences", 0) or 0) > 0:
+            for entry in result.get("models", []):
+                if entry.get("key") == "rfdetr":
+                    entry["status"] = "LIVE"
+                    entry["run_state"] = "ON"
+                    entry["notes"] = (
+                        "Running continuous secondary person audit; it is not fused into visitor counts. "
+                        f"{audit.get('successful_inferences')} inferences; latest {audit.get('people')} people."
+                    )
+            result["rfdetr_audit"] = {
+                "active": True,
+                "successful_inferences": audit.get("successful_inferences"),
+                "people": audit.get("people"),
+                "inference_seconds": audit.get("inference_seconds"),
+                "role": "secondary detector audit; not added to visitor counts",
+            }
+        snapshot = _read_live_snapshot()
+        if snapshot and not snapshot.get("_stale"):
+            models = snapshot.get("models") or {}
+            reid = snapshot.get("reid") or {}
+            active = {
+                "yolo26s": bool(models.get("detector_loaded") and "yolo26s" in str(models.get("person_detector", "")).lower()),
+                "yolo26n": bool(models.get("detector_loaded") and "yolo26n" in str(models.get("person_detector", "")).lower()),
+                "yolo26m_pose": bool(models.get("pose_model_loaded")),
+                "yolo_world_clip": bool(models.get("products") and models.get("clip_vit_enabled")),
+                "osnet_reid": bool(models.get("osnet_reid_enabled") or reid.get("active")),
+                "clip_vit_b32": bool(models.get("clip_vit_enabled")),
+                "rtmpose": bool(models.get("rtmpose")),
+                "mivolo_v2": bool(models.get("mivolo_v2_enabled")),
+                # YOLOE is a selectable alternative; the live product model is YOLO-World.
+                "yoloe": False,
+            }
+            for entry in result.get("models", []):
+                key = entry.get("key")
+                if key in active and active[key]:
+                    entry["status"] = "LIVE"
+                    entry["run_state"] = "ON"
+                    entry["notes"] = "Loaded in the live EdgeSight worker."
+                elif key in active and entry.get("status") == "LIVE":
+                    entry["status"] = "PACKED" if entry.get("on_disk") else "OFF"
+                    entry["run_state"] = "WAITING" if entry.get("on_disk") else "OFF"
+                    if key == "yoloe" and active.get("yolo_world_clip"):
+                        entry["notes"] = "YOLO-World + CLIP is selected for live product categories; YOLOE is not loaded."
+            result["live_snapshot"] = {
+                "camera_id": snapshot.get("camera_id"),
+                "timestamp": snapshot.get("timestamp"),
+                "infer_fps": snapshot.get("infer_fps"),
+            }
+        return result
     except Exception as e:
         logger.exception("model stack catalog failed")
         return JSONResponse(

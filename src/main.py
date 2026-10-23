@@ -7,7 +7,8 @@ import yaml
 import logging
 import threading
 import uuid
-from typing import Dict, List, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Dict, List, Any, Optional
 
 from src.ingestion.stream_reader import StreamReader
 from src.perception.detector import PersonDetector
@@ -248,6 +249,9 @@ class EdgePipeline:
         self.head_pose = None
         self.world_detector = None
         self.model_errors: Dict[str, str] = {}
+        self._slow_model_locks = {
+            name: threading.Lock() for name in ("pose", "face", "products", "demographics", "reid")
+        }
 
         if self.models_enabled:
             self._init_enrichment_models()
@@ -1104,6 +1108,32 @@ class EdgePipeline:
         return customers
 
     # --------------------------------------------------------- enrichment tier
+    @staticmethod
+    def _run_independent_model_jobs(
+        jobs: Dict[str, Callable[[], Any]],
+        max_workers: int = 3,
+    ) -> Dict[str, Any]:
+        """Run independent per-frame model calls concurrently; isolate one model failure."""
+        if not jobs:
+            return {}
+        results: Dict[str, Any] = {}
+        worker_count = max(1, min(int(max_workers), len(jobs)))
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="edge-model") as pool:
+            futures = {pool.submit(job): name for name, job in jobs.items()}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception as exc:  # one unavailable model must not suppress peers
+                    logger.warning("Slow model %s pass failed: %s", name, exc)
+        return results
+
+    def _run_locked_model(self, name: str, job: Callable[[], Any]) -> Any:
+        """Serialize calls into shared model instances while different models overlap."""
+        lock = self._slow_model_locks.setdefault(name, threading.Lock())
+        with lock:
+            return job()
+
     def _start_slow_tier(self, ctx: Dict[str, Any]):
         """Starts the enrichment worker for one camera.
 
@@ -1173,11 +1203,27 @@ class EdgePipeline:
         face_cfg = self.models_cfg.get("face", {}) or {}
         prod_cfg = self.models_cfg.get("products", {}) or {}
 
+        # Pose and face detection can consume the same immutable frame together.
+        # A lock per shared model protects a reused instance across camera workers.
+        model_jobs: Dict[str, Callable[[], Any]] = {}
+        if self.pose_estimator is not None:
+            model_jobs["pose"] = lambda: self._run_locked_model(
+                "pose", lambda: self.pose_estimator.estimate(frame)
+            )
+        if self.face_detector is not None:
+            model_jobs["faces"] = lambda: self._run_locked_model(
+                "face", lambda: self.face_detector.detect(frame)
+            )
+        model_outputs = self._run_independent_model_jobs(
+            model_jobs,
+            max_workers=int(slow_cfg.get("parallel_model_workers", 3) or 3),
+        )
+
         # --- 1. Pose: what the body is doing ---------------------------------
         pose_by_track: Dict[int, Dict[str, Any]] = {}
-        if self.pose_estimator is not None:
+        if "pose" in model_outputs:
             iou_min = float(pose_cfg.get("match_iou", 0.30))
-            for pose in self.pose_estimator.estimate(frame):
+            for pose in model_outputs["pose"]:
                 best_track = None
                 best_iou = 0.0
                 for track in tracks:
@@ -1190,7 +1236,7 @@ class EdgePipeline:
 
         # --- 2. Faces: assign a face to the body it belongs to -------------
         face_by_track: Dict[int, Dict[str, Any]] = {}
-        faces = self.face_detector.detect(frame) if self.face_detector is not None else []
+        faces = model_outputs.get("faces", [])
         if faces:
             for face in faces:
                 for track in tracks:
@@ -1222,6 +1268,8 @@ class EdgePipeline:
                     head_by_track[track_id] = pose
 
         predictions: Dict[int, Dict[str, Any]] = {}
+        selected = []
+        crops = []
         if self.age_gender is not None and face_by_track:
             max_faces = int(slow_cfg.get("max_faces_per_tick", 2))
             # Rotate the sampled faces every tick. The demographic model is the most
@@ -1237,7 +1285,6 @@ class EdgePipeline:
             ctx["demo_cursor"] = (cursor + max_faces) % max(1, len(candidates))
 
             align = bool(face_cfg.get("align", True))
-            crops = []
             for _track_id, face in selected:
                 crop = None
                 if align:
@@ -1245,9 +1292,32 @@ class EdgePipeline:
                 if crop is None:
                     crop = crop_face(frame, face)
                 crops.append(crop)
-            results = self.age_gender.predict_batch(crops)
-            for (track_id, _face), prediction in zip(selected, results):
-                predictions[track_id] = prediction
+        # The product model, demographics model, and OSNet consume independent
+        # inputs now. Run them side by side after face-to-track assignment, while
+        # keeping each underlying model instance serialized across camera threads.
+        followup_jobs: Dict[str, Callable[[], Any]] = {}
+        if self.age_gender is not None and crops:
+            followup_jobs["demographics"] = lambda: self._run_locked_model(
+                "demographics", lambda: self.age_gender.predict_batch(crops)
+            )
+        if self.world_detector is not None:
+            followup_jobs["products"] = lambda: self._run_locked_model(
+                "products", lambda: self.world_detector.detect(frame)
+            )
+        if self.reid_extractor.active:
+            followup_jobs["reid"] = lambda: self._run_locked_model(
+                "reid",
+                lambda: self._sample_soft_reid(
+                    cam_id, ctx, tracks, frame, frame_time, frame_time_mono
+                ),
+            )
+        followup_outputs = self._run_independent_model_jobs(
+            followup_jobs,
+            max_workers=int(slow_cfg.get("parallel_model_workers", 3) or 3),
+        )
+        results = followup_outputs.get("demographics", [])
+        for (track_id, _face), prediction in zip(selected, results):
+            predictions[track_id] = prediction
 
         demographics = ctx["demographics"]
         for track_id, prediction in predictions.items():
@@ -1271,8 +1341,8 @@ class EdgePipeline:
         ctx["groups"].update(tracks)
 
         # --- 6. Product interest --------------------------------------------
-        if self.world_detector is not None:
-            detections = self.world_detector.detect(frame)
+        if "products" in followup_outputs:
+            detections = followup_outputs["products"]
             # A shopper wearing a jacket is not a product on display.
             detections = filter_out_persons(
                 detections,
@@ -1284,8 +1354,6 @@ class EdgePipeline:
             ctx["products"].observe(kept, tracks, frame_time)
             # Feed open-vocab class names into the MJPEG overlay (person boxes stay on tracks).
             ctx["last_overlay_objects_ov"] = kept
-        self._sample_soft_reid(cam_id, ctx, tracks, frame, frame_time, frame_time_mono)
-
         # --- 7. Housekeeping -------------------------------------------------
         active_ids = [t.track_id for t in tracks]
         demographics.prune(active_ids, frame_time)
@@ -1776,11 +1844,24 @@ class EdgePipeline:
                 "object_conf": round(float(getattr(self, "object_conf", 0.0) or 0.0), 3),
                 "overlay_box_style": resolve_overlay_box_style(),
                 "enrichment": bool(getattr(self, "models_enabled", False)),
+                "pose_model_loaded": bool(getattr(self, "pose_estimator", None)),
                 "pose": bool(getattr(self, "rtmpose", None)) or bool(getattr(self, "pose_estimator", None)),
                 "rtmpose": bool(getattr(self, "rtmpose", None)),
                 "rtmpose_backend": getattr(getattr(self, "rtmpose", None), "backend", None),
+                "rtmpose_calls": int(getattr(getattr(self, "rtmpose", None), "calls", 0) or 0),
                 "face_boxes": bool(getattr(self, "face_detector", None)),
                 "products": bool(getattr(self, "world_detector", None)) or bool(products_top),
+                "clip_vit_enabled": bool(
+                    getattr(self, "world_detector", None)
+                    and getattr(self.world_detector, "_classes_set", False)
+                    and not getattr(self.world_detector, "_prompt_free", False)
+                ),
+                "osnet_reid_enabled": bool(reid_status.get("active")),
+                "mivolo_v2_enabled": bool(
+                    getattr(self, "age_gender", None)
+                    and self.age_gender.__class__.__name__ == "MiVoloEstimator"
+                ),
+                "mivolo_v2_calls": int(getattr(getattr(self, "age_gender", None), "calls", 0) or 0),
                 "demographics_enabled": demographics_env_enabled(),
                 "face_identity": False,
                 "stack_policy": "docs/model-stack-policy.md",
@@ -1793,7 +1874,7 @@ class EdgePipeline:
                     + ("; enrichment on" if getattr(self, "models_enabled", False) else "; enrichment off")
                     + ". Face boxes (if on) = k-anon age/gender only — no face ID. "
                     "Soft ReID session-scoped only. products_top = open-vocab categories, not POS SKUs. "
-                    "MiVOLO demographics stay GATED."
+                    + (" MiVOLO v2 is loaded; output remains k-anonymous." if getattr(getattr(self, "age_gender", None), "__class__", type(None)).__name__ == "MiVoloEstimator" else " MiVOLO v2 is not loaded.")
                 ),
             },
             "perf_mode": getattr(self, "perf_mode", "balanced"),

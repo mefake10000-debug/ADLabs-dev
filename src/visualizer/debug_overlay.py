@@ -1,10 +1,10 @@
 """Debug / live MJPEG overlays for EdgeSight.
 
-Default person UI is **foot** tracking: red ground-contact mark + faint ID + trail.
-Optional heavy styles: ``nvidia`` (LocateAnything pallet look-alike), ``parallel``,
-``aabb``. ``skeleton`` draws thin joint lines when RTMPose keypoints are present.
+Default person UI is a clean, clipped **aabb** rectangle with a readable label bar.
+Optional detail styles: ``foot`` (ground mark + trail), ``skeleton`` (RTMPose keypoints),
+``nvidia`` (LocateAnything pallet look-alike), and ``parallel``.
 
-``OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb`` (default **foot**).
+``OVERLAY_BOX_STYLE=aabb|foot|skeleton|nvidia|parallel`` (default **aabb**).
 ``pallet`` aliases to ``nvidia``.
 
 Models / overlay own **people vs store objects** only. Queue / staff / territory /
@@ -58,11 +58,64 @@ def _iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 def resolve_overlay_box_style(env: Optional[Dict[str, str]] = None) -> str:
-    """Default ``foot``. Accepts foot|skeleton|nvidia|parallel|aabb (+ pallet → nvidia)."""
+    """Default ``aabb``. Accepts aabb|foot|skeleton|nvidia|parallel (+ pallet → nvidia)."""
     src = env if env is not None else os.environ
-    raw = (src.get("OVERLAY_BOX_STYLE") or "foot").strip().lower()
+    raw = (src.get("OVERLAY_BOX_STYLE") or "aabb").strip().lower()
     raw = _ALIAS.get(raw, raw)
-    return raw if raw in _VALID_STYLES else "foot"
+    return raw if raw in _VALID_STYLES else "aabb"
+
+
+def clip_bbox_to_frame(bbox: Sequence[float], width: int, height: int) -> Optional[Tuple[int, int, int, int]]:
+    """Return an in-frame, positive-area rectangle or None for invalid/outside boxes."""
+    try:
+        if len(bbox) < 4 or width <= 1 or height <= 1:
+            return None
+        x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+        if not all(np.isfinite(value) for value in (x1, y1, x2, y2)):
+            return None
+        left = max(0, min(width - 1, int(round(x1))))
+        top = max(0, min(height - 1, int(round(y1))))
+        right = max(0, min(width - 1, int(round(x2))))
+        bottom = max(0, min(height - 1, int(round(y2))))
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _draw_clean_label_bar(canvas: Any, bbox: Sequence[int], label: str, color: Tuple[int, int, int]) -> None:
+    """Place a legible, clipped label bar above a person/object rectangle."""
+    x1, y1, _x2, _y2 = [int(value) for value in bbox[:4]]
+    frame_h, frame_w = canvas.shape[:2]
+    available = max(0, frame_w - x1 - 2)
+    if available < 20 or frame_h < 18:
+        return
+    display = str(label).strip() or "person"
+    scale, thickness, pad = 0.42, 1, 4
+    while display:
+        (text_w, text_h), _ = cv2.getTextSize(display, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        if text_w + pad * 2 <= available:
+            break
+        display = display[:-1]
+    if not display:
+        return
+    bar_h = text_h + pad * 2
+    bar_y1 = y1 - bar_h if y1 >= bar_h else y1
+    bar_y2 = min(frame_h - 1, bar_y1 + bar_h)
+    bar_x2 = min(frame_w - 1, x1 + text_w + pad * 2)
+    cv2.rectangle(canvas, (x1, bar_y1), (bar_x2, bar_y2), (20, 20, 20), -1)
+    cv2.rectangle(canvas, (x1, bar_y1), (bar_x2, bar_y2), color, 1, lineType=cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        display,
+        (x1 + pad, min(bar_y2 - 2, bar_y1 + text_h + pad)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        (245, 245, 245),
+        thickness,
+        cv2.LINE_AA,
+    )
 
 
 def heading_shear_px(track: Track, width: float) -> float:
@@ -376,32 +429,40 @@ class DebugOverlay:
                 2,
             )
 
-        # 4a. Optional store objects (never person, never a second box on a body)
-        person_boxes = [list(t.bbox) for t in tracks if getattr(t, "bbox", None)]
-        for det in objects or []:
-            bbox = det.get("bbox")
-            if not bbox or len(bbox) < 4:
-                continue
-            name = object_label(det)
-            if name.lower() in ("person", "people"):
-                continue
-            if any(_iou_xyxy(bbox, pb) >= 0.50 for pb in person_boxes):
-                continue
-            if style == "nvidia":
-                width = max(1.0, float(bbox[2]) - float(bbox[0]))
-                shear = _ISO_SHEAR_FRAC * width
-                draw_nvidia_pallet_box(canvas, bbox, shear, OBJECT_COLOR, name)
-            else:
-                x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), OBJECT_COLOR, 1)
-                cv2.putText(
-                    canvas, name[:18], (x1, max(12, y1 - 4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, OBJECT_COLOR, 1,
-                )
+        # Store-object boxes clutter the live people view; show them only in the
+        # explicit NVIDIA diagnostic style or by an operator env override.
+        show_objects = style == "nvidia" or (
+            os.environ.get("OVERLAY_SHOW_STORE_OBJECTS", "0").strip().lower() in ("1", "true", "yes")
+        )
+        if show_objects:
+            person_boxes = [
+                list(box)
+                for track in tracks
+                if (box := clip_bbox_to_frame(track.bbox, canvas.shape[1], canvas.shape[0])) is not None
+            ]
+            for det in (objects or [])[:24]:
+                bbox = clip_bbox_to_frame(det.get("bbox") or [], canvas.shape[1], canvas.shape[0])
+                if bbox is None:
+                    continue
+                name = object_label(det)
+                if name.lower() in ("person", "people"):
+                    continue
+                if any(_iou_xyxy(bbox, pb) >= 0.50 for pb in person_boxes):
+                    continue
+                if style == "nvidia":
+                    width = max(1.0, float(bbox[2]) - float(bbox[0]))
+                    draw_nvidia_pallet_box(canvas, bbox, _ISO_SHEAR_FRAC * width, OBJECT_COLOR, name)
+                else:
+                    x1, y1, x2, y2 = bbox
+                    cv2.rectangle(canvas, (x1, y1), (x2, y2), OBJECT_COLOR, 1, lineType=cv2.LINE_AA)
+                    _draw_clean_label_bar(canvas, bbox, name[:24], OBJECT_COLOR)
 
         # 4b. People — style-dependent (foot default = no heavy boxes)
         for track in tracks:
-            b = [int(v) for v in track.bbox]
+            clipped = clip_bbox_to_frame(track.bbox, canvas.shape[1], canvas.shape[0])
+            if clipped is None:
+                continue
+            b = list(clipped)
             is_stationary = getattr(track, "is_stationary", False)
             is_staff = track.track_id in staff_ids
             if is_staff:
@@ -410,7 +471,8 @@ class DebugOverlay:
                 color = STILL_COLOR if is_stationary else PERSON_COLOR
 
             if style == "aabb":
-                cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2)
+                cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2, lineType=cv2.LINE_AA)
+                _draw_clean_label_bar(canvas, b, person_label(track, is_staff), color)
             elif style == "nvidia":
                 width = max(1, b[2] - b[0])
                 shear = heading_shear_px(track, width)
@@ -427,13 +489,14 @@ class DebugOverlay:
             elif style == "skeleton":
                 _draw_skeleton(canvas, track)
 
-            # Primary UX for all styles: red foot + trail + faint id
-            foot = _draw_foot_mark(canvas, track)
-            _draw_trail(canvas, track)
-            _draw_faint_id(canvas, track, foot, is_staff)
+            # In default AABB mode keep the person box/label clean; foot/trail are opt-in.
+            if style != "aabb":
+                foot = _draw_foot_mark(canvas, track)
+                _draw_trail(canvas, track)
+                _draw_faint_id(canvas, track, foot, is_staff)
 
             # Heavier ID for light box styles (nvidia already has label bar)
-            if style in ("aabb", "parallel"):
+            if style == "parallel":
                 dwell = float(getattr(track, "dwell_s", 0.0) or 0.0)
                 label = f"ID:{track.track_id}"
                 if is_staff:
