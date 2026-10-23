@@ -8,18 +8,20 @@ measured **infer FPS was ~0.3–1** while decode stayed ~10–13. The portal MJP
 only updates when annotated JPEGs are written, so the live wall looked frozen.
 
 A later “tighten FPS” pass (`infer_every_n=3`, `imgsz=320` as the only demo
-default) improved display FPS but **missed people in frame**. Local demos now
-default to **balanced**.
+default) improved display FPS but **missed people in frame**. Balanced
+(yolo26n @ 416) restored counts, then a yaml pin kept `EDGE_PERF_MODE=quality`
+on that same nano/416 path. Local Compose now defaults to **quality**
+(Ultralytics yolo26s @ 640, infer every 2) so the heavier letterbox actually loads.
 
 ## Presets
 
 `EDGE_PERF_MODE` / `performance.mode`:
 
-| Knob | Fast | **Balanced (default)** | Quality |
-|------|------|------------------------|---------|
+| Knob | Fast | Balanced | **Quality (Compose default)** |
+|------|------|----------|-------------------------------|
 | Detector | `models/yolo26n.pt` | `models/yolo26n.pt` | `models/yolo26s.pt` (Ultralytics; RF-DETR only if `DETECTOR_BACKEND=rfdetr`) |
-| `imgsz` | 320 | **512** | 640 (YOLO) |
-| `infer_every_n` | 3 | **2** | 1 |
+| `imgsz` | 320 | **512** | **640** |
+| `infer_every_n` | 3 | **2** | **2** (every frame @ 640 stalls IDs on CPU) |
 | Enrichment (pose/face/CLIP/world) | off | **off** | on (yaml gates) |
 | Soft ReID | off | off | opt-in (`models.reid.enabled`) |
 | `max_cameras` | **1** (compose) | **1** (compose) | null = all yaml cams |
@@ -32,7 +34,10 @@ JPEGs and identical payloads to avoid torn / glitchy frames.
 ## How to switch
 
 ```bash
-# Balanced (local demo default — reliable people boxes)
+# Quality (Compose default — yolo26s @ 640, person conf lower than objects)
+docker compose up -d edge-analyzer
+
+# Balanced (nano @ 416) if CPU cannot hold yolo26s
 EDGE_PERF_MODE=balanced docker compose up -d edge-analyzer
 
 # Fast (max display FPS; may miss distant / small people)

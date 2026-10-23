@@ -44,14 +44,18 @@ services:
       - PYTHONUNBUFFERED=1
       - PIPELINE_CONFIG=/app/configs/pipeline.yaml
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
-      # Live FPS preset: balanced (default — reliable people boxes) | fast | quality.
-      # See docs/live-fps.md. Default one cam on Docker CPU; set EDGE_MAX_CAMERAS= empty for all.
-      - EDGE_PERF_MODE=${EDGE_PERF_MODE:-balanced}
+      # Local demo default is quality: Ultralytics yolo26s @ imgsz 640.
+      # balanced (yolo26n @ 416) stays available via EDGE_PERF_MODE=balanced.
+      # See docs/live-fps.md. Default one cam on Docker CPU.
+      - EDGE_PERF_MODE=${EDGE_PERF_MODE:-quality}
       - EDGE_MAX_CAMERAS=${EDGE_MAX_CAMERAS:-1}
-      # Person overlays: foot (default — red ground mark + trail) | skeleton | parallel | aabb.
-      # See docs/foot-tracking-retail-models.md.
+      # One person language: red foot + short trail + person ID.
+      # skeleton adds thin joints. nvidia/parallel/aabb are opt-in box styles
+      # and must not be left on from an old container env.
       - OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-foot}
-      - ENABLE_RTMPOSE=${ENABLE_RTMPOSE:-1}
+      # Pose ankles are optional. Default off so CPU stays on the person detector.
+      # Set ENABLE_RTMPOSE=1 (or OVERLAY_BOX_STYLE=skeleton) for thin skeletons.
+      - ENABLE_RTMPOSE=${ENABLE_RTMPOSE:-0}
       - RTMPOSE_VARIANT=${RTMPOSE_VARIANT:-t}
       - RTMPOSE_EVERY_N=${RTMPOSE_EVERY_N:-4}
       - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}

@@ -253,26 +253,40 @@ def _draw_foot_mark(canvas: Any, track: Track) -> Tuple[int, int]:
     return foot
 
 
+# Short path only — a full-history polyline reads as spaghetti when IDs persist.
+TRAIL_POINTS = 12
+# foot / skeleton share one person language. Box styles are opt-in and exclusive.
+_PATH_STYLES = frozenset({"foot", "skeleton"})
+
+
+def trail_points(track: Track, limit: int = TRAIL_POINTS) -> List[Tuple[float, float, float]]:
+    hist = list(getattr(track, "history", None) or [])
+    if limit > 0 and len(hist) > limit:
+        return hist[-limit:]
+    return hist
+
+
 def _draw_trail(canvas: Any, track: Track) -> None:
-    hist = track.history
+    hist = trail_points(track)
     n = len(hist)
     for i in range(1, n):
         pt1 = (int(hist[i - 1][0]), int(hist[i - 1][1]))
         pt2 = (int(hist[i][0]), int(hist[i][1]))
         t = i / max(n - 1, 1)
-        g = int(70 + 110 * t)
-        cv2.line(canvas, pt1, pt2, (g, g, g), 1, lineType=cv2.LINE_AA)
+        g = int(80 + 140 * t)
+        thick = 2 if i >= n - 4 else 1
+        cv2.line(canvas, pt1, pt2, (g, g, g), thick, lineType=cv2.LINE_AA)
 
 
-def _draw_faint_id(canvas: Any, track: Track, foot: Tuple[int, int], is_staff: bool) -> None:
-    label = f"{track.track_id}" + ("S" if is_staff else "")
+def _draw_person_id(canvas: Any, track: Track, foot: Tuple[int, int], is_staff: bool) -> None:
+    """Single person label. Do not also draw a faint numeric id."""
     cv2.putText(
         canvas,
-        label,
-        (foot[0] + 6, foot[1] - 6),
+        person_label(track, is_staff),
+        (foot[0] + 8, max(14, foot[1] - 8)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
-        (160, 160, 160),
+        0.45,
+        (230, 230, 230),
         1,
         lineType=cv2.LINE_AA,
     )
@@ -364,7 +378,8 @@ class DebugOverlay:
                 2,
             )
 
-        # 4a. Optional store objects (never person)
+        # 4a. Object layer — class name only. Never a person track, never a pallet
+        # that uses the same geometry as a person box.
         for det in objects or []:
             bbox = det.get("bbox")
             if not bbox or len(bbox) < 4:
@@ -372,64 +387,65 @@ class DebugOverlay:
             name = object_label(det)
             if name.lower() in ("person", "people"):
                 continue
-            if style == "nvidia":
-                width = max(1.0, float(bbox[2]) - float(bbox[0]))
-                shear = _ISO_SHEAR_FRAC * width
-                draw_nvidia_pallet_box(canvas, bbox, shear, OBJECT_COLOR, name)
-            else:
-                x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), OBJECT_COLOR, 1)
-                cv2.putText(
-                    canvas, name[:18], (x1, max(12, y1 - 4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, OBJECT_COLOR, 1,
-                )
+            x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), OBJECT_COLOR, 1, lineType=cv2.LINE_AA)
+            cv2.putText(
+                canvas,
+                f"object {name[:16]}",
+                (x1, max(12, y1 - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                OBJECT_COLOR,
+                1,
+                lineType=cv2.LINE_AA,
+            )
 
-        # 4b. People — style-dependent (foot default = no heavy boxes)
+        # 4b. People layer — one language per style (no stacked box + foot + second id).
         for track in tracks:
             b = [int(v) for v in track.bbox]
-            is_stationary = getattr(track, "is_stationary", False)
             is_staff = track.track_id in staff_ids
-            if is_staff:
-                color = STAFF_COLOR
-            else:
-                color = STILL_COLOR if is_stationary else PERSON_COLOR
+            color = STAFF_COLOR if is_staff else PERSON_COLOR
+
+            if style in _PATH_STYLES:
+                if style == "skeleton":
+                    _draw_skeleton(canvas, track)
+                foot = _draw_foot_mark(canvas, track)
+                _draw_trail(canvas, track)
+                _draw_person_id(canvas, track, foot, is_staff)
+                continue
 
             if style == "aabb":
                 cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2)
+                cv2.putText(
+                    canvas,
+                    person_label(track, is_staff),
+                    (b[0], max(14, b[1] - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                    lineType=cv2.LINE_AA,
+                )
             elif style == "nvidia":
                 width = max(1, b[2] - b[0])
                 shear = heading_shear_px(track, width)
                 draw_nvidia_pallet_box(
                     canvas, track.bbox, shear, color, person_label(track, is_staff)
                 )
-            elif style == "parallel":
+            else:
                 width = max(1, b[2] - b[0])
                 shear = heading_shear_px(track, width)
                 body = parallel_body_quad(track.bbox, shear)
-                foot_q = parallel_footprint_quad(track.bbox, shear)
                 cv2.polylines(canvas, [body], isClosed=True, color=color, thickness=2)
-                cv2.polylines(canvas, [foot_q], isClosed=True, color=color, thickness=1)
-            elif style == "skeleton":
-                _draw_skeleton(canvas, track)
-
-            # Primary UX for all styles: red foot + trail + faint id
-            foot = _draw_foot_mark(canvas, track)
-            _draw_trail(canvas, track)
-            _draw_faint_id(canvas, track, foot, is_staff)
-
-            # Heavier ID for light box styles (nvidia already has label bar)
-            if style in ("aabb", "parallel"):
-                dwell = float(getattr(track, "dwell_s", 0.0) or 0.0)
-                label = f"ID:{track.track_id}"
-                if is_staff:
-                    label += " STAFF"
-                elif is_stationary:
-                    label += " (still)"
-                if dwell >= 1.0:
-                    label += f" {dwell:.0f}s"
                 cv2.putText(
-                    canvas, label, (b[0], max(14, b[1] - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                    canvas,
+                    person_label(track, is_staff),
+                    (b[0], max(14, b[1] - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                    lineType=cv2.LINE_AA,
                 )
 
         # 5. HUD

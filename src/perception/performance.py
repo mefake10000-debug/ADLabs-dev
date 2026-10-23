@@ -58,13 +58,16 @@ BALANCED_PRESET: Dict[str, Any] = {
 
 QUALITY_PRESET: Dict[str, Any] = {
     "mode": "quality",
-    "model_name": "models/yolo26s.pt",  # used when DETECTOR_BACKEND=yolo26
+    # Local demo accuracy path: Ultralytics YOLO26s @ 640. RF-DETR stays opt-in
+    # (DETECTOR_BACKEND=rfdetr). infer_every_n=2 keeps IDs stable on Docker CPU;
+    # every-frame 640 stalls the tracker and looks like missed people.
+    "model_name": "models/yolo26s.pt",
     "imgsz": 640,
-    "infer_every_n": 1,
-    "display_every_n": 2,
+    "infer_every_n": 2,
+    "display_every_n": 1,
     "enrichment": True,
     "reid": False,  # still opt-in via models.reid.enabled
-    "detector_backend": BACKEND_RFDETR,  # Apache SOTA default for quality
+    "detector_backend": BACKEND_YOLO26,
 }
 
 _PRESETS = {
@@ -90,9 +93,23 @@ def resolve_performance(pipeline_cfg: Dict[str, Any]) -> Dict[str, Any]:
     perf_cfg = pipeline_cfg.get("performance") or {}
     p_cfg = pipeline_cfg.get("perception") or {}
 
-    # Explicit numeric overrides from performance.* or perception.*
+    # Yaml imgsz / infer_every_n are the knobs for *that yaml mode*. A balanced
+    # file (imgsz 416, yolo26n) must not silently pin EDGE_PERF_MODE=quality
+    # back to nano@416 — that was the "quality still looks like balanced" miss.
+    yaml_mode = str(perf_cfg.get("mode") or "").strip().lower()
+    yaml_owns_knobs = yaml_mode == mode
+    env_pins = {
+        "imgsz": (os.environ.get("EDGE_IMGSZ") or "").strip(),
+        "infer_every_n": (os.environ.get("EDGE_INFER_EVERY_N") or "").strip(),
+        "display_every_n": (os.environ.get("EDGE_DISPLAY_EVERY_N") or "").strip(),
+    }
     for key, cast in (("imgsz", int), ("infer_every_n", int), ("display_every_n", int)):
-        raw = perf_cfg.get(key, p_cfg.get(key, preset[key]))
+        if env_pins[key]:
+            raw = env_pins[key]
+        elif yaml_owns_knobs:
+            raw = perf_cfg.get(key, p_cfg.get(key, preset[key]))
+        else:
+            raw = preset[key]
         try:
             preset[key] = max(1, cast(raw))
         except (TypeError, ValueError):
@@ -109,9 +126,10 @@ def resolve_performance(pipeline_cfg: Dict[str, Any]) -> Dict[str, Any]:
     env_model = (os.environ.get("EDGESIGHT_DETECT_MODEL") or "").strip()
     if env_model:
         preset["model_name"] = env_model
-    elif mode == "quality" and p_cfg.get("model_name"):
-        # quality may keep an explicit heavier weight from yaml
-        preset["model_name"] = p_cfg["model_name"]
+    elif mode == "quality":
+        # Heavier Ultralytics weight. Yaml perception.model_name is the nano
+        # balanced pin — do not copy it onto quality.
+        preset["model_name"] = _PRESETS["quality"]["model_name"]
     elif mode in ("fast", "balanced"):
         # Prefer nano even if yaml still says yolo26s (legacy checkouts)
         preset["model_name"] = (

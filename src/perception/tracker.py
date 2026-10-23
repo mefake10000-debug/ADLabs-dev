@@ -221,6 +221,11 @@ class SimpleByteTracker:
         self._next_id = 1
 
     def update(self, detections: List[Dict[str, Any]], timestamp: float) -> List[Track]:
+        # Objects (chairs, bags, open-vocab products) must not mint person IDs
+        # or feed tripwire / people_now. Callers should already split them;
+        # this is the hard gate.
+        from src.perception.detector import keep_person_detections
+        detections = keep_person_detections(detections)
         high_dets = [d for d in detections if d["confidence"] >= self.track_thresh]
         low_dets = [d for d in detections if d["confidence"] < self.track_thresh]
 

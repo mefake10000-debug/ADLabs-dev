@@ -38,25 +38,23 @@ perception:
   imgsz: 512
   infer_every_n: 2
   display_every_n: 1
-  confidence_threshold: 0.25  # Detector's own floor -- kept low deliberately. The real "is this a
-                               # real person" bar is tracking.track_thresh below; detections between
-                               # this floor and track_thresh can only extend a track that already
-                               # exists (ByteTrack low-confidence recovery), never start a new one.
-                               # Benchmark evidence (docs/tracking-benchmark.md): at 0.50 as a single
-                               # threshold, ~15 points of recall were partially-occluded people YOLO
-                               # did see, just below 0.50.
+  confidence_threshold: 0.20  # Person floor (class 0). Lower than objects so distant /
+                               # partial people still reach ByteTrack. Detections between this and
+                               # tracking.track_thresh only extend an existing person track.
+  object_confidence_threshold: 0.50  # COCO non-person classes. Higher so chairs and bags
+                               # stay on the object layer and never start a person ID.
   iou_threshold: 0.45         # Suppress duplicate overlapping boxes on the same person
-  min_height: 95              # Suppress small shelf items and price tags
+  min_height: 70              # Distant shoppers on 720p were dropped at 95px
   min_width: 30
   min_aspect_ratio: 1.0       # Suppress wide/horizontal displays (baskets, flat signs)
   max_aspect_ratio: 4.2       # Suppress vertical slivers / poles
-  min_area: 3000
+  min_area: 1800
   classes: [0]                # Class 0 is 'person' in COCO
   require_model: true         # Fail at startup if YOLO cannot load, instead of silently reporting zero people
 
 tracking:
   tracker_type: "bytetrack"
-  track_thresh: 0.50          # Bar for STARTING a new track. Detections below this (but above
+  track_thresh: 0.40          # Bar for STARTING a new person track. Detections below this (but above
                                # perception.confidence_threshold) can only extend an existing track.
   match_thresh: 0.45          # Base IoU match; EdgePipeline scales down when infer_every_n > 1
   track_buffer: 60            # Update-ticks to keep a lost track (scaled up with infer_every_n).

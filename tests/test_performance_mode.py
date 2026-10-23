@@ -45,6 +45,18 @@ class PerformanceModeTests(unittest.TestCase):
         self.assertEqual(resolved["infer_every_n"], 3)
         self.assertFalse(resolved["enrichment"])
 
+    def test_quality_env_not_pinned_by_balanced_yaml(self):
+        os.environ["EDGE_PERF_MODE"] = "quality"
+        resolved = resolve_performance({
+            "performance": {"mode": "balanced", "imgsz": 416, "infer_every_n": 2},
+            "perception": {"model_name": "models/yolo26n.pt", "imgsz": 416},
+        })
+        self.assertEqual(resolved["mode"], "quality")
+        self.assertEqual(resolved["model_name"], "models/yolo26s.pt")
+        self.assertEqual(resolved["imgsz"], 640)
+        self.assertEqual(resolved["infer_every_n"], 2)
+        self.assertEqual(resolved["detector_backend"], "yolo26")
+
     def test_env_quality_wins(self):
         os.environ["EDGE_PERF_MODE"] = "quality"
         resolved = resolve_performance({"performance": {"mode": "balanced"}})

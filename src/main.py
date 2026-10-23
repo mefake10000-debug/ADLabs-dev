@@ -27,7 +27,17 @@ def _lifetime_product_rows(rows: Any, people_now: int) -> bool:
     return viewers > max(cap, 200) or detections > max(cap * 4, 800)
 
 from src.ingestion.stream_reader import StreamReader
-from src.perception.detector import PersonDetector
+from src.perception.detector import PersonDetector, is_person_detection
+
+
+def _object_layer(dets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Overlay objects only. Person boxes never share this layer or a track id."""
+    out: List[Dict[str, Any]] = []
+    for det in dets or []:
+        if not isinstance(det, dict) or is_person_detection(det):
+            continue
+        out.append(det)
+    return out
 from src.perception.tracker import SimpleByteTracker, tracker_params_for_infer_gap
 from src.perception.performance import limit_cameras, resolve_performance
 from src.perception.detector_backend import BACKEND_RFDETR, backend_label
@@ -133,7 +143,8 @@ class EdgePipeline:
             or p_cfg.get("model_name")
             or "yolov8n.pt"
         )
-        conf_thresh = p_cfg.get("confidence_threshold", 0.50)
+        conf_thresh = float(p_cfg.get("confidence_threshold", 0.20))
+        object_conf = float(p_cfg.get("object_confidence_threshold", 0.50))
         iou_thresh = p_cfg.get("iou_threshold", 0.45)
         min_height = p_cfg.get("min_height", 85.0)
         min_width = p_cfg.get("min_width", 30.0)
@@ -159,6 +170,7 @@ class EdgePipeline:
             rfdetr_variant=self.perf.get("rfdetr_variant"),
             rfdetr_weights=self.perf.get("rfdetr_weights"),
             pipeline_cfg=self.pipeline_cfg,
+            object_conf=object_conf,
         )
 
         # Mirror person detector into the registry (ultralytics or rfdetr kind).
@@ -500,7 +512,11 @@ class EdgePipeline:
 
     def _init_rtmpose(self) -> None:
         """Load RTMPose-t/s ONNX for ankle feet (rtmlib preferred)."""
-        flag = (os.environ.get("ENABLE_RTMPOSE") or "1").strip().lower()
+        # Default off. Skeleton style opts in. Explicit ENABLE_RTMPOSE still wins.
+        raw_flag = os.environ.get("ENABLE_RTMPOSE")
+        if raw_flag is None or str(raw_flag).strip() == "":
+            raw_flag = "1" if resolve_overlay_box_style() == "skeleton" else "0"
+        flag = str(raw_flag).strip().lower()
         if flag in ("0", "false", "off", "no"):
             logger.info("RTMPose disabled (ENABLE_RTMPOSE=%s).", flag)
             return
@@ -843,7 +859,7 @@ class EdgePipeline:
                             store_objects = []
                         # Open-vocab (YOLOE / YOLO-World) labels when enrichment last wrote them.
                         ov_objects = list(ctx.get("last_overlay_objects_ov") or [])
-                        ctx["last_overlay_objects"] = list(store_objects) + ov_objects
+                        ctx["last_overlay_objects"] = _object_layer(list(store_objects) + ov_objects)
 
                         # 2. Tracking (people only — store objects are visual labels)
                         active_tracks = ctx["tracker"].update(detections, frame_time)
@@ -1506,6 +1522,7 @@ class EdgePipeline:
             },
             "frame_time": frame_time,
             "people_now": len(customers),
+            "objects_now": len(_object_layer(ctx.get("last_overlay_objects") or [])),
             "staff_now": int(ctx.get("staff_visible", 0) or 0),
             "unique_tracks_today": len(ctx.get("tracked_ids_today", set())),
             "total_visitors": tripwire_in,
@@ -1603,6 +1620,9 @@ class EdgePipeline:
                 if getattr(self.detector, "backend", "") == BACKEND_RFDETR
                 else None,
                 "detector_loaded": bool(getattr(self.detector, "is_loaded", False)),
+                "weights": getattr(self.detector, "model_name", None),
+                "person_conf": getattr(self.detector, "conf_thresh", None),
+                "object_conf": getattr(self.detector, "object_conf", None),
                 "imgsz": int(getattr(self.detector, "imgsz", 0) or 0) or None,
                 "tracker": "bytetrack",
                 "perf_mode": getattr(self, "perf_mode", "balanced"),
@@ -1664,6 +1684,7 @@ class EdgePipeline:
             "timestamp": payload["timestamp"],
             "cameras": [],
             "people_now": 0,
+            "objects_now": 0,
             "staff_now": 0,
             "total_visitors": 0,
             "total_exits": 0,
@@ -1702,6 +1723,7 @@ class EdgePipeline:
                 continue
             store["cameras"].append(row.get("camera_id"))
             store["people_now"] += int(row.get("people_now", 0) or 0)
+            store["objects_now"] += int(row.get("objects_now", 0) or 0)
             store["staff_now"] += int(row.get("staff_now", 0) or 0)
             store["total_visitors"] += int(row.get("total_visitors", 0) or 0)
             store["total_exits"] += int(row.get("total_exits", 0) or 0)
