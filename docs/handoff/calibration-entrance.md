@@ -5,9 +5,11 @@ Source: `data/sample_videos/entrance_sample.mp4` · fps_target 15 · 1270×720 (
 
 ## Verified current calibration
 
-- Tripwire `tripwire_1790217578233`: line (1116, 457) → (990, 717), `in_direction: bottom_to_top`.
-- Queue zone `queue_zone_1790217226558` — "Checkout Queue" (6-point polygon, right-mid floor).
-- Staff zone `staff_zone_1790733394769` — "Staff Area" (5-point polygon, left-mid floor).
+- Tripwire `entrance_tripwire`: horizontal sample line (160, 520) → (1110, 520), `in_direction: bottom_to_top` (re-draw if FOV differs).
+- Queue zone `queue_zone_1790217226558` — "Checkout Queue" (6-point client polygon; restored after template overwrite).
+- Staff zone `staff_zone_1790733394769` — "Staff Area" (5-point client polygon, left-mid floor).
+
+**Client-owned:** queue / staff / dwell polygons are never auto-written. Calibration Studio **Apply entrance template** is an explicit button and sets the entrance tripwire only.
 
 All values above were read directly from `configs/cameras.yaml` on 2026-10-23.
 
