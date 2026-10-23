@@ -42,11 +42,11 @@ designed, but it also means a restart replays old rollups into "today"'s views (
 | 5 | **Avg dwell 8–62s** | Cashier and counter customer stayed the whole clip (60s+) | "Dwell" = average age of currently-visible tracks; ID churn keeps it low |
 | 6 | Overlay FPS 13.8 (target 15) | Pipeline sustains ~13.8, not 15 | Inference-bound. `/api/v1/device/health` reports a **hard-coded** `pipeline_fps: 13.8` (gap-analysis §3), which only coincidentally matches your machine |
 | 7 | Times are 10:13–10:15 | Your clock/recording says ~15:43–15:47 | Rollups are UTC (+5:30 to IST); the dashboard now labels ranges as UTC |
-| 8 | Earlier benchmark doc: "entrance_sample.mp4 is synthetic; 37 IDs in 22.9s confirms it's unsuited for detector benchmarking" | **Wrong.** It's real IP-camera footage of a shop (2017 timestamp overlay). It is the best benchmark clip we have | I inferred it from `generate_sample_video.py` without opening the file. Corrected in `tracking-benchmark.md` |
-| 9 | Earlier benchmark: fragmentation "is dominated by the fallback detector, not the tracker" | With real YOLO the cashier still gets 3 IDs in 61s | That claim was too strong; tracker logic is a real contributor (§4). Softened in `tracking-benchmark.md` |
+| 8 | Earlier benchmark doc: "entrance_sample.mp4 is synthetic; 37 IDs in 22.9s confirms it's unsuited for detector benchmarking" | **Wrong.** It's real IP-camera footage of a shop (2017 timestamp overlay). It is the best benchmark clip we have | I inferred it from `generate_sample_video.py` without opening the file. Corrected in `../models/tracking-benchmark.md` |
+| 9 | Earlier benchmark: fragmentation "is dominated by the fallback detector, not the tracker" | With real YOLO the cashier still gets 3 IDs in 61s | That claim was too strong; tracker logic is a real contributor (§4). Softened in `../models/tracking-benchmark.md` |
 
 HOG-vs-YOLO on this clip (same harness and config): HOG raw-detection recall is 7–14% at two early checkpoints
-(local smoke run); YOLO in your recording is ~55–90%. So the HOG numbers in `tracking-benchmark.md` are a floor, not a
+(local smoke run); YOLO in your recording is ~55–90%. So the HOG numbers in `../models/tracking-benchmark.md` are a floor, not a
 prediction.
 
 ## 3. Why the queue columns are empty — root causes and proposed fix
@@ -119,9 +119,9 @@ the real tracker (person tracked 5s, then hidden N frames, then reappearing at t
 ## 5. Recommended order
 
 1. In Docker, get a **YOLO baseline** on this clip (5 hand-counted checkpoints are in
-   `scripts/benchmark_ground_truth/entrance_sample.json`; the harness now uses `configs/pipeline.yaml` and reports raw
+   `scripts/benchmark/benchmark_ground_truth/entrance_sample.json`; the harness now uses `configs/pipeline.yaml` and reports raw
    detections vs tracker output separately, which quantifies the stationary-filter cost directly):
-   `docker compose run --rm edge-analyzer python scripts/benchmark_tracking.py data/sample_videos/entrance_sample.mp4 --ground-truth scripts/benchmark_ground_truth/entrance_sample.json`
+   `docker compose run --rm edge-analyzer python scripts/benchmark/benchmark_tracking.py data/sample_videos/entrance_sample.mp4 --ground-truth scripts/benchmark/benchmark_ground_truth/entrance_sample.json`
    (the `scripts/` folder is baked into the image, so rebuild with `docker compose build edge-analyzer` first).
 2. Draw the tripwire and queue zone from the dashboard (also now testable end to end).
 3. Approve/adjust A–C above and the anchored re-acquisition; I implement them behind tests and re-run the benchmark to
@@ -369,8 +369,8 @@ Same command, same 5 checkpoints, same `entrance_sample.mp4`, run inside the (re
 image changes needed since `src`/`scripts`/`configs` are bind-mounted) edge container:
 
 ```
-docker compose run --rm --no-deps edge-analyzer python scripts/benchmark_tracking.py \
-    data/sample_videos/entrance_sample.mp4 --ground-truth scripts/benchmark_ground_truth/entrance_sample.json
+docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/benchmark_tracking.py \
+    data/sample_videos/entrance_sample.mp4 --ground-truth scripts/benchmark/benchmark_ground_truth/entrance_sample.json
 ```
 
 | | raw recall | tracker-output recall | unique track IDs |

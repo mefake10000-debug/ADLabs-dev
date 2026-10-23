@@ -4,14 +4,14 @@
 # (docs/pilot-hardware.md). Run inside the edge container:
 #
 #   docker compose stop edge-analyzer        # don't share the CPU with the live analyzer
-#   docker compose run --rm --no-deps edge-analyzer sh scripts/benchmark_models.sh [n s m]
+#   docker compose run --rm --no-deps edge-analyzer sh scripts/benchmark/benchmark_models.sh [n s m]
 #   docker compose start edge-analyzer
 #
 # A model given as e.g. "s_openvino_model" runs models/yolo26s_openvino_model (export it first).
 # Results: data/storage/model_bench/ (gitignored), plus a summary table at the end.
 set -u
 V=data/sample_videos/entrance_sample.mp4
-GT=scripts/benchmark_ground_truth/entrance_sample.json
+GT=scripts/benchmark/benchmark_ground_truth/entrance_sample.json
 OUT=data/storage/model_bench
 MODELS=${*:-n s m}
 mkdir -p $OUT
@@ -19,13 +19,13 @@ mkdir -p $OUT
 for M in $MODELS; do
   W=models/yolo26$M; case $M in *_model) ;; *) W=$W.pt ;; esac
   echo "=== yolo26$M: accuracy (every frame) ==="
-  python scripts/benchmark_tracking.py $V --ground-truth $GT --model $W > $OUT/accuracy_$M.log 2>&1
+  python scripts/benchmark/benchmark_tracking.py $V --ground-truth $GT --model $W > $OUT/accuracy_$M.log 2>&1
   echo "=== yolo26$M: speed + suspected ID switches (every frame) ==="
-  python scripts/detect_id_switches.py $V --no-clips --model $W --out-dir $OUT/switches_${M}_allframes \
+  python scripts/benchmark/detect_id_switches.py $V --no-clips --model $W --out-dir $OUT/switches_${M}_allframes \
     > $OUT/switches_${M}_allframes.log 2>&1
   FPS=$(python -c "import json;s=json.load(open('$OUT/switches_${M}_allframes/summary.json'));print(round(s['frames_processed']/s['wall_clock_seconds'],2))")
   echo "=== yolo26$M: suspected ID switches at the rate it sustains here ($FPS fps) ==="
-  python scripts/detect_id_switches.py $V --no-clips --model $W --process-fps $FPS --out-dir $OUT/switches_${M}_live \
+  python scripts/benchmark/detect_id_switches.py $V --no-clips --model $W --process-fps $FPS --out-dir $OUT/switches_${M}_live \
     > $OUT/switches_${M}_live.log 2>&1
 done
 

@@ -201,7 +201,7 @@
                     <div class="col-span-1 space-y-4">
                         <div class="bg-surface-card border border-surface-border rounded-xl p-4">
                             <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-3">Model status HUD</h3>
-                            <p class="text-[10px] text-gray-500 mb-2" id="perf-mode-line">perf: — · docs/live-fps.md</p>
+                            <p class="text-[10px] text-gray-500 mb-2" id="perf-mode-line">perf: — · docs/performance/live-fps.md</p>
                             <ul id="model-status-hud" class="space-y-2 text-[11px] text-gray-300">
                                 <li class="flex justify-between gap-2"><span>Person detect (fast: n / quality: s)</span><span class="text-emerald-400 font-semibold">Live</span></li>
                                 <li class="flex justify-between gap-2"><span>ByteTrack</span><span class="text-emerald-400 font-semibold">Live</span></li>
@@ -507,7 +507,7 @@
                 if (eng) eng.innerText = (h.inference_engine || 'Edge') + ' · decode ' + decode + ' · ' + mode;
                 const perfLine = document.getElementById('perf-mode-line');
                 if (perfLine) {
-                    perfLine.innerText = 'perf: ' + mode + ' · infer ' + infer + ' · decode ' + decode + ' · docs/live-fps.md';
+                    perfLine.innerText = 'perf: ' + mode + ' · infer ' + infer + ' · decode ' + decode + ' · docs/performance/live-fps.md';
                 }
                 const enrichOn = mode === 'quality';
                 const hudEnrich = document.getElementById('hud-enrich');

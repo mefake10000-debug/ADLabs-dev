@@ -1210,7 +1210,7 @@ def get_engagement_analytics(
 def get_model_stack():
     """Honest model-stack catalog (LIVE|PACKED|PARTIAL|GATED|FUTURE|SKIP).
 
-    Never invents LIVE age/gender. See docs/model-stack-policy.md.
+    Never invents LIVE age/gender. See docs/models/model-stack-policy.md.
     """
     try:
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1278,7 +1278,7 @@ def get_model_stack():
         logger.exception("model stack catalog failed")
         return JSONResponse(
             status_code=500,
-            content={"error": str(e), "policy": "docs/model-stack-policy.md"},
+            content={"error": str(e), "policy": "docs/models/model-stack-policy.md"},
         )
 
 
@@ -1750,7 +1750,7 @@ def get_overlay_settings():
             "and restart. Default foot = red ground mark + trail (tripwire/dwell use the same "
             "point). nvidia = LocateAnything pallet look-alike (optional); pallet aliases to nvidia."
         ),
-        "docs": "docs/foot-tracking-retail-models.md",
+        "docs": "docs/models/foot-tracking-retail-models.md",
     }
 
 

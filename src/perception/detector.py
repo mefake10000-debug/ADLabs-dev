@@ -38,7 +38,7 @@ class PersonDetector:
 
     RF-DETR remains an opt-in Apache alternate (``DETECTOR_BACKEND=rfdetr``).
     There is deliberately no lower-accuracy classical fallback: HOG+SVM recovered only
-    ~7-14% of people on real shop footage (docs/tracking-benchmark.md). With
+    ~7-14% of people on real shop footage (docs/models/tracking-benchmark.md). With
     require_model=True a model that cannot load is a startup error. Without it the
     detector returns no detections and logs an error.
 
@@ -180,7 +180,7 @@ class PersonDetector:
             if self.require_model:
                 raise RuntimeError(
                     f"Could not load RF-DETR '{self.rfdetr_weights}': {e}. "
-                    f"Run `python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano` "
+                    f"Run `python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano` "
                     f"or let rfdetr auto-fetch into RF_HOME."
                 ) from e
             logger.error("Could not initialize RF-DETR (%s). This detector will return NO detections.", e)

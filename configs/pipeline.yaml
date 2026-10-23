@@ -21,7 +21,7 @@ edge:
 #   OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb  # default foot; nvidia optional
 #   ENABLE_RTMPOSE=1                     # ankle feet via RTMPose ONNX when packed
 #
-# See docs/live-fps.md, docs/foot-tracking-retail-models.md, docs/rfdetr-integration.md.
+# See docs/performance/live-fps.md, docs/models/foot-tracking-retail-models.md, docs/models/rfdetr-integration.md.
 performance:
   mode: "detect"              # detect (demo default) | balanced | fast | quality
   imgsz: 640                  # detect/quality letterbox; balanced=416, fast=320 when that mode is selected
@@ -45,7 +45,7 @@ perception:
                                # real person" bar is tracking.track_thresh below; detections between
                                # this floor and track_thresh can only extend a track that already
                                # exists (ByteTrack low-confidence recovery), never start a new one.
-                               # Benchmark evidence (docs/tracking-benchmark.md): at 0.50 as a single
+                               # Benchmark evidence (docs/models/tracking-benchmark.md): at 0.50 as a single
                                # threshold, ~15 points of recall were partially-occluded people YOLO
                                # did see, just below 0.50.
   iou_threshold: 0.45         # Suppress duplicate overlapping boxes on the same person
@@ -99,7 +99,7 @@ cross_camera_fusion:
 # every models.* block stays exactly as configured below. Flip models.enabled (or
 # export EDGE_ENRICHMENT=1) on purpose, and watch the FPS column while you do.
 #
-# Weights are not committed (see .gitignore). Run `python scripts/download_models.py`
+# Weights are not committed (see .gitignore). Run `python scripts/download/download_models.py`
 # once after cloning.
 models:
   # Master switch for the enrichment tier. Fast mode forces this off even if true.

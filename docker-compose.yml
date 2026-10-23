@@ -1,7 +1,7 @@
 # Pins the default Compose project name to "adlabs" (used below to build each container_name),
 # so `docker compose up` gives the same container names as always regardless of which directory
 # name the repo happens to be checked out under. `docker compose -p <other-name> up` (e.g. to run
-# a second environment side by side, as in docs/recorded-run-analysis.md §9) then gets distinctly
+# a second environment side by side, as in docs/performance/recorded-run-analysis.md §9) then gets distinctly
 # named containers instead of colliding with this one -- container_name used to be hardcoded,
 # which silently ignored -p entirely and made two stacks fight over the same container names.
 name: adlabs
@@ -45,21 +45,21 @@ services:
       - PIPELINE_CONFIG=/app/configs/pipeline.yaml
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
       # Live detect preset: detect (default — yolo26s, imgsz 640, infer every 2) | balanced | fast | quality.
-      # See docs/live-fps.md. Default one cam on Docker CPU; set EDGE_MAX_CAMERAS= empty for all.
+      # See docs/performance/live-fps.md. Default one cam on Docker CPU; set EDGE_MAX_CAMERAS= empty for all.
       - EDGE_PERF_MODE=${EDGE_PERF_MODE:-detect}
       - EDGE_MAX_CAMERAS=${EDGE_MAX_CAMERAS:-1}
       # Person overlays: foot (default — red ground mark + trail) | skeleton | parallel | aabb.
-      # See docs/foot-tracking-retail-models.md.
+      # See docs/models/foot-tracking-retail-models.md.
       - OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-foot}
       - ENABLE_RTMPOSE=${ENABLE_RTMPOSE:-1}
       - RTMPOSE_VARIANT=${RTMPOSE_VARIANT:-t}
       - RTMPOSE_EVERY_N=${RTMPOSE_EVERY_N:-4}
       - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}
       # Detector backend: yolo26 (default, all modes) | rfdetr (opt-in only).
-      # See docs/rfdetr-integration.md. Optional: pip install rfdetr in the edge image.
+      # See docs/models/rfdetr-integration.md. Optional: pip install rfdetr in the edge image.
       # RF-DETR weights are NOT baked (~350 MB nano). One-command optional pull (disk-gated):
-      #   python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
-      # Dry-run (default): python3 scripts/download_pack_models_phase2.py --only rfdetr-nano
+      #   python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
+      # Dry-run (default): python3 scripts/download/download_pack_models_phase2.py --only rfdetr-nano
       # Until weights land, stack reports rfdetr OFF/PACKED; YOLO26n stays the live fast path.
       - DETECTOR_BACKEND=${DETECTOR_BACKEND:-}
       - RFDETR_VARIANT=${RFDETR_VARIANT:-nano}

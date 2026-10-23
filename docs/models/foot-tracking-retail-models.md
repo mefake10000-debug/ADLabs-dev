@@ -42,7 +42,7 @@ Per-camera live JSON now includes:
 Run (disk-gated; default dry-run):
 
 ```bash
-python3 scripts/download_pack_models_phase2.py --download \
+python3 scripts/download/download_pack_models_phase2.py --download \
   --only rtmpose-t rtmpose-s moondream2-config \
   --min-free-gb 4
 ```
@@ -91,6 +91,6 @@ Prefer **rtmlib** (`pip install rtmlib`); ORT SimCC fallback if rtmlib missing.
 
 ## Related
 
-- `docs/model-stack-policy.md`
-- `docs/overlay-parallel-boxes.md` (parallel option retained)
-- `scripts/download_pack_models_phase2.py`
+- `docs/models/model-stack-policy.md`
+- `docs/performance/overlay-parallel-boxes.md` (parallel option retained)
+- `scripts/download/download_pack_models_phase2.py`

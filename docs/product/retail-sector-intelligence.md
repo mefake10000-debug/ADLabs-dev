@@ -28,4 +28,4 @@ GET  /api/v1/nfc/taps
 
 `tests/test_nfc_industry.py` — empty NFC → NEEDS-HARDWARE; real POST → LIVE; `retail_roles.schema == floor_roles_v1`.
 
-See also portal `docs/retail-sector-intelligence.md`.
+See also portal `docs/product/retail-sector-intelligence.md`.

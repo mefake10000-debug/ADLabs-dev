@@ -10,7 +10,7 @@ Pilot: **1 entrance camera with the live JPEG overlay** (in-store dashboard only
 cameras**. No video leaves the store.
 
 - **Detector:** entrance cameras need ~8 fps for tripwire counts; floor cameras (dwell, heatmap,
-  occupancy) work at 3–5 fps **[M]** (`model-benchmark.md`). Total **~17–32 YOLO26s detections/s**.
+  occupancy) work at 3–5 fps **[M]** (`../models/model-benchmark.md`). Total **~17–32 YOLO26s detections/s**.
   Our i5 laptop CPU does 7.9/s **[M]**, so a compact box needs an AI accelerator.
 - **Live overlay:** ~5–10% of one CPU core **[E]**. It does not change the hardware tier.
 - **The rest is light:** ~0.8 GB RAM **[M]** (8 GB is plenty), 128–256 GB SSD (metrics only, no
@@ -52,7 +52,7 @@ The tracker, analytics, storage and dashboard APIs stay unchanged.
 
 1. Confirm the free PCIe M.2 slot; install Ubuntu 24.04 + Docker + HailoRT; `/dev/hailo0` appears.
 2. `hailortcli benchmark` on the YOLO26s HEF; compare with 67/147 fps.
-3. After the port: `scripts/benchmark_models.sh` on `entrance_sample`. Pass: **≥ 30 detections/s**
+3. After the port: `scripts/benchmark/benchmark_models.sh` on `entrance_sample`. Pass: **≥ 30 detections/s**
    and tracker recall within a few points of **76%**.
 4. One-hour soak: 1 live + 3 metrics sub-streams. Each camera holds its fps, CPU < 70%, temperature stable.
-5. Record the results in `model-benchmark.md`.
+5. Record the results in `../models/model-benchmark.md`.

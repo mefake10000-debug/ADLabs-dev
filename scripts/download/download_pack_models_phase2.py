@@ -117,7 +117,7 @@ ITEMS = [
             "Env: DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=nano|small\n"
             "    EDGE_PERF_MODE=quality defaults to rfdetr; fast keeps yolo26n.\n"
             "Do NOT fetch XL/2XL (PML 1.0 Plus).\n"
-            "See docs/rfdetr-integration.md\n"
+            "See docs/models/rfdetr-integration.md\n"
         ),
     ),
     dict(
@@ -242,7 +242,7 @@ ITEMS = [
         skip=True,
         stub_text=(
             "LocateAnything-3B — FUTURE / do not download (NVIDIA non-commercial).\n"
-            "See docs/locateanything-3b-integration.md and docs/model-stack-policy.md.\n"
+            "See docs/models/locateanything-3b-integration.md and docs/models/model-stack-policy.md.\n"
         ),
     ),
 ]
@@ -422,8 +422,8 @@ def main() -> int:
     print("SKU-110K: SKIP  |  LocateAnything-3B: FUTURE (no download)  |  P2PNet: SKIP commercial")
     print("MiVOLO: GATED (ENABLE_DEMOGRAPHICS=0 default)  |  Moondream: FUTURE nightly stub")
     print("RF-DETR one-command (optional, ~350MB, disk-gated):")
-    print("  python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1")
-    print("See docs/model-stack-policy.md · docs/rfdetr-integration.md")
+    print("  python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1")
+    print("See docs/models/model-stack-policy.md · docs/models/rfdetr-integration.md")
     return 0 if ok else 1
 
 

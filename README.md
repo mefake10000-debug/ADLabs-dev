@@ -1,5 +1,40 @@
 # AD Labs EdgeSight
 
+## 🗺️ What's in this repo (plain-English map)
+
+If you're new here, start with these two files:
+- **[product.md](product.md)** — the plan: what problem we're solving and what we're
+  trying to build.
+- **[README.md](README.md)** (this file) — how to actually run it.
+
+Then here's what every folder is, in one sentence each:
+
+| Folder | What's actually in it |
+|---|---|
+| `src/` | The real "brain" of the project — the Python code that watches camera video, finds people, tracks them, and figures out things like how long they waited in line. |
+| `server/` | The part that takes what `src/` figured out and turns it into a website/dashboard you can look at, plus the API other programs talk to. |
+| `models/` | The AI models (pre-trained — we didn't train these ourselves) that actually detect people, poses, faces, etc. in video. |
+| `configs/` | Settings files — things like "which cameras to use" and "how fast vs. how accurate should detection be," without touching code. |
+| `docker/` | Instructions for packaging this project into a box ("container") so it runs the same way on any computer. |
+| `scripts/` | One-off helper programs — downloading models, testing speed, generating sample videos. Not part of the live product, just tools to use while building it. |
+| `tests/` | Automatic checks that make sure we didn't break anything when we change code. |
+| `data/` | Sample video files and local storage used for testing/demos. |
+| `docs/` | Every written explanation of a decision, a tradeoff, or how a piece works — see the map below. |
+
+### Inside `docs/`, grouped by topic:
+
+| Sub-folder | What it answers |
+|---|---|
+| `docs/architecture/` | "How does data flow from the camera to the dashboard?" |
+| `docs/models/` | "Which AI models are we using, and why those ones?" |
+| `docs/performance/` | "Why is the video sometimes laggy, and how do we fix it?" |
+| `docs/product/` | "What are we actually supposed to be building?" |
+| `docs/research/` | "What do competitors do, and how are we different?" |
+| `docs/integration/` | "How does this connect to the website?" |
+| `docs/tools/` | "How do I prepare/record test footage?" |
+| `docs/handoff/` | A complete snapshot for someone picking this project up fresh. |
+
+
 > **On-Premise Retail Edge AI & Computer Vision Analytics Platform for Existing CCTV Infrastructure**
 
 ---
@@ -119,7 +154,7 @@ list and validate video sources — after pulling this change, run `docker compo
 | You changed | Run |
 |---|---|
 | `src/`, `configs/`, `scripts/` | `docker compose restart edge-analyzer` (Python re-imports on start) |
-| Benchmark / any one-off script | `docker compose run --rm --no-deps edge-analyzer python scripts/benchmark_tracking.py …` (`--no-deps` skips starting the other services) |
+| Benchmark / any one-off script | `docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/benchmark_tracking.py …` (`--no-deps` skips starting the other services) |
 | `server/` API code | `docker compose restart cloud-dashboard` (Streamlit hot-reloads by itself; uvicorn doesn't) |
 | `docker-compose.yml` | `docker compose up -d` (recreates only what changed) |
 | `requirements-*.txt` or `docker/Dockerfile.*` | `docker compose build <service>` — the **only** case that needs a build |
@@ -130,7 +165,7 @@ the default Linux wheel bundles ~4GB of CUDA libraries that Docker Desktop and t
 `TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 docker compose build edge-analyzer`. `.dockerignore` keeps
 `data/` and `.git` out of the build context. YOLO weights are cached in `models/` (`perception.model_name:
 models/yolo26s.pt`, the small model: as accurate as medium on our footage and 2.3x faster, see
-`docs/model-benchmark.md`), so they download once rather than on every container start.
+`docs/models/model-benchmark.md`), so they download once rather than on every container start.
 
 ### 2d. Tracking & Queue Tuning (`configs/pipeline.yaml`)
 - **`perception.confidence_threshold` / `tracking.track_thresh`** -- two-stage (ByteTrack-style)
@@ -151,13 +186,13 @@ models/yolo26s.pt`, the small model: as accurate as medium on our footage and 2.
 - **`analytics.staff_min_seconds_in_zone`** -- how long someone must stand inside a **staff zone**
   (drawn with "Draw Staff Zone" in the Calibration Studio, e.g. behind the counter) before they're
   tagged staff and excluded from all customer metrics. The tag sticks to that track after they
-  leave the zone. See `docs/metrics.md` §9 for exactly what's excluded and the limitations.
+  leave the zone. See `docs/product/metrics.md` §9 for exactly what's excluded and the limitations.
 - **`analytics.heatmap_write_seconds`** -- how often the edge re-renders each camera's floor heatmap
-  (where customers spend time; dashboard **Heatmap** tab). `scripts/render_heatmap.py` renders a
-  whole-clip heatmap offline. See `docs/metrics.md` §10.
+  (where customers spend time; dashboard **Heatmap** tab). `scripts/dev-tools/render_heatmap.py` renders a
+  whole-clip heatmap offline. See `docs/product/metrics.md` §10.
 
-See `docs/recorded-run-analysis.md` §10 for the evidence behind these defaults, and
-`docs/id-switch-detector.md` for measuring tracking quality (suspected ID switches) on any clip.
+See `docs/performance/recorded-run-analysis.md` §10 for the evidence behind these defaults, and
+`docs/models/id-switch-detector.md` for measuring tracking quality (suspected ID switches) on any clip.
 
 ### 2e. Securing the API (optional)
 Every `/api/v1/*` endpoint is open by default -- fine for a closed/trusted network, not for a port
@@ -191,7 +226,7 @@ python scripts/run_edge.py
 
 ## 🎯 Key Retail Metrics & Algorithms
 
-High-level summary below; **[docs/metrics.md](docs/metrics.md) is the exact, code-grounded
+High-level summary below; **[docs/product/metrics.md](docs/product/metrics.md) is the exact, code-grounded
 reference** for how each number is actually computed today (formulas, gotchas, and what resets
 to zero when) — read that before trying to validate or debug a specific number.
 

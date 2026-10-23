@@ -125,7 +125,7 @@ Three docker services (`rtsp-simulator`, `edge-analyzer`, `cloud-dashboard`) —
 
 4. **ID-switch → duplicate/missed counting is only mitigated, not eliminated.** If occlusion exceeds `max_age` (now 45 frames / ~3s at 15fps, or 45→ further increased to match `track_buffer` in the uncommitted config change), the lost track is dropped and a re-appearing person gets a new ID. If that ID-switch happens to straddle a tripwire crossing, it can produce a duplicate or missed count. This is inherent to any single-camera tracker-based counting approach and cannot be fully "fixed," but its practical frequency is currently unmeasured — no benchmark exists that reports ID-switch rate or count-accuracy against a labeled video (§8 M4 addresses this).
 
-5. **No event-level persistence (see §4).** Beyond being a stated MVP requirement, this is also a data-integrity issue: a crash or restart between two rollup flushes loses the underlying crossings with no way to reconstruct or audit them, and it blocks future POS/conversion-rate correlation (flagged as a priority in `competitor_analysis_vcount.md` — see project memory `reference-strategy-docs`) which needs event-level, not just 10-second-bucket, granularity.
+5. **No event-level persistence (see §4).** Beyond being a stated MVP requirement, this is also a data-integrity issue: a crash or restart between two rollup flushes loses the underlying crossings with no way to reconstruct or audit them, and it blocks future POS/conversion-rate correlation (flagged as a priority in `docs/research/competitor_analysis_vcount.md` — see project memory `reference-strategy-docs`) which needs event-level, not just 10-second-bucket, granularity.
 
 6. **`tracked_ids_today` never resets and is unbounded.** `main.py:148,185,299-301` — used as the unique-visitor counter fallback when no tripwires are configured. It is a `set()` that accumulates every track ID ever seen for the lifetime of the process, with no daily reset despite the name and no cap. For a long-running edge deployment this is both a slow memory leak and a metric that silently stops meaning "today" after the first midnight.
 
@@ -161,8 +161,8 @@ Sequenced so each milestone is independently shippable and low-risk; later miles
 > pinning/CI/API-key/credential-redaction/healthcheck hygiene were completed, followed by a live
 > tier-3 verification pass that found and fixed two more real bugs (a Streamlit calibration-save
 > race condition, and the Calibration Studio requiring a native double-click to close a zone --
-> see `docs/recorded-run-analysis.md` §9-13 for the full evidence trail, before/after benchmark,
-> and live verification write-ups). `docs/metrics.md` is now the code-grounded reference for how
+> see `docs/performance/recorded-run-analysis.md` §9-13 for the full evidence trail, before/after benchmark,
+> and live verification write-ups). `docs/product/metrics.md` is now the code-grounded reference for how
 > every dashboard number is actually calculated. **M5 and M6 are both still open** -- neither has
 > been started, and both are explicitly **deferred on purpose**: the team plans to acquire real
 > CCTV clips from multiple pilot retail stores, and M5 (multi-camera performance) / M6 (health
@@ -180,7 +180,7 @@ Sequenced so each milestone is independently shippable and low-risk; later miles
 > cleanly (no ID switches, no dropped tracks) across the *new* pilot clips once they arrive --
 > not just `entrance_sample.mp4`. The two known gaps from this branch's benchmark work --
 > ID-switch after occlusion exceeding `max_age` (~3s), and the frame-1150-class detector misses
-> at certain camera angles (§8 M4 evidence, `docs/recorded-run-analysis.md` §11) -- are being
+> at certain camera angles (§8 M4 evidence, `docs/performance/recorded-run-analysis.md` §11) -- are being
 > deliberately left unfixed for now, since real pilot footage may show a different camera angle,
 > lighting, or occlusion pattern than this sample clip, and any tuning done against
 > `entrance_sample.mp4` specifically could turn out to be the wrong fix (or already irrelevant)
@@ -217,14 +217,14 @@ Sequenced so each milestone is independently shippable and low-risk; later miles
 - **Acceptance criteria:** A manager can filter to one camera and an arbitrary date range and see visitors/entries/exits/occupancy/peak/average for that slice.
 
 ### M4 — Tracking accuracy benchmark (before touching the tracker further)
-- **Files:** Extend `scripts/test_count.py` into a repeatable benchmark harness; add 1-2 hand-labeled ground-truth counts for the existing sample videos.
+- **Files:** Extend `scripts/benchmark/test_count.py` into a repeatable benchmark harness; add 1-2 hand-labeled ground-truth counts for the existing sample videos.
 - **Why:** Per your constraint, do not replace ByteTrack without evidence. We currently have *zero* measured ID-switch rate or count-accuracy number — the occlusion-recovery work on this branch is plausible-looking code but unverified. This milestone produces the evidence needed to decide if further tracker tuning (vs. a different algorithm) is warranted, and directly informs whether §5 issues #3/#4 need urgent attention or are already acceptable.
 - **Dependencies:** Independent — can run in parallel with M0-M3.
 - **Tests required:** N/A (this *is* the test/benchmark work).
 - **Acceptance criteria:** A documented count-accuracy and ID-switch-rate number for `entrance_sample.mp4`/`checkout_sample.mp4` (and the currently-untracked `test_footage1.mp4`, per `project-tracker-occlusion-work` memory) against manually verified ground truth, checked into `docs/` or `scripts/`.
 
 ### M5 — Multi-camera pipeline performance (only if M4 or real pilot cameras show it's needed)
-- **Files:** `src/main.py` (move per-camera detect/track/analytics into a worker per camera, or async batching), `scripts/benchmark_performance.py` (extend to full-loop, multi-camera).
+- **Files:** `src/main.py` (move per-camera detect/track/analytics into a worker per camera, or async batching), `scripts/benchmark/benchmark_performance.py` (extend to full-loop, multi-camera).
 - **Why:** §6 — current design is provably single-threaded across cameras; don't build this speculatively, build it once the benchmark (extended per M4/this milestone) shows it's the actual bottleneck at the camera counts pilots will use.
 - **Dependencies:** M4's benchmark harness extended to multi-camera synthetic load.
 - **Tests required:** Throughput regression test (N synthetic streams sustain target FPS).
@@ -259,8 +259,8 @@ Sequenced so each milestone is independently shippable and low-risk; later miles
 | `src/visualizer/debug_overlay.py` | **KEEP** | Correct and already shared cleanly between snapshot/stream endpoints. |
 | `docker-compose.yml` / `docker/*` | **KEEP** | Sound service split and volume design; no changes needed for MVP. |
 | `tests/test_pipeline_core.py`, `tests/test_filtering.py` | **KEEP, EXTEND** | Good unit coverage of analytics primitives; add coverage for `main.py` orchestration (rollup generation) and `server/app.py` endpoints — their absence is exactly why the §5 #1 bug shipped unnoticed. |
-| `scripts/benchmark_performance.py` | **REFACTOR (extend)** | Currently only measures detector+tracker latency on synthetic frames; needs to cover the full per-camera loop and multi-camera concurrency to actually answer the Mac-mini-scaling question (M4/M5). |
-| `scripts/test_count.py` | **REFACTOR (extend into M4's benchmark harness)** | Useful manual script today; formalize into a repeatable accuracy benchmark with ground truth. |
+| `scripts/benchmark/benchmark_performance.py` | **REFACTOR (extend)** | Currently only measures detector+tracker latency on synthetic frames; needs to cover the full per-camera loop and multi-camera concurrency to actually answer the Mac-mini-scaling question (M4/M5). |
+| `scripts/benchmark/test_count.py` | **REFACTOR (extend into M4's benchmark harness)** | Useful manual script today; formalize into a repeatable accuracy benchmark with ground truth. |
 
 ---
 

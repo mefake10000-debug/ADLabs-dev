@@ -32,7 +32,7 @@ It is **not** a drop-in replacement for YOLO26/11, YOLO-World, or YOLOE. It is a
   https://huggingface.co/nvidia/LocateAnything-3B/blob/main/LICENSE
 - **Non-commercial only** — research / evaluation. Commercial use **not permitted** except NVIDIA and affiliates.
 - Components: Qwen2.5-3B-Instruct (**Qwen Research License**), MoonViT-SO-400M (**MIT**).
-- Same gating posture as pack `buffalo_l` / insightface: **do not** put in default `download_pack_models.py` without an explicit `--include-research` + legal note.
+- Same gating posture as pack `buffalo_l` / insightface: **do not** put in default `scripts/download/download_pack_models.py` without an explicit `--include-research` + legal note.
 
 **Recommendation:** keep YOLO-World / YOLOE / CLIP as production open-vocab; treat LocateAnything as **on-demand research** if/when a commercial license or NVIDIA product path exists.
 
@@ -211,7 +211,7 @@ mkdir -p "$DEST"
 # wget -c "$BASE/model-00002-of-00002.safetensors" -O "$DEST/model-00002-of-00002.safetensors"
 ```
 
-### Sibling to `download_pack_models.py` (pattern)
+### Sibling to `scripts/download/download_pack_models.py` (pattern)
 
 Extend with a **research-only** item gated like `buffalo_l`:
 
@@ -300,7 +300,7 @@ def locate(req: LocateRequest) -> LocateResponse:
     # 4) Overlay on dashboard via existing debug overlay path — separate from person tracks.
     raise HTTPException(
         status_code=501,
-        detail="LocateAnything worker not wired; see docs/locateanything-3b-integration.md",
+        detail="LocateAnything worker not wired; see docs/models/locateanything-3b-integration.md",
     )
 ```
 

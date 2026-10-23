@@ -63,7 +63,7 @@ Or edit `configs/pipeline.yaml` → `performance.mode` / `models.enabled`.
 Overlay style (visual only): `OVERLAY_BOX_STYLE=foot` (default) | `skeleton` |
 `nvidia` | `parallel` | `aabb`. Foot is the only person mark in the default
 style — pallet/parallel boxes are opt-in and were a second annotator on the
-body. See `docs/foot-tracking-retail-models.md`.
+body. See `docs/models/foot-tracking-retail-models.md`.
 
 ## Multi-cam tradeoffs
 

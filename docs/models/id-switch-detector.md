@@ -5,9 +5,9 @@ output, so a clip needs no hand labelling before it can be scored. Built so that
 footage arrives, each clip gets a tracking-quality number and a short list of moments to check,
 instead of someone watching the whole video.
 
-- Logic: [`src/analytics/id_switch.py`](../src/analytics/id_switch.py) (`IdSwitchDetector`)
-- Runner: [`scripts/detect_id_switches.py`](../scripts/detect_id_switches.py)
-- Tests: [`tests/test_id_switch.py`](../tests/test_id_switch.py)
+- Logic: [`src/analytics/id_switch.py`](../../src/analytics/id_switch.py) (`IdSwitchDetector`)
+- Runner: [`scripts/benchmark/detect_id_switches.py`](../scripts/benchmark/detect_id_switches.py)
+- Tests: [`tests/test_id_switch.py`](../../tests/test_id_switch.py)
 
 ## How it decides
 
@@ -57,7 +57,7 @@ These are suspicions, not verdicts:
 Needs YOLO, so it runs in the edge container. Frame rate matters — see below.
 
 ```
-docker compose run --rm --no-deps edge-analyzer python scripts/detect_id_switches.py \
+docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/detect_id_switches.py \
     data/sample_videos/entrance_sample.mp4 --process-fps 3
 ```
 
@@ -73,7 +73,7 @@ To try other `--max-gap` / `--max-distance` values without re-running YOLO, repl
 run's saved tracks. It takes seconds, and needs no YOLO:
 
 ```
-docker compose run --rm --no-deps edge-analyzer python scripts/detect_id_switches.py \
+docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/detect_id_switches.py \
     data/sample_videos/entrance_sample.mp4 \
     --replay data/storage/id_switch_runs/<previous run>/tracks.jsonl --max-distance 0.6
 ```
@@ -163,7 +163,7 @@ lost and new person *look like* (a colour histogram of each box's contents). Unt
 all three false positives above are people in clearly different clothing, which is exactly what
 that catches; the two merged-box true positives are the ones it might wrongly reject. The same
 appearance signal is what's needed to recognise staff away from their staff zone (see
-`docs/metrics.md` section 9).
+`docs/product/metrics.md` section 9).
 
 **Manual clip review (Mihir, 2026-10-02, 3 fps run):** consistent with the spot check above. Many
 of the flagged events give the new ID to a *different* person; the genuine ones are mostly the same

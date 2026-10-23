@@ -105,7 +105,7 @@ class EdgePipeline:
         os.makedirs(self.live_dir, exist_ok=True)
 
         # Performance preset (EDGE_PERF_MODE / performance.mode). Detect
-        # (yolo26s @ 640, infer every 2) is the Docker demo default — see docs/live-fps.md.
+        # (yolo26s @ 640, infer every 2) is the Docker demo default — see docs/performance/live-fps.md.
         self.perf = resolve_performance(self.pipeline_cfg)
         self.perf_mode = self.perf["mode"]
         self.infer_every_n = int(self.perf["infer_every_n"])
@@ -351,7 +351,7 @@ class EdgePipeline:
             failed assertion _status < MTLCommandBufferStatusCommitted
             in -[IOGPUMetalCommandBuffer setCurrentCommandEncoder:]
 
-        (reproduced by scripts/check_mps_concurrency.py). So when the fast tier owns
+        (reproduced by scripts/dev-tools/check_mps_concurrency.py). So when the fast tier owns
         MPS, the enrichment tier runs on the CPU instead. The enrichment tier is
         deliberately low-frequency, so CPU inference there costs nothing that matters.
 
@@ -1864,7 +1864,7 @@ class EdgePipeline:
                 "mivolo_v2_calls": int(getattr(getattr(self, "age_gender", None), "calls", 0) or 0),
                 "demographics_enabled": demographics_env_enabled(),
                 "face_identity": False,
-                "stack_policy": "docs/model-stack-policy.md",
+                "stack_policy": "docs/models/model-stack-policy.md",
                 "note": (
                     f"perf={getattr(self, 'perf_mode', 'balanced')}: "
                     f"backend={getattr(self.detector, 'backend', 'yolo26')}; "

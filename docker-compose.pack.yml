@@ -4,7 +4,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d
 #
 # Inside edge-analyzer: /app/models/pack/...
-# Host: ./models/pack/  (python3 scripts/download_pack_models.py)
+# Host: ./models/pack/  (python3 scripts/download/download_pack_models.py)
 #
 # Verified layout (core, no buffalo_l):
 #   01-detection/   yolo11n/s/m + yolo11n-pose

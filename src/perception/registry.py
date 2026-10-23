@@ -130,7 +130,7 @@ class ModelRegistry:
     def _load_ultralytics(spec: ModelSpec, path: str):
         if not os.path.exists(path):
             raise FileNotFoundError(
-                f"weights not found at {path} (run scripts/download_models.py)"
+                f"weights not found at {path} (run scripts/download/download_models.py)"
             )
         from ultralytics import YOLO
         model = YOLO(path)
@@ -141,7 +141,7 @@ class ModelRegistry:
     def _load_onnx(spec: ModelSpec, path: str):
         if not os.path.exists(path):
             raise FileNotFoundError(
-                f"weights not found at {path} (run scripts/download_models.py)"
+                f"weights not found at {path} (run scripts/download/download_models.py)"
             )
         import onnxruntime as ort
         providers = spec.params.get("providers")

@@ -2,7 +2,7 @@
 Turn a raw CCTV/NVR export into clean, short clips the pipeline can use -- in one command.
 
 Real recorder exports arrive broken in ways that standard decoders mishandle (see
-docs/footage-tools.md for the garage footage that prompted this):
+docs/tools/footage-tools.md for the garage footage that prompted this):
   * corrupted stretches that leave the decoder in a bad state, so everything AFTER them comes
     out grey, rotated or slanted, even though VLC plays on after you skip ahead;
   * scrambled timestamps (jumping hours back and forth), which make ffmpeg duplicate or drop
@@ -18,10 +18,10 @@ What this does:
   4. Joins the pieces and slices them into N-minute clips, plus a contact sheet (one frame per
      minute per clip) and a report of anything suspect.
 
-Run inside the edge container (it has ffmpeg + OpenCV); see docs/footage-tools.md:
+Run inside the edge container (it has ffmpeg + OpenCV); see docs/tools/footage-tools.md:
     docker compose run --rm --no-deps \\
         -v "C:/path/to/raw/folder:/raw:ro" -v "./data/sample_videos/garage:/out" \\
-        edge-analyzer python scripts/prepare_footage.py /raw/D01_20261013091838.mp4 --out-dir /out --name garage
+        edge-analyzer python scripts/dev-tools/prepare_footage.py /raw/D01_20261013091838.mp4 --out-dir /out --name garage
 """
 import argparse
 import glob

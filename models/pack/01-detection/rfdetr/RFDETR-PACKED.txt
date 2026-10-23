@@ -3,13 +3,13 @@ Package: pip install 'rfdetr>=1.3,<2'  (Python>=3.10)
 Weights: rf-detr-nano.pth / rf-detr-small.pth  (NOT baked in Docker — ~350 MB each)
 
 One-command pull (optional; refuses if free disk < --min-free-gb):
-  python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
+  python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
 Dry-run:
-  python3 scripts/download_pack_models_phase2.py --only rfdetr-nano
+  python3 scripts/download/download_pack_models_phase2.py --only rfdetr-nano
 
   GCS nano:  https://storage.googleapis.com/rfdetr/nano_coco/checkpoint_best_regular.pth
   GCS small: https://storage.googleapis.com/rfdetr/small_coco/checkpoint_best_regular.pth
 Env: DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=nano|small
     EDGE_PERF_MODE=quality defaults to rfdetr; fast keeps yolo26n.
 Do NOT fetch XL/2XL (PML 1.0 Plus).
-See docs/rfdetr-integration.md
+See docs/models/rfdetr-integration.md

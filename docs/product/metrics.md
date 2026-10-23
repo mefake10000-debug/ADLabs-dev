@@ -10,7 +10,7 @@ source file, and the gotchas that have actually caused confusion in testing so f
 ## 1. Where a number starts: the tracker's `active_tracks`
 
 Every metric below is computed from the list of `Track` objects `SimpleByteTracker.update()`
-returns each frame ([`src/perception/tracker.py`](../src/perception/tracker.py)). A detection
+returns each frame ([`src/perception/tracker.py`](../../src/perception/tracker.py)). A detection
 only becomes part of that list once:
 
 - it (or a detection matched to the same track) had confidence ≥ `track_thresh` (default 0.5,
@@ -40,7 +40,7 @@ recommended setting for a camera with a queue zone.
 
 **Dashboard:** "Visitors Today" (top KPI), "Visitors in Range" / "Exits in Range" (historical),
 the Crossing Events tab.
-**Source:** [`src/analytics/tripwire.py`](../src/analytics/tripwire.py) `Tripwire.update()`.
+**Source:** [`src/analytics/tripwire.py`](../../src/analytics/tripwire.py) `Tripwire.update()`.
 
 Each frame, for every active track that (a) hasn't already crossed this tripwire and (b) isn't
 `is_stationary`, the tripwire checks whether the line segment from the track's *previous* foot
@@ -104,7 +104,7 @@ with a source/FPS change (a fresh tracker context is built) — it is **not** a 
 despite the name; it accumulates for the lifetime of that camera context.
 
 **Gotcha:** because `SimpleByteTracker` can assign a *new* ID to the same person after an
-ID-switch (see `docs/recorded-run-analysis.md` §13 for a concrete example — someone occluded for
+ID-switch (see `docs/performance/recorded-run-analysis.md` §13 for a concrete example — someone occluded for
 more than `max_age`/15fps ≈ 3 seconds gets a new ID when reacquired), this number is an upper
 bound on unique visitors, not an exact count. It over-counts by roughly however many ID switches
 happened.
@@ -113,7 +113,7 @@ happened.
 
 **Dashboard:** "Avg Store Dwell" KPI when a `dwell`-type zone exists for the camera (falls back
 to per-track time-in-frame otherwise, see below); zone `avg_dwell_seconds` in the API.
-**Source:** [`src/analytics/zones.py`](../src/analytics/zones.py) `Zone.update()` /
+**Source:** [`src/analytics/zones.py`](../../src/analytics/zones.py) `Zone.update()` /
 `get_metrics()`.
 
 Every frame, for every active track: point-in-polygon (ray casting) against `track.foot_point`
@@ -136,7 +136,7 @@ doesn't require any calibration, just people being tracked.
 
 **Dashboard:** "Cashier Queue Length" KPI, "Checkout Queue Congestion Trend" chart, the 🚨
 congestion alert banner.
-**Source:** [`src/analytics/queue_analyzer.py`](../src/analytics/queue_analyzer.py)
+**Source:** [`src/analytics/queue_analyzer.py`](../../src/analytics/queue_analyzer.py)
 `QueueAnalyzer.update()`. A `QueueAnalyzer` wraps its own internal `Zone` (point-in-polygon +
 exit-grace exactly as §5), then layers queue-specific logic on top:
 
@@ -213,7 +213,7 @@ till on the customer side, stays excluded for as long as the tracker keeps the s
   crossing counts as a visitor entry, and their later exit (as tagged staff) doesn't count as an
   exit — so tripwire-based occupancy drifts up by one per such arrival.
 - If the tracker loses a staff member and gives them a new ID (occlusion > `max_age`, or an ID
-  switch — see `docs/id-switch-detector.md`), the new ID is a customer until it spends another
+  switch — see `docs/models/id-switch-detector.md`), the new ID is a customer until it spends another
   `staff_min_seconds_in_zone` in a staff zone. Staff who work away from any staff zone for their
   whole shift are never tagged.
 - A customer who stands inside a staff zone for that long is tagged too. Only draw staff zones
@@ -225,7 +225,7 @@ till on the customer side, stays excluded for as long as the tracker keeps the s
 ## 10. Floor heatmap
 
 **Dashboard:** "🔥 Heatmap" tab, image from `GET /api/v1/heatmap/{camera_id}`. **Source:**
-[`src/analytics/heatmap.py`](../src/analytics/heatmap.py), fed from `src/main.py`'s frame loop.
+[`src/analytics/heatmap.py`](../../src/analytics/heatmap.py), fed from `src/main.py`'s frame loop.
 
 Where customers spend time, in **person-seconds per 16×16px floor cell**. Every processed frame,
 each customer's foot point (bottom-centre of their box, i.e. where they're standing) adds the time
@@ -252,11 +252,11 @@ the current clean camera frame every `analytics.heatmap_write_seconds` (10s) and
 - Heat is on the camera image, not a store floor plan, so the far end of the shop is compressed by
   perspective -- a metre at the back covers fewer pixels than a metre at the front.
 
-**Whole-clip heatmap offline:** `scripts/render_heatmap.py` builds one for an entire video from a
-`detect_id_switches.py` run's `tracks.jsonl` (seconds, no YOLO), drawn over the median of frames
+**Whole-clip heatmap offline:** `scripts/dev-tools/render_heatmap.py` builds one for an entire video from a
+`scripts/benchmark/detect_id_switches.py` run's `tracks.jsonl` (seconds, no YOLO), drawn over the median of frames
 sampled across the clip -- an empty-shop background. It has no staff zones, so cashiers *do* show
 up there. On `entrance_sample.mp4`: 17.9 person-minutes over 1.8 min (about 10 people in view on
-average, matching the 10-15 hand counts in `docs/recorded-run-analysis.md`); hottest areas the
+average, matching the 10-15 hand counts in `docs/performance/recorded-run-analysis.md`); hottest areas the
 till queue, the cashier spots behind the counter, and the back aisle.
 
 ## Quick reference

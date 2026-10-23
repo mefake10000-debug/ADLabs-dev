@@ -8,14 +8,14 @@ misses too many people.
 
 All three models on `entrance_sample.mp4` (111s of real CCTV), same tracker settings, on this dev
 PC: an **Intel Core i5-1235U** laptop CPU (the same chip as budget mini PCs like the Beelink EQi12),
-CPU only, inside Docker on Windows. Run it yourself with `scripts/benchmark_models.sh`.
+CPU only, inside Docker on Windows. Run it yourself with `scripts/benchmark/benchmark_models.sh`.
 
 - **Speed**: frames per second the whole pipeline (decode + detect + track) sustains.
 - **People tracked**: share of the hand-counted people the tracker outputs, averaged over the 5
   hand-counted frames (each count is ±2, so a few points' difference is noise).
-- **Suspected ID switches**: from `scripts/detect_id_switches.py`, processing frames at the rate
+- **Suspected ID switches**: from `scripts/benchmark/detect_id_switches.py`, processing frames at the rate
   that model can actually sustain here -- what the live dashboard would see. Roughly half are real
-  switches (`docs/id-switch-detector.md`), so compare them between models, don't read them as exact.
+  switches (`docs/models/id-switch-detector.md`), so compare them between models, don't read them as exact.
 
 ## Results
 
@@ -39,7 +39,7 @@ Small and nano exported to OpenVINO format load and run in our pipeline **withou
 with the same accuracy (small: 74% vs 76%). But on this CPU they ran slightly *slower* (small 6.1
 vs 7.9 fps). Published OpenVINO speedups come from Intel's **integrated GPU or NPU**, which Docker
 on Windows can't reach -- so the gain has to be measured on the actual pilot box
-(`docs/edge-hardware.md`).
+(`docs/architecture/edge-hardware.md`).
 
 ## What this means
 
@@ -47,6 +47,6 @@ on Windows can't reach -- so the gain has to be measured on the actual pilot box
   `configs/pipeline.yaml`, switched 2026-10-14).
 - **Compute target for the pilot:** small at **~8 fps per camera** -- the rate where its switch
   count stops improving (17 at 7.9 fps vs 16 at every frame). This i5 CPU manages that for **one**
-  camera; two cameras need roughly double. That number drives `docs/edge-hardware.md`.
-- One clip, one camera angle. Re-run `scripts/benchmark_models.sh` on the pilot clips before
+  camera; two cameras need roughly double. That number drives `docs/architecture/edge-hardware.md`.
+- One clip, one camera angle. Re-run `scripts/benchmark/benchmark_models.sh` on the pilot clips before
   locking the choice in.

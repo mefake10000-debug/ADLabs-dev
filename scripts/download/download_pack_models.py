@@ -14,7 +14,7 @@ Target: models/pack/{01-detection,02-tracking,03-reid,04-face-attr,05-open-vocab
 
 Std-lib only (urllib). Run from repo root:
 
-    python3 scripts/download_pack_models.py
+    python3 scripts/download/download_pack_models.py
 """
 
 from __future__ import annotations

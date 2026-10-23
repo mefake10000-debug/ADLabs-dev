@@ -5,8 +5,8 @@ report was produced by the classical HOG+SVM fallback detector, not YOLO.
 
 > **Correction (2026-09-19):** an earlier version of this document called `entrance_sample.mp4` synthetic. That
 > was wrong -- it is real IP-camera footage of a shop, and the best benchmark clip in the repo. Only
-> `checkout_sample.mp4` is synthetic. See [recorded-run-analysis.md](recorded-run-analysis.md) for the analysis of a
-> real-YOLO Docker run on it, and `scripts/benchmark_ground_truth/entrance_sample.json` for hand-counted checkpoints.
+> `checkout_sample.mp4` is synthetic. See [recorded-run-analysis.md](../performance/recorded-run-analysis.md) for the analysis of a
+> real-YOLO Docker run on it, and `scripts/benchmark/benchmark_ground_truth/entrance_sample.json` for hand-counted checkpoints.
 
 > **Update (2026-09-20): the HOG fallback detector was removed.** It recovered only 7-14% of people on real shop
 > footage, so it produced plausible-but-wrong numbers rather than a useful degraded mode; in the Docker image it
@@ -22,10 +22,10 @@ before drawing any conclusion about production accuracy.
 
 ## Harness
 
-`scripts/benchmark_tracking.py` runs the real `PersonDetector` -> `SimpleByteTracker`
+`scripts/benchmark/benchmark_tracking.py` runs the real `PersonDetector` -> `SimpleByteTracker`
 (-> `Tripwire`, when ground truth calls for it) pipeline against a video and
 compares the result to a manually-verified ground truth JSON file
-(`scripts/benchmark_ground_truth/*.json`). Two ground-truth methods are
+(`scripts/benchmark/benchmark_ground_truth/*.json`). Two ground-truth methods are
 supported:
 
 - **point-in-time headcount**: one or more `checkpoints` (frame index + manually
@@ -40,8 +40,8 @@ supported:
 
 Run it directly:
 ```
-python scripts/benchmark_tracking.py data/sample_videos/mall_entrance_topdown_01.mp4 \
-    --ground-truth scripts/benchmark_ground_truth/mall_entrance_topdown_01.json
+python scripts/benchmark/benchmark_tracking.py data/sample_videos/mall_entrance_topdown_01.mp4 \
+    --ground-truth scripts/benchmark/benchmark_ground_truth/mall_entrance_topdown_01.json
 ```
 
 ## Why point-in-time headcount, not full crossing-based ground truth, for the new videos
@@ -64,7 +64,7 @@ claim (see [Results](#results)).
 | `mall_entrance_topdown_01.mp4` | HOG+SVM fallback | 550 (22.0s) | 9 people @ frame 500 (manual count) | **9/9 detected (100% recall)**, but **66 unique track IDs** over the clip |
 | `mall_promenade_01.mp4` | HOG+SVM fallback | 950 (31.7s) | 4 people @ frame 900 (manual count) | **2/4 detected (50% recall)**, **24 unique track IDs** |
 | `test_footage1.mp4` | HOG+SVM fallback | 341 (11.4s) | none (crowd too dense to hand-count confidently) | **70 unique track IDs** in 11.4s -- exploratory only |
-| `entrance_sample.mp4` (real shop CCTV) | HOG+SVM fallback | 300 (22.9s) | none at the time (5 hand-counted checkpoints added 2026-09-19) | **37 unique track IDs**; a later checkpoint run shows HOG raw-detection recall of only 7-14% on this clip. Superseded by the real-YOLO run in [recorded-run-analysis.md](recorded-run-analysis.md) |
+| `entrance_sample.mp4` (real shop CCTV) | HOG+SVM fallback | 300 (22.9s) | none at the time (5 hand-counted checkpoints added 2026-09-19) | **37 unique track IDs**; a later checkpoint run shows HOG raw-detection recall of only 7-14% on this clip. Superseded by the real-YOLO run in [recorded-run-analysis.md](../performance/recorded-run-analysis.md) |
 
 Full console output (backend line, resolution, wall-clock time) is reproducible via the commands in [Reproducing](#reproducing-these-numbers).
 
@@ -78,12 +78,12 @@ a new ID. This document originally went further and said the tracker was not a
 significant contributor. A later real-YOLO Docker run disproves that: the tracker
 itself fragments identities (a cashier got three IDs in 61s) through its `max_age`
 and stationary-suppression logic -- see
-[recorded-run-analysis.md](recorded-run-analysis.md).
+[recorded-run-analysis.md](../performance/recorded-run-analysis.md).
 
 ### `checkout_sample.mp4` is synthetic; `entrance_sample.mp4` is not
 
 `checkout_sample.mp4` (18KB) is a procedurally drawn scene
-(`scripts/generate_sample_video.py`) and is not a valid detector benchmark input.
+(`scripts/dev-tools/generate_sample_video.py`) and is not a valid detector benchmark input.
 `entrance_sample.mp4` was previously described here as synthetic too; that was an
 assumption drawn from the generator script that I did not verify against the file,
 and it is incorrect -- it is real shop CCTV (see the correction at the top).
@@ -107,7 +107,7 @@ for the actual edge deployment target, and the project's Docker image
 (`docker/Dockerfile.edge`) is the environment that's supposed to run
 inference, not this local sandbox. **Before treating any accuracy number in
 this document as representative of production behavior, re-run
-`scripts/benchmark_tracking.py` with YOLO actually loaded** (inside
+`scripts/benchmark/benchmark_tracking.py` with YOLO actually loaded** (inside
 `docker compose run edge-analyzer ...`, or after fixing the local torch
 install) and update this document.
 
@@ -137,23 +137,23 @@ image picks up `scripts/`:
 
 ```
 docker compose build edge-analyzer
-docker compose run --rm edge-analyzer python scripts/benchmark_tracking.py \
+docker compose run --rm edge-analyzer python scripts/benchmark/benchmark_tracking.py \
     data/sample_videos/entrance_sample.mp4 \
-    --ground-truth scripts/benchmark_ground_truth/entrance_sample.json
+    --ground-truth scripts/benchmark/benchmark_ground_truth/entrance_sample.json
 ```
 
 The commands below are the local (HOG-fallback) runs behind the table above:
 
 ```
-python scripts/benchmark_tracking.py data/sample_videos/mall_entrance_topdown_01.mp4 \
-    --ground-truth scripts/benchmark_ground_truth/mall_entrance_topdown_01.json --max-frames 550
+python scripts/benchmark/benchmark_tracking.py data/sample_videos/mall_entrance_topdown_01.mp4 \
+    --ground-truth scripts/benchmark/benchmark_ground_truth/mall_entrance_topdown_01.json --max-frames 550
 
-python scripts/benchmark_tracking.py data/sample_videos/mall_promenade_01.mp4 \
-    --ground-truth scripts/benchmark_ground_truth/mall_promenade_01.json --max-frames 950
+python scripts/benchmark/benchmark_tracking.py data/sample_videos/mall_promenade_01.mp4 \
+    --ground-truth scripts/benchmark/benchmark_ground_truth/mall_promenade_01.json --max-frames 950
 
-python scripts/benchmark_tracking.py data/sample_videos/test_footage1.mp4 --max-frames 341
+python scripts/benchmark/benchmark_tracking.py data/sample_videos/test_footage1.mp4 --max-frames 341
 
-python scripts/benchmark_tracking.py data/sample_videos/entrance_sample.mp4 --max-frames 300
+python scripts/benchmark/benchmark_tracking.py data/sample_videos/entrance_sample.mp4 --max-frames 300
 ```
 
 ## Open follow-up (not done in this pass)

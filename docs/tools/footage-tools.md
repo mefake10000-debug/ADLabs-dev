@@ -2,8 +2,8 @@
 
 Two tools for every new batch of footage (e.g. from a pilot store):
 
-1. **`scripts/prepare_footage.py`** turns a raw recorder export into clean clips the pipeline can use.
-2. **`scripts/make_count_sheet.py`** + **`scripts/benchmark_tracking.py`** check *"do the people the
+1. **`scripts/dev-tools/prepare_footage.py`** turns a raw recorder export into clean clips the pipeline can use.
+2. **`scripts/benchmark/make_count_sheet.py`** + **`scripts/benchmark/benchmark_tracking.py`** check *"do the people the
    tracker sees match what a person sees?"* and give a number for it.
 
 Everything runs inside the edge container, which has ffmpeg, OpenCV and YOLO. All output stays local
@@ -39,7 +39,7 @@ the source; the clips land in `data/sample_videos/<name>/`.
 docker compose run --rm --no-deps ^
     -v "C:/Users/Acer/Downloads:/raw:ro" ^
     -v "./data/sample_videos/garage:/out" ^
-    edge-analyzer python scripts/prepare_footage.py /raw/D01_20261013091838.mp4 --name garage --out-dir /out
+    edge-analyzer python scripts/dev-tools/prepare_footage.py /raw/D01_20261013091838.mp4 --name garage --out-dir /out
 ```
 
 (`^` continues a line in Windows `cmd`; use `` ` `` in PowerShell, or put it all on one line.)
@@ -77,7 +77,7 @@ check them in the clips, and re-run with `--drop-bad` if they're mostly garbage.
 **Step 1: make the count sheet.** This picks 10 evenly spaced frames, skipping damaged ones:
 
 ```
-docker compose run --rm --no-deps edge-analyzer python scripts/make_count_sheet.py data/sample_videos/garage/garage_part00.mp4
+docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/make_count_sheet.py data/sample_videos/garage/garage_part00.mp4
 ```
 
 This writes, to `data/storage/count_checks/garage_part00/`:
@@ -99,7 +99,7 @@ you can score after counting only some of them. Budget about a minute per checkp
 each checkpoint:
 
 ```
-docker compose run --rm --no-deps edge-analyzer python scripts/benchmark_tracking.py ^
+docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/benchmark_tracking.py ^
     data/sample_videos/garage/garage_part00.mp4 ^
     --ground-truth data/storage/count_checks/garage_part00/ground_truth.json ^
     --process-fps 8 --save-checkpoints data/storage/count_checks/garage_part00/scored
@@ -112,13 +112,13 @@ It takes about as long as the clip (≈10 min for a 10-minute clip on our laptop
 - **"Where people are lost":** whether missed people were never detected, too small, or the wrong
   shape (e.g. lying down or bent over).
 - **The headline number, mean tracker-output recall:** the share of people the dashboard would
-  count. Compare it with `entrance_sample`'s **76%** (`docs/model-benchmark.md`).
+  count. Compare it with `entrance_sample`'s **76%** (`docs/models/model-benchmark.md`).
 - **`scored/checkpoint_f*.jpg`:** each checkpoint frame with **green** boxes for tracked people
   (what the dashboard counts) and thin **yellow** boxes for detected-but-not-tracked. Anyone without
   a box was missed. This is the fastest way to see *why* the number is what it is.
 
-Keep counts you want to reuse by copying `ground_truth.json` into `scripts/benchmark_ground_truth/<clip>.json`.
-Those are just numbers, so they're fine to commit. Then `scripts/benchmark_models.sh` can compare
+Keep counts you want to reuse by copying `ground_truth.json` into `scripts/benchmark/benchmark_ground_truth/<clip>.json`.
+Those are just numbers, so they're fine to commit. Then `scripts/benchmark/benchmark_models.sh` can compare
 models on that clip too.
 
 ## Reading the results

@@ -34,7 +34,7 @@ Next-integrate weights live under **`models/pack/`** (gitignored binaries). Prod
 
 ```bash
 # Download verified core pack (~1GB; idempotent; no buffalo_l)
-python3 scripts/download_pack_models.py
+python3 scripts/download/download_pack_models.py
 # or: bash models/pack/download.sh
 
 # Optional Docker mount of pack inside edge-analyzer
@@ -78,7 +78,7 @@ Open `/dashboard` → chip **EdgeSight live** when Docker is healthy. Sidebar is
 2. **Model-backed intel** → Models & EdgeSight (best models from plans + pack weights)  
 3. Existing Live now / Intelligence / Performance screens — layout unchanged  
 
-Best-model names come from Desktop `models/` pack + Project store `docs/models-to-integrate-*` + **`docs/full-scope-implementation-checklist.md`**. Pack downloads: yolo26n + OSNet-x0.25; production stack via `python scripts/download_models.py` (includes **yolo26s** + enrichment). Enrichment tier (pose / YuNet / age-gender / YOLO-World / groups) is on **`mefake/integration`**. Multi-cam ReID remains Future — see `docs/multicam-realtime-sync-plan.md` in the Project store.
+Best-model names come from Desktop `models/` pack + Project store `docs/models-to-integrate-*` + **`docs/full-scope-implementation-checklist.md`**. Pack downloads: yolo26n + OSNet-x0.25; production stack via `python scripts/download/download_models.py` (includes **yolo26s** + enrichment). Enrichment tier (pose / YuNet / age-gender / YOLO-World / groups) is on **`mefake/integration`**. Multi-cam ReID remains Future — see `docs/multicam-realtime-sync-plan.md` in the Project store.
 
 Calibration Studio (`:8000`) exposes multi-cam strip, tripwire/dwell/queue/staff draw, live queue KPIs, and a model-status HUD with Live / Partial / Future badges (no fake ReID numbers).
 

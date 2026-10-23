@@ -64,7 +64,7 @@ class TestSoftReIdOnnxSession(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         onnx = root / "models" / "pack" / "03-reid" / "osnet_x0_25_msmt17.onnx"
         if not onnx.is_file():
-            self.skipTest("OSNet ONNX not on disk — run download_pack_models.py")
+            self.skipTest("OSNet ONNX not on disk — run scripts/download/download_pack_models.py")
         extractor = SoftReIdExtractor(
             weights=str(onnx),  # resolve will also find pth; force onnx via onnx_weights
             onnx_weights=str(onnx),

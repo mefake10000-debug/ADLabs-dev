@@ -8,11 +8,11 @@ configs/pipeline.yaml (the same file the edge analyzer uses), so numbers reflect
 production configuration unless you explicitly override them.
 
 Usage (inside the edge container, where YOLO actually loads):
-    docker compose run --rm edge-analyzer python scripts/benchmark_tracking.py \
+    docker compose run --rm edge-analyzer python scripts/benchmark/benchmark_tracking.py \
         data/sample_videos/entrance_sample.mp4 \
-        --ground-truth scripts/benchmark_ground_truth/entrance_sample.json
+        --ground-truth scripts/benchmark/benchmark_ground_truth/entrance_sample.json
 
-Ground truth JSON (see scripts/benchmark_ground_truth/*.json):
+Ground truth JSON (see scripts/benchmark/benchmark_ground_truth/*.json):
 {
   "video": "...",
   "method": "point-in-time headcount",

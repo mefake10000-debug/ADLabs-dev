@@ -2,7 +2,7 @@
 
 Run once after cloning:
 
-    python scripts/download_models.py
+    python scripts/download/download_models.py
 
 The weights are large (~190MB total) and are git-ignored, so they are fetched rather
 than committed. Re-running is cheap: files that already exist and match the expected
@@ -21,7 +21,7 @@ ULTRALYTICS_BASE = "https://github.com/ultralytics/assets/releases/download/v8.4
 
 # (filename, url, expected_min_bytes)
 ULTRALYTICS_MODELS = [
-    # Production person detector (docs/model-benchmark.md)
+    # Production person detector (docs/models/model-benchmark.md)
     ("yolo26s.pt", f"{ULTRALYTICS_BASE}/yolo26s.pt", 8_000_000),
     ("yolo26m.pt", f"{ULTRALYTICS_BASE}/yolo26m.pt", 40_000_000),
     ("yolo26m-pose.pt", f"{ULTRALYTICS_BASE}/yolo26m-pose.pt", 40_000_000),

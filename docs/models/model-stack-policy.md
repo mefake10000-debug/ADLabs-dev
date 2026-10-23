@@ -2,8 +2,8 @@
 
 Authoritative keep / pull / skip / license gates for AD Labs retail CCTV.
 Companion survey: `docs/handoff/model-survey-retail-cv-2026-10.md`.
-Pack downloader: `scripts/download_pack_models.py` (phase-1).
-Phase-2 stubs (dry-run default): `scripts/download_pack_models_phase2.py`.
+Pack downloader: `scripts/download/download_pack_models.py` (phase-1).
+Phase-2 stubs (dry-run default): `scripts/download/download_pack_models_phase2.py`.
 Machine-readable catalog: `src/perception/model_stack.py`.
 
 Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FUTURE | SKIP**.
@@ -15,7 +15,7 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 | Model | Role | License | Notes |
 |-------|------|---------|-------|
 | **YOLO26n** | Person detector (fast / edge) | AGPL-3.0 | Jan 2026 edge-optimized; ~**38.9 ms CPU-ONNX**. **Default fast path** (`DETECTOR_BACKEND=yolo26`). |
-| **RF-DETR-N/S** | Person detector (SOTA / Apache) | Apache-2.0 | Roboflow SOTA via `rfdetr`. Selectable; **quality mode default**. See `docs/rfdetr-integration.md`. |
+| **RF-DETR-N/S** | Person detector (SOTA / Apache) | Apache-2.0 | Roboflow SOTA via `rfdetr`. Selectable; **quality mode default**. See `docs/models/rfdetr-integration.md`. |
 | **YOLOE** (`yoloe-v8s-seg-pf`) | Open-vocab shelf / products | AGPL-3.0 | Prompt-free pack weights under `models/pack/06-shelf/`. |
 | **OSNet** ReID | Session-scoped cross-cam soft ID | MIT (code + weights) | ONNX SoftReID in quality mode. No multi-day gallery. |
 | **CLIP ViT-B/32** | Text / zero-shot shelf interest | MIT | Prod: `weights/clip/ViT-B-32.pt`; pack HF mirror under `05-open-vocab/`. |
@@ -26,7 +26,7 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 
 | Model | Role | License | Status | Gate |
 |-------|------|---------|--------|------|
-| **RTMPose-t/s ONNX** via **rtmlib** (no mmcv) | Ankle / foot pose → overlay + tripwire/dwell; fall-candidate | Apache-2.0 (HF `Tau-J/RTMPose`) | **LIVE** when ONNX on disk + edge load (`ENABLE_RTMPOSE=1`); else PARTIAL/PACKED | Phase-2 `--download --only rtmpose-t rtmpose-s`. See `docs/foot-tracking-retail-models.md`. Default overlay `OVERLAY_BOX_STYLE=foot`. |
+| **RTMPose-t/s ONNX** via **rtmlib** (no mmcv) | Ankle / foot pose → overlay + tripwire/dwell; fall-candidate | Apache-2.0 (HF `Tau-J/RTMPose`) | **LIVE** when ONNX on disk + edge load (`ENABLE_RTMPOSE=1`); else PARTIAL/PACKED | Phase-2 `--download --only rtmpose-t rtmpose-s`. See `docs/models/foot-tracking-retail-models.md`. Default overlay `OVERLAY_BOX_STYLE=foot`. |
 | **MiVOLO v2** | Age/gender body-only OK when faces small | Apache-2.0 | **GATED** — default EMPTY/FUTURE until DPIA + k≥10 | `ENABLE_DEMOGRAPHICS=0` (default off). UI must **never** show raw age/gender as LIVE without aggregation gate. |
 | **Moondream** | Lean VLM — nightly shelf-photo QA only | Apache-2.0 (HF card) | FUTURE / nightly shelf | Not every-frame; on-prem OK |
 | **P2PNet** | Crush-density edge cases | **Academic-research-only** (Tencent LICENSE §1) | **SKIP** commercial; FUTURE research only | Prefer raising YOLO `max_det` first |
@@ -39,7 +39,7 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 | Item | Why |
 |------|-----|
 | **SKU-110K shelf weights** | Non-commercial dataset/weights — **SKIP**. Prefer Roboflow Universe CC BY 4.0 gap datasets **or** pure geometry from existing boxes. |
-| **LocateAnything-3B** | NVIDIA non-commercial — **do not download**. Stay **FUTURE**. See `docs/locateanything-3b-integration.md`. |
+| **LocateAnything-3B** | NVIDIA non-commercial — **do not download**. Stay **FUTURE**. See `docs/models/locateanything-3b-integration.md`. |
 | InsightFace `buffalo_l` | NON-COMMERCIAL research — omit `--include-research`. |
 | P2PNet (commercial path) | Academic-only redistribution clause — stub only; do not vendor into pilot product. |
 
@@ -97,13 +97,13 @@ Protocol when comparing:
 
 ```bash
 # Phase-1 core pack (already verified)
-python3 scripts/download_pack_models.py
+python3 scripts/download/download_pack_models.py
 
 # Phase-2 candidates — dry-run lists URLs/licenses; does not fetch
-python3 scripts/download_pack_models_phase2.py
+python3 scripts/download/download_pack_models_phase2.py
 
 # Explicit fetch only after dry-run review + disk OK
-python3 scripts/download_pack_models_phase2.py --download --only rtmpose-t
+python3 scripts/download/download_pack_models_phase2.py --download --only rtmpose-t
 ```
 
 API: `GET /api/v1/models/stack` returns the catalog with honest statuses.

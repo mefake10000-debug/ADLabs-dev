@@ -5,9 +5,9 @@ sees?" with a real number instead of an impression.
 Picks N evenly spaced frames (skipping grey/damaged ones), saves each as a full-size image with
 its checkpoint number, plus an overview sheet, and writes a ground-truth template with an empty
 count per checkpoint. You count the people in each image and fill the numbers in; then
-scripts/benchmark_tracking.py scores the tracker against them (see docs/footage-tools.md).
+scripts/benchmark/benchmark_tracking.py scores the tracker against them (see docs/tools/footage-tools.md).
 
-    docker compose run --rm --no-deps edge-analyzer python scripts/make_count_sheet.py \\
+    docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/make_count_sheet.py \\
         data/sample_videos/garage/garage_part00.mp4 --checkpoints 10
 
 Output (gitignored): data/storage/count_checks/<clip>/
@@ -114,7 +114,7 @@ def main():
     print(f"1. Open each checkpoint_NN_*.jpg and count the people ({COUNTING_RULE[:60]}...).")
     print(f"2. Fill in each \"expected_visible_people\" in {os.path.relpath(gt_path, ROOT)}.")
     print("3. Score it:")
-    print(f"   python scripts/benchmark_tracking.py {video} --ground-truth {os.path.relpath(gt_path, ROOT)} "
+    print(f"   python scripts/benchmark/benchmark_tracking.py {video} --ground-truth {os.path.relpath(gt_path, ROOT)} "
           f"--process-fps 8 --save-checkpoints {os.path.relpath(out_dir, ROOT)}/scored")
 
 

@@ -53,7 +53,7 @@ EDGE_PERF_MODE=fast DETECTOR_BACKEND=yolo26 docker compose up -d edge-analyzer
 
 # SOTA / Apache path — RF-DETR Nano
 pip install 'rfdetr>=1.3,<2'   # once, on edge host or quality image
-python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano
+python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano
 
 EDGE_PERF_MODE=quality DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=nano \
   docker compose up -d edge-analyzer
@@ -83,9 +83,9 @@ pip install 'rfdetr>=1.3,<2'
 python3 -c "from rfdetr import RFDETRNano; print('ok', RFDETRNano)"
 python3 -c "from src.perception.detector_backend import resolve_detector_backend; \
   import os; os.environ['EDGE_PERF_MODE']='quality'; print(resolve_detector_backend())"
-python3 scripts/download_pack_models_phase2.py --only rfdetr-nano   # dry-run
+python3 scripts/download/download_pack_models_phase2.py --only rfdetr-nano   # dry-run
 # Optional fetch (disk-gated; nano ~350 MB — skip if disk tight; demos stay on YOLO26n):
-python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
+python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
 
 # Stack API (with API up)
 curl -s localhost:8000/api/v1/models/stack | python3 -m json.tool | head
@@ -97,4 +97,4 @@ Compose documents the same one-liner on `edge-analyzer` (weights stay out of the
 
 ## Policy
 
-See `docs/model-stack-policy.md`. SKU-110K and LocateAnything-3B remain SKIP / FUTURE — not part of this path.
+See `docs/models/model-stack-policy.md`. SKU-110K and LocateAnything-3B remain SKIP / FUTURE — not part of this path.

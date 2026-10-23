@@ -6,7 +6,7 @@ previous detect_id_switches.py run's tracks.jsonl (seconds, no YOLO), or from ru
 detector + tracker when --tracks is omitted (edge container only). Staff aren't tagged here --
 staff zones are a live-pipeline feature -- so cashiers show up as hot spots behind the counter.
 
-    docker compose run --rm --no-deps edge-analyzer python scripts/render_heatmap.py \
+    docker compose run --rm --no-deps edge-analyzer python scripts/dev-tools/render_heatmap.py \
         data/sample_videos/entrance_sample.mp4 \
         --tracks data/storage/id_switch_runs/<run>/tracks.jsonl
 

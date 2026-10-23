@@ -1,7 +1,7 @@
 """Declarative EdgeSight model-stack catalog (LIVE|PACKED|PARTIAL|GATED|FUTURE|SKIP|OFF).
 
 Honest statuses for health / dashboard. Does not invent LIVE demographics.
-See docs/model-stack-policy.md.
+See docs/models/model-stack-policy.md.
 """
 from __future__ import annotations
 
@@ -446,7 +446,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             e.notes = (e.notes or "") + " Weights not on probed path — waiting."
 
     return {
-        "policy": "docs/model-stack-policy.md",
+        "policy": "docs/models/model-stack-policy.md",
         "env": {
             "ENABLE_DEMOGRAPHICS": os.environ.get("ENABLE_DEMOGRAPHICS", "0"),
             "DEMOGRAPHICS_DPIA_OK": os.environ.get("DEMOGRAPHICS_DPIA_OK", "0"),
@@ -458,7 +458,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
         },
         "models": [e.to_dict() for e in entries],
         "phase2": {
-            "script": "scripts/download_pack_models_phase2.py",
+            "script": "scripts/download/download_pack_models_phase2.py",
             "default": "dry-run",
             "download_flag": "--download",
         },

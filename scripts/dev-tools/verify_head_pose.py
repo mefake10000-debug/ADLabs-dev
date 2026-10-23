@@ -1,6 +1,6 @@
 """Empirical checks on the head-pose convention and YuNet landmark naming.
 
-Run: python scripts/verify_head_pose.py
+Run: python scripts/dev-tools/verify_head_pose.py
 """
 import os
 import sys

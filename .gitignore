@@ -62,18 +62,18 @@ Thumbs.db
 # unaffected; this only matches the default screen-recorder naming pattern.
 data/sample_videos/Screen Recording*.mp4
 
-# Local ID-switch reports (scripts/detect_id_switches.py): snapshots of real CCTV frames
+# Local ID-switch reports (scripts/benchmark/detect_id_switches.py): snapshots of real CCTV frames
 data/storage/id_switch_runs/
 
 # Rendered floor heatmaps (real CCTV frames), written by the edge
 data/storage/heatmaps/
 
-# Model benchmark output (scripts/benchmark_models.sh) and exported model formats
+# Model benchmark output (scripts/benchmark/benchmark_models.sh) and exported model formats
 data/storage/model_bench/
 models/*_openvino_model/
 
 # Privately sourced real CCTV (identifiable people) -- shared via the team drive, never committed.
-# Each source lives in its own subfolder (scripts/prepare_footage.py); committed samples are top-level files.
+# Each source lives in its own subfolder (scripts/dev-tools/prepare_footage.py); committed samples are top-level files.
 data/sample_videos/*/
 
 # Garage footage evaluation output (real CCTV frames)
@@ -84,10 +84,10 @@ configs/*.bak
 
 # Hand-count sheets for checking detection (real CCTV frames)
 data/storage/count_checks/
-# Working files of scripts/prepare_footage.py
+# Working files of scripts/dev-tools/prepare_footage.py
 data/storage/footage_work/
 
-# Segregated pack weights (download via scripts/download_pack_models.py)
+# Segregated pack weights (download via scripts/download/download_pack_models.py)
 models/pack/**/*.pt
 models/pack/**/*.pth
 models/pack/**/*.onnx

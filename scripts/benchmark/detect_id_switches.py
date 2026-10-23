@@ -7,7 +7,7 @@ which flags each place a person's ID vanished and a different ID took over where
 seen. Every flag is a suspicion to confirm by eye, which is what the annotated clips are for.
 
 Usage (inside the edge container, where YOLO actually loads):
-    docker compose run --rm --no-deps edge-analyzer python scripts/detect_id_switches.py \
+    docker compose run --rm --no-deps edge-analyzer python scripts/benchmark/detect_id_switches.py \
         data/sample_videos/entrance_sample.mp4 --process-fps 3
 
 --process-fps matters: the tracker counts in *frames* (min_hits, max_age, the stationary rule),
