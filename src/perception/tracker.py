@@ -80,6 +80,11 @@ class Track:
     ) -> None:
         if foot is not None:
             self.pose_foot = (float(foot[0]), float(foot[1]))
+            # Same point the red mark and the tripwire trail use this frame.
+            if self.history:
+                _x, _y, ts = self.history[-1]
+                self.history[-1] = (self.pose_foot[0], self.pose_foot[1], ts)
+                self._update_velocity()
         if keypoints is not None:
             self.keypoints = keypoints
         if keypoints_xy is not None:

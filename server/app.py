@@ -1585,10 +1585,11 @@ def get_overlay_settings():
         "default": "foot",
         "note": (
             "Set OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb on edge-analyzer (Compose) "
-            "and restart. Default foot = red ground mark + trail (tripwire/dwell use the same "
-            "point). nvidia = LocateAnything pallet look-alike (optional); pallet aliases to nvidia."
+            "and restart. Default foot = one red ground mark (tripwire/dwell use that point). "
+            "skeleton adds bones on the foot. nvidia/parallel/aabb are opt-in and do not also "
+            "draw the foot (stacked marks shimmered). LocateAnything-3B is not downloaded."
         ),
-        "docs": "docs/foot-tracking-retail-models.md",
+        "docs": "docs/cv-pipeline-unified.md",
     }
 
 

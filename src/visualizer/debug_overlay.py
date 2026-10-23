@@ -1,8 +1,9 @@
 """Debug / live MJPEG overlays for EdgeSight.
 
 Default person UI is **foot** tracking: red ground-contact mark + faint ID + trail.
-Optional heavy styles: ``nvidia`` (LocateAnything pallet look-alike), ``parallel``,
-``aabb``. ``skeleton`` draws thin joint lines when RTMPose keypoints are present.
+``skeleton`` adds thin joint lines on that foot when RTMPose keypoints exist.
+``nvidia`` / ``parallel`` / ``aabb`` are opt-in and do **not** also draw the foot
+(stacking those marks shimmered). LocateAnything-3B is not downloaded.
 
 ``OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb`` (default **foot**).
 ``pallet`` aliases to ``nvidia``.
@@ -51,6 +52,16 @@ def resolve_overlay_box_style(env: Optional[Dict[str, str]] = None) -> str:
     raw = (src.get("OVERLAY_BOX_STYLE") or "foot").strip().lower()
     raw = _ALIAS.get(raw, raw)
     return raw if raw in _VALID_STYLES else "foot"
+
+
+def person_annotator(style: Optional[str]) -> str:
+    """One person mark. Box styles do not also paint the red foot (that stack shimmered)."""
+    name = _ALIAS.get((style or "foot").strip().lower(), (style or "foot").strip().lower())
+    if name not in _VALID_STYLES:
+        name = "foot"
+    if name == "skeleton":
+        return "foot+skeleton"
+    return name
 
 
 def heading_shear_px(track: Track, width: float) -> float:

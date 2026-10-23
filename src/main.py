@@ -863,94 +863,17 @@ class EdgePipeline:
 
                         # 2. Tracking (people only — store objects are visual labels)
                         active_tracks = ctx["tracker"].update(detections, frame_time)
-                        # 2b. RTMPose ankle feet (red mark / tripwire / dwell) when ONNX present
-                        self._apply_rtmpose_feet(active_tracks, frame, ctx)
                         # Early tracks (≥2 hits): tripwire needs ground-point history during
                         # min_hits confirmation or entrance crossings are lost forever.
                         early_tracks = ctx["tracker"].early_tracks()
-                        # Staff polygons first — sticky tags, then customer-only analytics
-                        for staff_zone in ctx.get("staff_zones", []):
-                            staff_zone.update(active_tracks, frame_time)
-                            for tid, entered in staff_zone.active_tracks_in_zone.items():
-                                if frame_time - entered >= self.staff_min_seconds:
-                                    ctx["staff_ids"].add(tid)
-                        customers = [t for t in active_tracks if t.track_id not in ctx["staff_ids"]]
-                        early_customers = [
-                            t for t in early_tracks if t.track_id not in ctx["staff_ids"]
-                        ]
-                        for t in customers:
-                            t.dwell_s = 0.0
-                            t.zone_id = None
-                        ctx["current_active_tracks"] = customers
+                        # Ankles before the line, including IDs still in confirmation.
+                        self._apply_rtmpose_feet(early_tracks or active_tracks, frame, ctx)
+                        self._update_analytics(
+                            cam_id, ctx, active_tracks, frame_time,
+                            early_tracks=early_tracks, frame=frame,
+                        )
                         ctx["last_overlay_tracks"] = active_tracks
-                        ctx["staff_visible"] = len(active_tracks) - len(customers)
-                        # Sample footage replays: on the loop boundary archive this pass's
-                        # uniques and reset per-pass counters (looping otherwise inflates).
-                        _reader = ctx.get("reader")
-                        _loops = int(getattr(_reader, "loop_count", 0) or 0)
-                        if _loops != ctx.get("reader_loop_seen", 0):
-                            self._reset_sim_pass(cam_id, ctx, _loops)
-                        ctx["tracked_ids_today"].update(t.track_id for t in active_tracks)
-
-                        # 3. Spatial Analytics (customers only)
-                        crossing_events: List[Dict[str, Any]] = []
-                        for tw in ctx["tripwires"]:
-                            crossing_events.extend(tw.update(early_customers, frame_time))
-                        if crossing_events:
-                            self._persist_crossing_events(cam_id, crossing_events)
-                            recent = ctx.setdefault("recent_trip_in", {})
-                            for ev in crossing_events:
-                                direction = str(ev.get("direction", "")).lower()
-                                if direction in ("in", "trip_in", "enter"):
-                                    tid = ev.get("track_id")
-                                    if tid is not None:
-                                        recent[int(tid)] = float(ev.get("timestamp") or frame_time)
-                            cutoff = frame_time - 120.0
-                            for tid in list(recent.keys()):
-                                if recent[tid] < cutoff:
-                                    del recent[tid]
-
-                        for zone in ctx["zones"]:
-                            zone.update(customers, frame_time)
-
-                        staff_on_post = int(ctx.get("staff_visible", 0) or 0)
-                        analytic_events: List[Dict[str, Any]] = []
-                        for q in ctx["queues"]:
-                            try:
-                                analytic_events.extend(
-                                    q.update(customers, frame_time, staff_on_post=staff_on_post) or []
-                                )
-                            except TypeError:
-                                q.update(customers, frame_time)
-
-                        for glass in ctx.get("glass_rois") or []:
-                            analytic_events.extend(
-                                glass.update(
-                                    customers,
-                                    frame_time,
-                                    recent_trip_in_ids=ctx.get("recent_trip_in") or {},
-                                ) or []
-                            )
-
-                        floor = ctx.get("floor")
-                        if floor is not None:
-                            try:
-                                floor.set_frame_size(float(frame.shape[1]), float(frame.shape[0]))
-                            except Exception:
-                                pass
-                            floor.update(customers, list(ctx.get("zones") or []), frame_time)
-
-                        safety = ctx.get("safety")
-                        if safety is not None:
-                            safety.update(
-                                customers,
-                                list(ctx.get("zones") or []),
-                                frame_time,
-                                cam_id,
-                            )
-
-                        if analytic_events and hasattr(self, "_persist_analytic_events"):
-                            self._persist_analytic_events(cam_id, analytic_events)
+                        customers = list(ctx.get("current_active_tracks") or [])
 
                         if ctx.get("heatmap") is None:
                             ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
@@ -974,15 +897,13 @@ class EdgePipeline:
                                 fps=ctx["reader"].fps_actual,
                                 infer_fps=ctx["processed_fps"],
                             )
-                            try:
-                                annotated = DebugOverlay.draw_pipeline(
-                                    **draw_kwargs,
-                                    staff_zones=ctx.get("staff_zones", []),
-                                    staff_ids=ctx.get("staff_ids", set()),
-                                    objects=list(ctx.get("last_overlay_objects") or []),
-                                )
-                            except TypeError:
-                                annotated = DebugOverlay.draw_pipeline(**draw_kwargs)
+                            # One draw. Foot is the default mark; box styles do not add a second foot.
+                            annotated = DebugOverlay.draw_pipeline(
+                                **draw_kwargs,
+                                staff_zones=ctx.get("staff_zones", []),
+                                staff_ids=ctx.get("staff_ids", set()),
+                                objects=list(ctx.get("last_overlay_objects") or []),
+                            )
                             frame_path = os.path.join(self.frames_dir, f"{cam_id}.jpg")
                             tmp_path = os.path.join(self.frames_dir, f"{cam_id}.tmp.jpg")
                             cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
@@ -1803,6 +1724,105 @@ class EdgePipeline:
         with open(store_tmp, "w") as f:
             json.dump(store, f)
         os.replace(store_tmp, store_path)
+
+    def _update_analytics(
+        self,
+        cam_id: str,
+        ctx: Dict[str, Any],
+        tracks: List[Any],
+        frame_time: float,
+        early_tracks: Optional[List[Any]] = None,
+        frame: Any = None,
+    ) -> List[Any]:
+        """Staff tag, then tripwire / zones / dwell for customers only.
+
+        ``early_tracks`` (default: ``tracks``) is who the line sees, so a crossing
+        during ByteTrack confirmation is not lost. Tagged staff are removed from
+        visitor uniques.
+        """
+        tracks = list(tracks or [])
+        if early_tracks is None:
+            early_tracks = tracks
+        ctx.setdefault("staff_ids", set())
+        for staff_zone in ctx.get("staff_zones") or []:
+            staff_zone.update(tracks, frame_time)
+            for tid, entered in list(staff_zone.active_tracks_in_zone.items()):
+                if frame_time - entered >= float(self.staff_min_seconds or 0.0):
+                    ctx["staff_ids"].add(tid)
+        staff_ids = ctx["staff_ids"]
+        customers = [t for t in tracks if t.track_id not in staff_ids]
+        early_customers = [t for t in early_tracks if t.track_id not in staff_ids]
+        for t in customers:
+            t.dwell_s = 0.0
+            t.zone_id = None
+        ctx["current_active_tracks"] = customers
+        ctx["staff_visible"] = max(0, len(tracks) - len(customers))
+
+        _reader = ctx.get("reader")
+        _loops = int(getattr(_reader, "loop_count", 0) or 0)
+        if _loops != ctx.get("reader_loop_seen", 0):
+            self._reset_sim_pass(cam_id, ctx, _loops)
+            ctx["current_active_tracks"] = customers
+            ctx["staff_visible"] = max(0, len(tracks) - len(customers))
+
+        seen = ctx.setdefault("tracked_ids_today", set())
+        seen.update(t.track_id for t in customers)
+        for tid in ctx.get("staff_ids") or ():
+            seen.discard(tid)
+
+        crossing_events: List[Dict[str, Any]] = []
+        for tw in ctx.get("tripwires") or []:
+            crossing_events.extend(tw.update(early_customers, frame_time))
+        if crossing_events and getattr(self, "local_buffer", None) is not None:
+            self._persist_crossing_events(cam_id, crossing_events)
+            recent = ctx.setdefault("recent_trip_in", {})
+            for ev in crossing_events:
+                direction = str(ev.get("direction", "")).lower()
+                if direction in ("in", "trip_in", "enter"):
+                    tid = ev.get("track_id")
+                    if tid is not None:
+                        recent[int(tid)] = float(ev.get("timestamp") or frame_time)
+            cutoff = frame_time - 120.0
+            for tid in list(recent.keys()):
+                if recent[tid] < cutoff:
+                    del recent[tid]
+
+        for zone in ctx.get("zones") or []:
+            zone.update(customers, frame_time)
+
+        staff_on_post = int(ctx.get("staff_visible", 0) or 0)
+        analytic_events: List[Dict[str, Any]] = []
+        for q in ctx.get("queues") or []:
+            try:
+                analytic_events.extend(q.update(customers, frame_time, staff_on_post=staff_on_post) or [])
+            except TypeError:
+                q.update(customers, frame_time)
+
+        for glass in ctx.get("glass_rois") or []:
+            analytic_events.extend(
+                glass.update(
+                    customers,
+                    frame_time,
+                    recent_trip_in_ids=ctx.get("recent_trip_in") or {},
+                ) or []
+            )
+
+        floor = ctx.get("floor")
+        if floor is not None:
+            if frame is not None:
+                try:
+                    floor.set_frame_size(float(frame.shape[1]), float(frame.shape[0]))
+                except Exception:
+                    pass
+            floor.update(customers, list(ctx.get("zones") or []), frame_time)
+
+        safety = ctx.get("safety")
+        if safety is not None:
+            safety.update(customers, list(ctx.get("zones") or []), frame_time, cam_id)
+
+        if analytic_events and getattr(self, "local_buffer", None) is not None:
+            self._persist_analytic_events(cam_id, analytic_events)
+        return customers
 
     def _reset_sim_pass(self, cam_id: str, ctx: Dict[str, Any], loop_count: int):
         """Loop boundary on a replaying sample video: archive this pass's uniques and
