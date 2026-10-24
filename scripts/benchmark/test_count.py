@@ -21,7 +21,7 @@ def test_video_counting(video_path: str, max_frames: int = 400):
     fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
     print(f"Resolution: {width}x{height}, FPS: {fps:.1f}")
 
-    detector = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.3)
+    detector = PersonDetector(model_name="models/yolo26n.pt", conf_thresh=0.3)
     tracker = SimpleByteTracker(max_age=20, iou_threshold=0.25)
 
     # In this retail camera:

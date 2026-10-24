@@ -16,6 +16,7 @@ from src.perception.detector_backend import (
     resolve_rfdetr_variant,
     resolve_rfdetr_weights,
 )
+from src.perception.illumination import normalize_illumination
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class PersonDetector:
 
     def __init__(
         self,
-        model_name: str = "yolov8n.pt",
+        model_name: str = "models/yolo26n.pt",
         conf_thresh: float = 0.50,
         iou_thresh: float = 0.45,
         min_height: float = 85.0,
@@ -93,6 +94,7 @@ class PersonDetector:
             self.rfdetr_variant, pipeline_cfg
         )
         self._loaded = False
+        self.last_illumination_mode = "normal"
 
         if self.backend == BACKEND_RFDETR:
             self._init_rfdetr()
@@ -202,9 +204,10 @@ class PersonDetector:
                 self._warned_no_model = True
             return [], []
 
+        inference_frame, self.last_illumination_mode = normalize_illumination(frame)
         if self.backend == BACKEND_RFDETR:
-            return self._detect_rfdetr(frame), []
-        return self._detect_yolo(frame)
+            return self._detect_rfdetr(inference_frame), []
+        return self._detect_yolo(inference_frame)
 
     def _class_name(self, cls: int) -> str:
         names = getattr(self.model, "names", None) or {}

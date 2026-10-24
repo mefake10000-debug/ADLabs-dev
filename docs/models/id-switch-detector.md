@@ -6,7 +6,7 @@ footage arrives, each clip gets a tracking-quality number and a short list of mo
 instead of someone watching the whole video.
 
 - Logic: [`src/analytics/id_switch.py`](../../src/analytics/id_switch.py) (`IdSwitchDetector`)
-- Runner: [`scripts/benchmark/detect_id_switches.py`](../scripts/benchmark/detect_id_switches.py)
+- Runner: [`scripts/benchmark/detect_id_switches.py`](../../scripts/benchmark/detect_id_switches.py)
 - Tests: [`tests/test_id_switch.py`](../../tests/test_id_switch.py)
 
 ## How it decides

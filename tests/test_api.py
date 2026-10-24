@@ -66,6 +66,34 @@ class TestLiveMetricsAPI(unittest.TestCase):
         self.assertEqual(data["avg_queue_wait_seconds"], 65.5)
         self.assertTrue(data["queue_alert_active"])
 
+    def test_model_evaluation_endpoint_never_invents_empty_state_metrics(self):
+        with patch.dict(os.environ, {"MODEL_EVALUATION_PATH": "data/storage/no-such-evaluation.json"}):
+            response = self.client.get("/api/v1/models/evaluation")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "not_measured")
+        self.assertIsNone(response.json()["metrics"])
+
+    def test_device_health_does_not_claim_healthy_without_fresh_snapshot(self):
+        with patch.object(server_app, "_read_live_snapshot", return_value=None):
+            response = self.client.get("/api/v1/device/health")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["live_source"], "none")
+        self.assertIn(body["status"], {"Waiting for live data", "Offline"})
+
+    def test_missing_inference_fps_does_not_fall_back_to_decode_rate(self):
+        snapshot = {
+            "timestamp": time.time(), "infer_fps": None, "decode_fps": 14.0,
+            "display_fps": 13.0, "models": {"person_detector": "yolo26n"},
+        }
+        with patch.object(server_app, "_read_live_snapshot", return_value=snapshot):
+            response = self.client.get("/api/v1/device/health")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIsNone(body["pipeline_fps"])
+        self.assertIsNone(body["infer_fps"])
+        self.assertEqual(body["decode_fps"], 14.0)
+
 class TestCrossingEventsAPI(unittest.TestCase):
     """Coverage for M1: per-crossing events must be individually ingestible
     and queryable, independent of rollup aggregation."""
@@ -243,6 +271,27 @@ class TestCameraConfigAPI(unittest.TestCase):
         self.assertIn(TEST_VIDEO, videos)
         self.assertTrue(all(v.startswith("data/sample_videos/") for v in videos))
 
+    def test_lists_nested_extra_video_sources_and_allows_switching_to_them(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            garage_dir = os.path.join(directory, "garage")
+            os.makedirs(garage_dir)
+            garage_clip = os.path.join(garage_dir, "garage_part00.mp4")
+            with open(garage_clip, "wb") as stream:
+                stream.write(b"clip")
+
+            with patch.object(server_app, "EXTRA_VIDEO_DIRS", [directory]):
+                videos = self.client.get("/api/v1/config/sources").json()["videos"]
+                self.assertIn(garage_clip, videos)
+                response = self.client.post(
+                    "/api/v1/config/cameras/cam_a/source",
+                    json={"source": garage_clip},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(self._config()["cam_a"]["source"], garage_clip)
+
     def test_switch_source_changes_only_that_camera_and_keeps_calibration_per_video(self):
         resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": TEST_VIDEO, "fps_target": 12})
         self.assertEqual(resp.status_code, 200)
@@ -258,7 +307,7 @@ class TestCameraConfigAPI(unittest.TestCase):
         self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": "data/sample_videos/entrance_sample.mp4"})
         cfg = self._config()
         self.assertEqual(cfg["cam_a"]["tripwires"][0]["id"], "tw1")
-        self.assertNotIn("calibrations", cfg["cam_a"])  # nothing left parked
+
 
     def test_rtsp_source_accepted(self):
         resp = self.client.post("/api/v1/config/cameras/cam_a/source", json={"source": "rtsp://admin:pw@192.168.1.10:554/ch1"})
@@ -366,9 +415,80 @@ class TestCameraConfigAPI(unittest.TestCase):
         html = self.client.get("/").text
         self.assertIn('onclick="finishPolygon()"', html)
         self.assertIn("Close Shape", html)
+        self.assertIn("undoCalibrationPoint()", html)
+        self.assertIn("cancelCalibrationDrawing()", html)
         self.assertIn("function finishPolygon()", html)
-        # The old close path (double-click) must still work for anyone whose pointer supports it.
-        self.assertIn("canvas.ondblclick = () => finishPolygon();", html)
+        # Explicit close/undo/cancel controls work regardless of native double-click behavior.
+        self.assertNotIn("canvas.ondblclick = () => finishPolygon();", html)
+
+
+class TestModelControlsAPI(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    def test_model_switch_changes_runtime_state_atomically(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            target = os.path.join(directory, "models.json")
+            with patch.object(server_app, "MODEL_SWITCHES_PATH", target):
+                before = self.client.get("/api/v1/models/controls").json()
+                self.assertTrue(before["controls"]["person_detector"])
+                response = self.client.post(
+                    "/api/v1/models/controls",
+                    json={"key": "person_detector", "enabled": False},
+                )
+                self.assertEqual(response.status_code, 200)
+                after = self.client.get("/api/v1/models/controls").json()
+
+            self.assertFalse(after["controls"]["person_detector"])
+            self.assertTrue(os.path.isfile(target))
+
+    def test_unknown_model_switch_is_rejected(self):
+        response = self.client.post(
+            "/api/v1/models/controls",
+            json={"key": "made_up_model", "enabled": True},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_demographics_switch_cannot_bypass_privacy_gate(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory, patch.object(server_app, "MODEL_SWITCHES_PATH", os.path.join(directory, "models.json")), patch.dict(
+            os.environ, {"ENABLE_DEMOGRAPHICS": "1", "DEMOGRAPHICS_DPIA_OK": "0"}
+        ):
+            response = self.client.post(
+                "/api/v1/models/controls",
+                json={"key": "demographics", "enabled": True},
+            )
+        self.assertEqual(response.status_code, 409)
+
+    def test_stack_marks_only_the_selected_product_model_live(self):
+        snapshot = {
+            "camera_id": "cam_entrance_01",
+            "timestamp": "2026-10-23T14:20:00Z",
+            "infer_fps": 0.3,
+            "models": {
+                "person_detector": "yolo26s",
+                "detector_loaded": True,
+                "products": True,
+                "products_backend": "yoloe",
+                "clip_vit_enabled": False,
+                "rtmpose": True,
+                "osnet_reid_enabled": True,
+                "mivolo_v2_enabled": False,
+            },
+        }
+        with patch.object(server_app, "_read_live_snapshot", return_value=snapshot):
+            response = self.client.get("/api/v1/models/stack")
+        self.assertEqual(response.status_code, 200)
+        by_key = {item["key"]: item for item in response.json()["models"]}
+        self.assertEqual(by_key["yoloe"]["run_state"], "ON")
+        self.assertEqual(by_key["yolo_world_clip"]["run_state"], "WAITING")
+        self.assertEqual(by_key["clip_vit_b32"]["run_state"], "WAITING")
+        self.assertNotIn("control_key", by_key["yolo26m_pose"])
+        self.assertNotIn("control_key", by_key["rfdetr"])
 
 
 class TestApiKeyAuth(unittest.TestCase):

@@ -1,6 +1,6 @@
 # RF-DETR integration (Roboflow SOTA object detection)
 
-**Status:** selectable Apache-2.0 SOTA / AGPL-swap path. **YOLO26n stays the default fast path.**
+**Status:** optional Apache-2.0 detector backend. YOLO26 remains the default backend in both fast and quality modes; RF-DETR is only used when explicitly selected and its runtime loads successfully. Its license and published benchmark scores do not establish pilot suitability or M-series speed.
 
 ## Research summary (2026-10)
 
@@ -11,8 +11,9 @@
 | License | **Apache-2.0** for code + COCO N/S/M/L weights |
 | Prefer | **RFDETRNano** / **RFDETRSmall** (disk + latency) |
 | Skip | XL / 2XL — **PML 1.0 Plus** (`rfdetr[plus]`), not free |
-| Why RF-DETR | Current Roboflow SOTA OD; N = 48.4 COCO AP⁵⁰:⁹⁵ @ 2.3 ms T4 TRT; S = 53.0 @ 3.5 ms |
-| Alternatives considered | D-FINE / LW-DETR also Apache — RF-DETR preferred per model-stack policy + survey |
+| Published benchmark context | Upstream reports N = 48.4 COCO AP⁵⁰:⁹⁵ @ 2.3 ms T4 TRT; S = 53.0 @ 3.5 ms. These accelerator figures are not evidence of speed or accuracy on this Mac or footage. |
+| Pilot status | No same-clip labeled comparison with the current YOLO path is recorded. Keep RF-DETR opt-in until that test exists. |
+| Alternatives considered | D-FINE / LW-DETR are also candidates; no local evidence justifies replacing the current default with any of them. |
 
 Upstream: [github.com/roboflow/rf-detr](https://github.com/roboflow/rf-detr) · [rfdetr.roboflow.com](https://rfdetr.roboflow.com/latest/learn/run/detection/)
 
@@ -37,7 +38,7 @@ Cache dir: `RF_HOME` (canonical) or `ROBOFLOW_HOME` → default `~/.roboflow/mod
 
 | Flag | Values | Default |
 |------|--------|---------|
-| `DETECTOR_BACKEND` | `yolo26` \| `rfdetr` | `yolo26` when `EDGE_PERF_MODE=fast`; **`rfdetr` when `quality`** |
+| `DETECTOR_BACKEND` | `yolo26` \| `rfdetr` | `yolo26` for every mode; `rfdetr` only when explicitly set |
 | `RFDETR_VARIANT` | `nano` \| `small` | `nano` |
 | `RFDETR_WEIGHTS` | path or bare filename | pack path if present, else published bare name |
 | `RF_HOME` | cache dir | Compose: `/app/models/pack/01-detection/rfdetr` |
@@ -51,15 +52,12 @@ Cache dir: `RF_HOME` (canonical) or `ROBOFLOW_HOME` → default `~/.roboflow/mod
 # Fast path (default) — YOLO26n
 EDGE_PERF_MODE=fast DETECTOR_BACKEND=yolo26 docker compose up -d edge-analyzer
 
-# SOTA / Apache path — RF-DETR Nano
+# Optional RF-DETR Nano comparison path (only after its package and weights are available)
 pip install 'rfdetr>=1.3,<2'   # once, on edge host or quality image
 python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano
 
 EDGE_PERF_MODE=quality DETECTOR_BACKEND=rfdetr RFDETR_VARIANT=nano \
   docker compose up -d edge-analyzer
-
-# Or: quality alone defaults DETECTOR_BACKEND→rfdetr
-EDGE_PERF_MODE=quality docker compose up -d edge-analyzer
 
 # Force YOLO even in quality
 EDGE_PERF_MODE=quality DETECTOR_BACKEND=yolo26 docker compose up -d edge-analyzer
@@ -94,6 +92,17 @@ curl -s localhost:8000/api/v1/models/stack | python3 -m json.tool | head
 Compose documents the same one-liner on `edge-analyzer` (weights stay out of the image).
 
 `rfdetr` is **commented optional** in `requirements-edge.txt` so the default Docker CPU image stays YOLO-lean. Bake it into a quality image only when needed.
+
+## Default-change gate
+
+Keep YOLO as the default until a repeatable pilot comparison uses the same labeled
+footage, resolution, tracker, zones, and target Mac for both backends. Record
+precision, recall, F1, count MAE, small/distant-person recall, false positives,
+ID stability, tripwire IN/OUT quality, feed/model/display FPS, CPU, and p95 latency
+at the intended camera count. Save the model/package version, weight checksum,
+license/source, config, dataset, clip, label counts, and evaluation time. A dashboard
+accuracy value is publishable only from a recent labeled report meeting this evidence
+contract; otherwise the UI must say “Not measured.”
 
 ## Policy
 

@@ -25,11 +25,14 @@ class TelemetryExporter:
         self.api_key = api_key
 
         self.running = False
+        self._stop_event = threading.Event()
+        self._last_maintenance = 0.0
         self.thread: Optional[threading.Thread] = None
 
     def start(self):
         if self.running:
             return
+        self._stop_event.clear()
         self.running = True
         self.thread = threading.Thread(target=self._export_loop, name="TelemetryExporter", daemon=True)
         self.thread.start()
@@ -37,17 +40,20 @@ class TelemetryExporter:
 
     def stop(self):
         self.running = False
+        self._stop_event.set()
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=16.0)
         logger.info("TelemetryExporter stopped.")
 
     def _export_loop(self):
-        while self.running:
-            time.sleep(self.push_interval)
+        while not self._stop_event.wait(self.push_interval):
             try:
                 self.flush_once()
                 self.flush_events_once()
                 self.flush_products_once()
+                if time.monotonic() - self._last_maintenance >= 3600 and hasattr(self.local_buffer, "maintenance"):
+                    self.local_buffer.maintenance()
+                    self._last_maintenance = time.monotonic()
             except Exception as e:
                 logger.error(f"Error in telemetry export loop: {e}")
 
@@ -87,6 +93,7 @@ class TelemetryExporter:
         )
 
     def _endpoints(self) -> list:
+        """Ordered fallback destinations; the first accepting receiver owns delivery."""
         endpoints = [self.cloud_endpoint]
         if self.local_endpoint and self.local_endpoint != self.cloud_endpoint:
             endpoints.append(self.local_endpoint)
@@ -106,7 +113,18 @@ class TelemetryExporter:
                 headers = {"X-API-Key": self.api_key} if self.api_key else {}
                 resp = requests.post(endpoint, json=payload, headers=headers, timeout=5.0)
                 if resp.status_code in (200, 201):
-                    ids = [r["id"] for r in records]
+                    body = resp.json()
+                    acknowledgements = body.get("accepted_record_ids") if isinstance(body, dict) else None
+                    if isinstance(acknowledgements, list):
+                        accepted = {value for value in acknowledgements if isinstance(value, str)}
+                        ids = [r["id"] for r in records if r.get("record_id") in accepted]
+                    elif any(r.get("record_id") for r in records):
+                        logger.warning("Receiver did not acknowledge durable record IDs; keeping batch pending")
+                        continue
+                    else:
+                        ids = [r["id"] for r in records]  # legacy sender compatibility
+                    if not ids:
+                        continue
                     mark_exported(ids)
                     logger.info(f"Successfully synced {len(ids)} {payload_key} to {endpoint}")
                     return len(ids)

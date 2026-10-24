@@ -9,6 +9,7 @@ name: adlabs
 services:
   # 1. Synthetic RTSP Multi-Camera Broadcaster
   rtsp-simulator:
+    profiles: [simulator]
     build:
       context: .
       dockerfile: docker/Dockerfile.simulator
@@ -28,8 +29,10 @@ services:
         # CPU-only torch by default; set TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 for NVIDIA GPU hosts
         TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     container_name: ${COMPOSE_PROJECT_NAME}-edge-analyzer
+    # Bound the pilot workload so inference cannot monopolize Docker Desktop.
+    # This is a CPU ceiling, not a promise of a particular inference FPS.
+    cpus: 4.0
     depends_on:
-      - rtsp-simulator
       - cloud-dashboard
     volumes:
       - ./configs:/app/configs:ro

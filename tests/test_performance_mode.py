@@ -2,6 +2,7 @@
 import os
 import unittest
 
+from src.perception import performance
 from src.perception.performance import (
     BALANCED_PRESET,
     FAST_PRESET,
@@ -81,6 +82,13 @@ class PerformanceModeTests(unittest.TestCase):
         os.environ["DETECTOR_BACKEND"] = "rfdetr"
         resolved = resolve_performance({})
         self.assertEqual(resolved["detector_backend"], "rfdetr")
+
+    def test_secondary_rfdetr_audit_is_off_unless_explicitly_opted_in(self):
+        gate = getattr(performance, "rfdetr_audit_enabled", None)
+        self.assertTrue(callable(gate), "secondary RF-DETR inference must require an explicit opt-in")
+        self.assertFalse(gate({}))
+        self.assertFalse(gate({"EDGE_RUN_RFDETR_AUDIT": "0"}))
+        self.assertTrue(gate({"EDGE_RUN_RFDETR_AUDIT": "1"}))
 
     def test_detect_model_env_override(self):
         os.environ["EDGESIGHT_DETECT_MODEL"] = "models/pack/01-detection/yolo11n.pt"

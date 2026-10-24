@@ -1,6 +1,10 @@
 # EdgeSight model-stack policy (2026-10-23)
 
 Authoritative keep / pull / skip / license gates for AD Labs retail CCTV.
+For the local review stack's scored model selection and active-path consolidation,
+see [`model-stack-evaluation-2026-10-23.md`](../model-stack-evaluation-2026-10-23.md).
+The compatibility catalog below includes alternatives; presence in the catalog or
+on disk does not mean a model is loaded by the current live profile.
 Companion survey: `docs/handoff/model-survey-retail-cv-2026-10.md`.
 Pack downloader: `scripts/download/download_pack_models.py` (phase-1).
 Phase-2 stubs (dry-run default): `scripts/download/download_pack_models_phase2.py`.
@@ -14,10 +18,10 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 
 | Model | Role | License | Notes |
 |-------|------|---------|-------|
-| **YOLO26n** | Person detector (fast / edge) | AGPL-3.0 | Jan 2026 edge-optimized; ~**38.9 ms CPU-ONNX**. **Default fast path** (`DETECTOR_BACKEND=yolo26`). |
-| **RF-DETR-N/S** | Person detector (SOTA / Apache) | Apache-2.0 | Roboflow SOTA via `rfdetr`. Selectable; **quality mode default**. See `docs/models/rfdetr-integration.md`. |
+| **YOLO26** (selected checkpoint depends on performance profile) | Person detector | AGPL-3.0 | Current fast and quality backend default. Runtime checkpoint and actual loaded state come from the worker snapshot, not this catalog. |
+| **RF-DETR-N/S** | Alternate person detector | Apache-2.0 | Optional `rfdetr` backend. Not the quality default and not loaded alongside YOLO in the primary count path. See `docs/models/rfdetr-integration.md`. |
 | **YOLOE** (`yoloe-v8s-seg-pf`) | Open-vocab shelf / products | AGPL-3.0 | Prompt-free pack weights under `models/pack/06-shelf/`. |
-| **OSNet** ReID | Session-scoped cross-cam soft ID | MIT (code + weights) | ONNX SoftReID in quality mode. No multi-day gallery. |
+| **OSNet** ReID | Session-scoped short-visit soft ID | MIT (code + weights) | Sampled ONNX SoftReID can run in fast mode when enabled by the model config and owner switch. No multi-day gallery. |
 | **CLIP ViT-B/32** | Text / zero-shot shelf interest | MIT | Prod: `weights/clip/ViT-B-32.pt`; pack HF mirror under `05-open-vocab/`. |
 
 ---
@@ -50,21 +54,23 @@ Status vocabulary used in registry + API: **LIVE | PACKED | PARTIAL | GATED | FU
 ### 1. Ultralytics + YOLOE = AGPL-3.0
 
 - **OK for pilot.**
-- Commercial path needs **Ultralytics Enterprise** OR the **Apache detector path**: **RF-DETR-N/S** (wired; prefer over D-FINE / LW-DETR unless re-bench says otherwise).
-- **Fast default:** YOLO26n. **SOTA/alternate:** `DETECTOR_BACKEND=rfdetr` (also the `EDGE_PERF_MODE=quality` default).
+- Commercial licensing needs review for the selected detector and deployment. RF-DETR's Apache license is a licensing attribute, not evidence of accuracy, speed, or commercial fitness for this product.
+- **Default backend:** YOLO26 in both fast and quality presets. **Alternate:** explicitly select `DETECTOR_BACKEND=rfdetr`; it remains off unless that backend is selected and loaded.
 
 ### Apache SOTA path — RF-DETR (selectable)
 
 | Environment | Reference baseline (YOLO26n) | RF-DETR note |
 |-------------|------------------------------|--------------|
-| Docker (Mac ARM CPU, Compose edge) | **4.7–6.4 s/frame** | Prefer YOLO for demos; RF-DETR is heavier on CPU |
-| Native Apple MPS | **~7 fps** YOLO26n | Prefer native MPS for RF-DETR quality runs |
+| Docker (Mac ARM CPU, Compose edge) | No comparable RF-DETR measurement is recorded for this pilot. | Do not infer pilot performance from another machine. |
+| Native Apple MPS | No comparable RF-DETR evaluation is recorded for this pilot. | Measure on the target host before making a speed claim. |
 
 Protocol when comparing:
 
-1. Fixed footage + identical ByteTrack / zone config; boxes stay **xyxy**.
-2. Report decode_fps, infer_fps, people_now parity vs YOLO26n tip.
-3. `GET /api/v1/models/stack` must show `rfdetr` as LIVE only when selected+loaded.
+1. Use the same labeled clips, camera resolution, zone/tripwire config, tracker settings, and target Mac for both backends; boxes stay **xyxy**.
+2. Record labeled person precision/recall/F1, count MAE, small/distant-person recall, false positives, ID stability, tripwire IN/OUT precision and recall, feed FPS, model-inference FPS, displayed FPS, CPU, and p95 processing latency.
+3. Record exact model/package versions, weight file checksum, source/license, config, and clip/dataset label provenance. A valid result needs non-zero labeled frames and people.
+4. Repeat the test at the intended camera count and load. No default change until the result shows an acceptable accuracy/latency tradeoff on this hardware.
+5. `GET /api/v1/models/stack` must show `rfdetr` as LIVE only when selected and loaded. Accuracy appears in the dashboard only from a fresh labeled report; otherwise it says “Not measured.”
 
 ### 2. Demographics / MiVOLO — DPIA gate
 
@@ -78,10 +84,10 @@ Protocol when comparing:
 
 | Key | Status | Env / notes |
 |-----|--------|-------------|
-| `yolo26n` | LIVE | `EDGE_PERF_MODE=fast` + `DETECTOR_BACKEND=yolo26` default |
-| `rfdetr` | LIVE / PACKED / OFF | LIVE when `DETECTOR_BACKEND=rfdetr` + loaded; else PACKED/OFF |
+| `yolo26n` | PACKED / LIVE | Live only when selected checkpoint and fresh worker snapshot confirm it |
+| `rfdetr` | PACKED / LIVE / OFF | Live only when `DETECTOR_BACKEND=rfdetr` and loaded; otherwise alternate is idle |
 | `yoloe` / YOLO-World | LIVE / PACKED | products path |
-| `osnet_reid` | LIVE (quality) / PACKED | session-scoped |
+| `osnet_reid` | LIVE when a fresh snapshot confirms activity; otherwise PACKED/OFF | session-scoped |
 | `clip_vit_b32` | LIVE / PACKED | |
 | `rtmpose` | PACKED→PARTIAL | fall-candidate pose tier |
 | `shelf_gap_geometry` | PARTIAL | zero new weights |

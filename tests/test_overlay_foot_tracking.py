@@ -35,6 +35,13 @@ class OverlayFootStyleTests(unittest.TestCase):
         self.assertEqual(clip([-10, 8, 120, 100], 100, 80), (0, 8, 99, 79))
         self.assertIsNone(clip([40, 50, 20, 60], 100, 80))
 
+    def test_clean_aabb_label_is_short_and_does_not_repeat_person_or_dwell_text(self):
+        label = getattr(debug_overlay, "clean_person_label", None)
+        self.assertTrue(callable(label), "AABB labels should use a dedicated compact formatter")
+        track = Track(22, [10, 10, 50, 80], 0.9, 1.0)
+        track.dwell_s = 28
+        self.assertEqual(label(track), "ID:22")
+
     def test_aabb_live_style_has_person_boxes_but_no_default_foot_or_object_clutter(self):
         if debug_overlay.cv2 is None or debug_overlay.np is None:
             self.skipTest("OpenCV/numpy unavailable")
@@ -52,9 +59,28 @@ class OverlayFootStyleTests(unittest.TestCase):
             box_style="aabb",
             objects=[{"bbox": [60, 55, 90, 90], "label": "crate"}],
         )
-        self.assertEqual(tuple(int(v) for v in rendered[50, 10]), debug_overlay.PERSON_COLOR)
+        self.assertGreater(int(rendered[50, 10, 1]), 200)
+        self.assertGreater(int(rendered[50, 10, 2]), 200)
+        self.assertEqual(int(rendered[50, 10, 0]), 0)
         self.assertNotEqual(tuple(int(v) for v in rendered[80, 30]), debug_overlay.FOOT_COLOR)
         self.assertEqual(tuple(int(v) for v in rendered[60, 60]), (0, 0, 0))
+
+    def test_foot_style_keeps_visible_person_box_with_foot_mark(self):
+        if debug_overlay.cv2 is None or debug_overlay.np is None:
+            self.skipTest("OpenCV/numpy unavailable")
+        track = Track(7, [10, 10, 50, 80], 0.9, 1.0)
+        frame = debug_overlay.np.zeros((100, 100, 3), dtype=debug_overlay.np.uint8)
+        rendered = debug_overlay.DebugOverlay.draw_pipeline(
+            frame=frame,
+            tracks=[track],
+            tripwires=[],
+            zones=[],
+            queues=[],
+            box_style="foot",
+        )
+        self.assertGreater(int(rendered[45, 10, 1]), 200)
+        self.assertGreater(int(rendered[45, 10, 2]), 200)
+        self.assertEqual(tuple(int(v) for v in rendered[80, 30]), debug_overlay.FOOT_COLOR)
 
 
 class TrackFootTests(unittest.TestCase):

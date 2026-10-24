@@ -108,6 +108,16 @@ def resolve_perf_mode(pipeline_cfg: Dict[str, Any]) -> str:
     return mode if mode in _VALID_MODES else "detect"
 
 
+def rfdetr_audit_enabled(env: Optional[Dict[str, str]] = None) -> bool:
+    """The standalone RF-DETR audit is off unless explicitly requested.
+
+    It runs a second detector process and is not part of visitor counts; leaving it
+    on beside the live edge steals CPU from the people/tracking pipeline.
+    """
+    source = env if env is not None else os.environ
+    return str(source.get("EDGE_RUN_RFDETR_AUDIT", "0")).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _first_existing_weight(*candidates: str) -> str:
     """Return the first weight file that exists, else the preferred name."""
     preferred = ""

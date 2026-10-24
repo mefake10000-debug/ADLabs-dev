@@ -33,6 +33,7 @@ ENV/
 # Databases and runtime data
 data/storage/*.db
 data/storage/*.sqlite3
+data/storage/*.runtime.lock
 data/storage/frames/*
 !data/storage/frames/.gitkeep
 !data/storage/.gitkeep
@@ -98,6 +99,7 @@ models/pack/**/*.msgpack
 
 # Frame-synced live KPI JSON (edge-analyzer → API)
 data/storage/live/
+data/storage/.runtime-locks/
 .venv/
 
 # Local model recovery assets and runtime settings
@@ -107,3 +109,13 @@ local-runtime/
 compose.local-models.yaml
 /weights
 models/onnx/
+/yolov8n.pt  # transient Ultralytics download created by local API tests
+
+# SQLite WAL sidecars contain private runtime data
+data/storage/*.db-wal
+data/storage/*.db-shm
+
+# Deployment credentials
+.env
+.env.*
+!.env.example

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -97,7 +98,11 @@ class TestLiveApiJourney(unittest.TestCase):
         cls._tmpdir.cleanup()
 
     def test_live_includes_journey_with_zero_defaults(self):
-        live = self.client.get("/api/v1/live").json()
+        # The local Docker worker may be publishing the default store's real
+        # journey snapshot while the suite is running. This case verifies the
+        # no-source empty state, so isolate it from the developer's live feed.
+        with patch.object(self.server_app, "_read_live_snapshot", return_value=None):
+            live = self.client.get("/api/v1/live").json()
         self.assertIn("journey", live)
         j = live["journey"]
         self.assertEqual(j.get("metaphor"), "buffet")

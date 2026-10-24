@@ -64,7 +64,7 @@ def load_pipeline_config(path: str) -> dict:
 def build_detector(cfg: dict, conf_thresh=None, model=None) -> PersonDetector:
     p = cfg.get("perception", {})
     return PersonDetector(
-        model_name=model or p.get("model_name", "yolov8n.pt"),
+        model_name=model or p.get("model_name", "models/yolo26n.pt"),
         conf_thresh=conf_thresh if conf_thresh is not None else p.get("confidence_threshold", 0.50),
         iou_thresh=p.get("iou_threshold", 0.45),
         min_height=p.get("min_height", 85.0),

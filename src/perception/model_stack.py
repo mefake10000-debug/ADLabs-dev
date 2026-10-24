@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import importlib.util
+import time
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -78,24 +80,36 @@ def _any_exists(base: Path, *rels: str) -> bool:
 
 
 def _live_person_detector(base: Path) -> str:
-    """Person weight name from the newest live snapshot, if the edge has written one."""
+    """Selected detector from a fresh edge snapshot; stale values are not LIVE."""
+    data = _fresh_live_snapshot(base)
+    return str((data.get("models") or {}).get("person_detector") or "").strip()
+
+
+def _fresh_live_snapshot(base: Path) -> Dict[str, Any]:
+    """Return the newest edge snapshot only while its source timestamp is fresh."""
     live = base / "data" / "storage" / "live"
     if not live.is_dir():
-        return ""
+        return {}
     paths = []
     store = live / "store.json"
     if store.is_file():
         paths.append(store)
     paths.extend(sorted(live.glob("cam_*.json")))
-    for path in paths:
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        det = str((data.get("models") or {}).get("person_detector") or "").strip()
-        if det:
-            return det
-    return ""
+    if not paths:
+        return {}
+    path = max(paths, key=lambda candidate: candidate.stat().st_mtime)
+    try:
+        data = json.loads(path.read_text())
+        timestamp = data.get("timestamp")
+        if timestamp:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if time.time() - parsed.timestamp() > 15:
+                return {}
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
@@ -111,7 +125,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             job="Finds people in the camera frame",
             feeds_kpi="Present · In/Out (with entrance line)",
             license="AGPL-3.0",
-            status="LIVE",
+            status="PACKED",
             path_hint="models/yolo26n.pt",
             env_flag="EDGE_PERF_MODE=fast|balanced · DETECTOR_BACKEND=yolo26",
             notes="Jan 2026 edge-optimized nano. Opt-in speed tier. Demo default is yolo26s (detect).",
@@ -157,7 +171,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             job="Names product categories on shelves",
             feeds_kpi="Shelf / display interest",
             license="AGPL-3.0",
-            status="LIVE",
+            status="PACKED",
             path_hint="models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
             notes="Pilot OK under AGPL; commercial needs Enterprise or Apache swap.",
         ),
@@ -168,9 +182,9 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             job="Keeps the same person ID within a short visit",
             feeds_kpi="Path / journey (same visit)",
             license="MIT",
-            status="LIVE",
+            status="PACKED",
             path_hint="models/pack/03-reid/",
-            env_flag="models.reid.enabled + EDGE_PERF_MODE=quality",
+            env_flag="models.reid.enabled + owner ReID switch; sampled in fast mode",
             notes="MIT code+weights. No multi-day identity gallery.",
         ),
         StackEntry(
@@ -180,7 +194,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             feeds_kpi="Shelf category tags",
             role="Zero-shot text / shelf interest",
             license="MIT",
-            status="LIVE",
+            status="PACKED",
             path_hint="weights/clip/ViT-B-32.pt",
         ),
         StackEntry(
@@ -406,7 +420,11 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
     # Do not flip YOLO to OFF on a failed path probe — Ultralytics may load from cache
     # while still producing live boxes (site strip also reconciles with live.models).
     backend = resolve_detector_backend()
-    live_det = _live_person_detector(base).lower()
+    snapshot = _fresh_live_snapshot(base)
+    live_det = str((snapshot.get("models") or {}).get("person_detector") or "").lower()
+    models_snapshot = snapshot.get("models") or {}
+    reid_snapshot = snapshot.get("reid") or {}
+    active_jobs = set((snapshot.get("slow_scheduler") or {}).get("enabled_models") or [])
     for e in entries:
         if e.key in ("yolo26n", "yolo26s"):
             if backend == BACKEND_RFDETR:
@@ -422,25 +440,26 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
                 perf_guess = os.environ.get("EDGE_PERF_MODE", "detect").strip().lower()
                 if perf_guess in ("", "detect", "quality"):
                     e.status = "PACKED" if e.on_disk else "OFF"
-            elif e.key == "yolo26s" and not live_det and e.on_disk:
-                # Demo default until a snapshot names the loaded weight.
-                perf = os.environ.get("EDGE_PERF_MODE", "detect").strip().lower()
-                if perf in ("", "detect", "quality"):
-                    e.status = "LIVE"
         if e.key == "yolo26n" and backend == BACKEND_RFDETR:
             e.status = "PACKED" if e.on_disk else "OFF"
             e.notes = (
                 "Fast-path YOLO26n kept as selectable alternate "
                 "(DETECTOR_BACKEND=yolo26). RF-DETR currently selected."
             )
-        elif e.key in ("osnet_reid", "clip_vit_b32") and e.status == "LIVE":
-            perf = os.environ.get("EDGE_PERF_MODE", "balanced").strip().lower()
-            if e.on_disk is False:
+        elif e.key in ("osnet_reid", "clip_vit_b32"):
+            if e.key == "osnet_reid" and (
+                reid_snapshot.get("active") is True or models_snapshot.get("osnet_reid_enabled") is True
+            ):
+                e.status = "LIVE"
+                e.notes = "Live snapshot confirms ONNX OSNet ReID is running; session-scoped only."
+            elif e.key == "clip_vit_b32" and "clip" in active_jobs:
+                e.status = "LIVE"
+            elif e.on_disk is False:
                 e.status = "PACKED"
                 e.notes = (e.notes or "") + " Weights not on probed path — waiting."
-            elif perf in ("fast", "balanced"):
+            else:
                 e.status = "PACKED"
-                e.notes = (e.notes or "") + " Waiting: set EDGE_PERF_MODE=quality to run."
+                e.notes = (e.notes or "") + " Waiting for a fresh live snapshot to confirm runtime activity."
         elif e.key == "yoloe" and e.status == "LIVE" and e.on_disk is False:
             e.status = "PACKED"
             e.notes = (e.notes or "") + " Weights not on probed path — waiting."

@@ -14,7 +14,7 @@ def run_benchmark(num_frames: int = 100, width: int = 1280, height: int = 720):
     print("   AD Labs EdgeSight - Hardware Benchmark Tool   ")
     print("==================================================")
 
-    detector = PersonDetector(model_name="yolov8n.pt")
+    detector = PersonDetector(model_name="models/yolo26n.pt")
     tracker = SimpleByteTracker()
 
     print(f"Backend Device: {detector.device.upper()}")

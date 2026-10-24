@@ -32,6 +32,8 @@ class ProductInterestAnalyzer:
         # (track_id, category) -> last timestamp seen together
         self._last_seen: Dict[Tuple[int, str], float] = {}
         self._detection_counts: Counter = Counter()
+        self._current_detection_counts: Counter = Counter()
+        self._active_track_ids: Set[int] = set()
 
     def observe(
         self,
@@ -44,9 +46,12 @@ class ProductInterestAnalyzer:
         `detections` entries need `bbox` and `label`. `tracks` are tracker objects
         exposing `track_id` and `foot_point`.
         """
+        self._current_detection_counts = Counter(
+            d.get("label") for d in detections if d.get("label")
+        )
+        self._active_track_ids = {int(track.track_id) for track in tracks}
         if not detections:
             return
-
         self._detection_counts.update(d["label"] for d in detections)
 
         for det in detections:
@@ -78,6 +83,7 @@ class ProductInterestAnalyzer:
 
     def prune(self, active_track_ids: Iterable[int]):
         active = set(active_track_ids)
+        self._active_track_ids = {int(track_id) for track_id in active}
         for key in list(self._last_seen.keys()):
             if key[0] not in active:
                 del self._last_seen[key]
@@ -91,19 +97,21 @@ class ProductInterestAnalyzer:
         self._viewers.clear()
         self._last_seen.clear()
         self._detection_counts.clear()
+        self._current_detection_counts.clear()
+        self._active_track_ids.clear()
 
     def snapshot(self) -> Dict[str, Any]:
         products: List[Dict[str, Any]] = []
         # A category that was detected but drew no viewers still matters: "a shoe
         # display nobody looked at" is a merchandising signal in its own right.
-        for label in set(self._dwell.keys()) | set(self._detection_counts.keys()):
+        for label, detection_count in self._current_detection_counts.items():
             per_track = self._dwell.get(label, {})
-            viewers = self._viewers.get(label, set())
+            viewers = self._viewers.get(label, set()) & self._active_track_ids
             total_dwell = sum(per_track.values())
             products.append({
                 "category": label,
                 "viewers": len(viewers),
-                "detections": self._detection_counts.get(label, 0),
+                "detections": detection_count,
                 "total_dwell_seconds": round(total_dwell, 1),
                 "avg_dwell_seconds": round(total_dwell / len(per_track), 1) if per_track else 0.0,
             })

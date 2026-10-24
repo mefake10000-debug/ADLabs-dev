@@ -84,6 +84,11 @@ def clip_bbox_to_frame(bbox: Sequence[float], width: int, height: int) -> Option
         return None
 
 
+def clean_person_label(track: Track) -> str:
+    """Compact AABB tag: avoid repeated 'person', dwell prose, and overlapping long labels."""
+    return f"ID:{int(track.track_id)}"
+
+
 def _draw_clean_label_bar(canvas: Any, bbox: Sequence[int], label: str, color: Tuple[int, int, int]) -> None:
     """Place a legible, clipped label bar above a person/object rectangle."""
     x1, y1, _x2, _y2 = [int(value) for value in bbox[:4]]
@@ -92,7 +97,7 @@ def _draw_clean_label_bar(canvas: Any, bbox: Sequence[int], label: str, color: T
     if available < 20 or frame_h < 18:
         return
     display = str(label).strip() or "person"
-    scale, thickness, pad = 0.42, 1, 4
+    scale, thickness, pad = 0.36, 1, 3
     while display:
         (text_w, text_h), _ = cv2.getTextSize(display, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
         if text_w + pad * 2 <= available:
@@ -457,7 +462,7 @@ class DebugOverlay:
                     cv2.rectangle(canvas, (x1, y1), (x2, y2), OBJECT_COLOR, 1, lineType=cv2.LINE_AA)
                     _draw_clean_label_bar(canvas, bbox, name[:24], OBJECT_COLOR)
 
-        # 4b. People — style-dependent (foot default = no heavy boxes)
+        # 4b. People — keep the person rectangle visible in every lightweight style.
         for track in tracks:
             clipped = clip_bbox_to_frame(track.bbox, canvas.shape[1], canvas.shape[0])
             if clipped is None:
@@ -470,9 +475,9 @@ class DebugOverlay:
             else:
                 color = STILL_COLOR if is_stationary else PERSON_COLOR
 
-            if style == "aabb":
-                cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 2, lineType=cv2.LINE_AA)
-                _draw_clean_label_bar(canvas, b, person_label(track, is_staff), color)
+            if style in {"aabb", "foot", "skeleton"}:
+                cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), color, 1, lineType=cv2.LINE_AA)
+                _draw_clean_label_bar(canvas, b, clean_person_label(track), color)
             elif style == "nvidia":
                 width = max(1, b[2] - b[0])
                 shear = heading_shear_px(track, width)
@@ -489,7 +494,7 @@ class DebugOverlay:
             elif style == "skeleton":
                 _draw_skeleton(canvas, track)
 
-            # In default AABB mode keep the person box/label clean; foot/trail are opt-in.
+            # The foot marker supplements the box; it never replaces the person outline.
             if style != "aabb":
                 foot = _draw_foot_mark(canvas, track)
                 _draw_trail(canvas, track)

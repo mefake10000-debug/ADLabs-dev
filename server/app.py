@@ -1,6 +1,7 @@
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import sys
 import time
@@ -20,7 +21,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from server.operator_access import access_settings, configuration_error, operator_role
+from server.runtime_readiness import assess_readiness, read_outbox_backlog
+from server.telemetry_receipts import init_receipts, claim_record
 from pydantic import BaseModel, Field, field_validator
+from server.model_switches import CONTROL_KEYS, controls_path, read_controls, write_control
 
 logger = logging.getLogger("EdgeSight-API")
 app = FastAPI(title="AD Labs EdgeSight Enterprise Platform", version="2.0.0")
@@ -44,6 +49,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Accept", "Content-Type", "X-API-Key"],
 )
+
+MODEL_SWITCHES_PATH = controls_path()
 
 from server.nfc_store import (
     industry_status_block,
@@ -73,6 +80,11 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 DB_PATH = os.environ.get("SERVER_DB_PATH", "data/storage/cloud_metrics.db")
 CONFIG_PATH = os.environ.get("CAMERAS_CONFIG", "configs/cameras.yaml")
 VIDEO_DIR = os.environ.get("SAMPLE_VIDEOS_DIR", "data/sample_videos")
+EXTRA_VIDEO_DIRS = [
+    os.path.realpath(path.strip())
+    for path in os.environ.get("SAMPLE_VIDEOS_EXTRA_DIRS", "").split(os.pathsep)
+    if path.strip()
+]
 VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv")
 STREAM_PREFIXES = ("rtsp://", "rtsps://", "http://")
 
@@ -91,11 +103,44 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.middleware("http")
 async def require_api_key_for_writes(request: Request, call_next):
-    if API_KEY and request.method != "GET" and request.url.path.startswith("/api/v1/"):
+    settings = access_settings()
+    error = configuration_error(settings, API_KEY)
+    if request.url.path == "/health":
+        return await call_next(request)
+    if error:
+        return JSONResponse(status_code=503, content={"detail": error})
+    operator_enabled = bool(settings["EDGESIGHT_OPERATOR_USER"])
+    device_paths = {"/api/v1/telemetry", "/api/v1/telemetry/events", "/api/v1/telemetry/products", "/api/v1/device/register"}
+    device_call = request.method == "POST" and request.url.path in device_paths
+    role = None
+    if operator_enabled and not device_call:
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request.headers.get("origin")
+            allowed = {str(request.base_url).rstrip("/"), *_cors_origins}
+            if (origin and origin not in allowed) or request.headers.get("sec-fetch-site") == "cross-site":
+                return JSONResponse(status_code=403, content={"detail": "Cross-origin changes are not allowed"})
+        role = operator_role(request.headers.get("authorization"), settings)
+        if not role:
+            return JSONResponse(status_code=401, content={"detail": "Operator login required"},
+                                headers={"WWW-Authenticate": 'Basic realm="EdgeSight", charset="UTF-8"', "Cache-Control": "no-store"})
+        if role == "viewer" and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            return JSONResponse(status_code=403, content={"detail": "Administrator access required"})
+    elif API_KEY and request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/api/v1/"):
         provided = request.headers.get("x-api-key")
         if not provided or not secrets.compare_digest(provided, API_KEY):
             return JSONResponse(status_code=401, content={"detail": "Missing or invalid X-API-Key header"})
-    return await call_next(request)
+    response = await call_next(request)
+    if operator_enabled:
+        response.headers["Cache-Control"] = "no-store"
+    if role and request.method not in {"GET", "HEAD", "OPTIONS"} and response.status_code < 400:
+        actor = settings["EDGESIGHT_OPERATOR_USER"] if role == "admin" else settings["EDGESIGHT_VIEWER_USER"]
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as conn:
+                conn.execute("INSERT INTO operator_audit(actor,method,path,status_code) VALUES(?,?,?,?)",
+                             (actor, request.method, request.url.path, response.status_code))
+        except sqlite3.Error:
+            logging.getLogger(__name__).exception("Could not record operator audit metadata")
+    return response
 
 def _redact_source(source: Optional[str]) -> Optional[str]:
     """Masks embedded RTSP credentials (rtsp://user:pass@host/...) before a camera config is
@@ -113,7 +158,13 @@ def _redact_camera(cam: Dict[str, Any]) -> Dict[str, Any]:
     return redacted
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=10) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        init_receipts(conn)
+        conn.execute("""CREATE TABLE IF NOT EXISTS operator_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL,
+            method TEXT NOT NULL, path TEXT NOT NULL, status_code INTEGER NOT NULL,
+            occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS telemetry_rollups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,6 +274,7 @@ init_db()
 
 class RollupItem(BaseModel):
     id: Optional[int] = None
+    record_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
     store_id: str
     device_id: str
     camera_id: str
@@ -256,6 +308,7 @@ class TelemetryPayload(BaseModel):
 
 class EventItem(BaseModel):
     id: Optional[int] = None
+    record_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
     store_id: str
     device_id: str
     camera_id: str
@@ -277,6 +330,7 @@ class ProductInterestItem(BaseModel):
     no image and no person-level row anywhere in this payload.
     """
     id: Optional[int] = None
+    record_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
     store_id: str
     device_id: str
     camera_id: str
@@ -315,22 +369,55 @@ class NfcTapPayload(BaseModel):
 # Web App Entrypoint (Structured Production SPA)
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    # If EDGESIGHT_API_KEY is set, the Calibration Studio's own POST calls (save calibration,
-    # switch source, reset metrics) need to send it too. Embedding it in the page means it's
-    # visible in page source to anyone who can load this page -- acceptable as a barrier against
-    # unauthenticated internet scanners hitting an exposed port, not a substitute for real
-    # per-user login (out of scope here).
-    return templates.TemplateResponse(request=request, name="index.html", context={"api_key": API_KEY or ""})
+    # Device credentials must never be embedded in browser-visible HTML.
+    return templates.TemplateResponse(request=request, name="index.html", context={"api_key": ""})
 
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "AD Labs EdgeSight Enterprise API", "timestamp": time.time()}
 
+@app.get("/ready")
+def readiness_check():
+    directory = os.path.dirname(DB_PATH) or "."
+    try:
+        free = shutil.disk_usage(directory).free
+        # A short transaction verifies DB write access without changing application state.
+        with sqlite3.connect(DB_PATH, timeout=1) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.rollback()
+        writable = True
+    except (OSError, sqlite3.Error):
+        free, writable = 0, False
+    snapshot = None
+    try:
+        candidates = []
+        for name in os.listdir(_live_dir()):
+            if not name.endswith(".json") or name.endswith(".tmp.json"):
+                continue
+            path = os.path.join(_live_dir(), name)
+            try:
+                with open(path) as stream:
+                    row = json.load(stream)
+                if isinstance(row, dict) and row.get("camera_id"):
+                    candidates.append((os.path.getmtime(path), row))
+            except (OSError, ValueError):
+                continue
+        if candidates:
+            snapshot = max(candidates, key=lambda item: item[0])[1]
+    except OSError:
+        pass
+    result = assess_readiness(snapshot, now=time.time(), free_bytes=free, storage_writable=writable)
+    result["outbox"] = read_outbox_backlog(os.environ.get("EDGE_DB_PATH", os.path.join(directory, "edgesight.db")))
+    return JSONResponse(status_code=200 if result["ready"] else 503, content=result)
+
 # Telemetry Sync Endpoint
 @app.post("/api/v1/telemetry")
 def receive_telemetry(payload: TelemetryPayload):
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         for r in payload.rollups:
+            if not claim_record(conn, "rollups", r):
+                continue
             conn.execute("""
             INSERT INTO telemetry_rollups (
                 store_id, device_id, camera_id, timestamp_start, timestamp_end,
@@ -349,13 +436,16 @@ def receive_telemetry(payload: TelemetryPayload):
                 r.loop_count or 0, r.is_simulated or 0, r.source_session_id
             ))
         conn.commit()
-    return {"status": "success", "processed_records": len(payload.rollups)}
+    return {"status": "success", "processed_records": len(payload.rollups), "accepted_record_ids": [item.record_id for item in payload.rollups if item.record_id]}
 
 # Product Interest Sync Endpoint (per-category aggregates, no person-level data)
 @app.post("/api/v1/telemetry/products")
 def receive_products(payload: ProductBatchPayload):
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         for p in payload.products:
+            if not claim_record(conn, "products", p):
+                continue
             conn.execute("""
             INSERT INTO telemetry_products (
                 store_id, device_id, camera_id, category, viewers, detections,
@@ -366,13 +456,16 @@ def receive_products(payload: ProductBatchPayload):
                 p.total_dwell_seconds, p.avg_dwell_seconds, p.timestamp_start, p.timestamp_end
             ))
         conn.commit()
-    return {"status": "success", "processed_records": len(payload.products)}
+    return {"status": "success", "processed_records": len(payload.products), "accepted_record_ids": [item.record_id for item in payload.products if item.record_id]}
 
 # Per-Crossing Event Sync Endpoint (durable, independent of rollup aggregation)
 @app.post("/api/v1/telemetry/events")
 def receive_events(payload: EventBatchPayload):
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=10) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         for e in payload.events:
+            if not claim_record(conn, "events", e):
+                continue
             conn.execute("""
             INSERT INTO telemetry_events (
                 store_id, device_id, camera_id, wire_id, track_id, direction, event_timestamp
@@ -381,7 +474,7 @@ def receive_events(payload: EventBatchPayload):
                 e.store_id, e.device_id, e.camera_id, e.wire_id, e.track_id, e.direction, e.event_timestamp
             ))
         conn.commit()
-    return {"status": "success", "processed_records": len(payload.events)}
+    return {"status": "success", "processed_records": len(payload.events), "accepted_record_ids": [item.record_id for item in payload.events if item.record_id]}
 
 # Individually Queryable Crossing Events (audit trail, independent of rollups)
 @app.get("/api/v1/events")
@@ -405,25 +498,35 @@ def _live_dir() -> str:
 def _read_live_snapshot(camera_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Frame-synced JSON written by edge-analyzer (matches YOLO overlay people counts)."""
     live_dir = _live_dir()
-    path = os.path.join(live_dir, f"{camera_id}.json" if camera_id else "store.json")
-    if not os.path.exists(path):
-        if camera_id:
+    if camera_id:
+        path = os.path.join(live_dir, f"{camera_id}.json")
+        if not os.path.isfile(path):
             return None
+    else:
         if not os.path.isdir(live_dir):
             return None
-        for name in sorted(os.listdir(live_dir)):
-            if name.endswith(".json") and not name.endswith(".tmp.json") and name != "store.json":
-                path = os.path.join(live_dir, name)
-                break
-        else:
+        candidates = [
+            os.path.join(live_dir, name)
+            for name in os.listdir(live_dir)
+            if name.endswith(".json") and not name.endswith(".tmp.json")
+        ]
+        if not candidates:
             return None
+        # A store aggregate can lag behind a camera worker. Read whichever atomic
+        # snapshot was written most recently so model status and store views follow
+        # the active camera instead of a stale file chosen alphabetically.
+        path = max(candidates, key=os.path.getmtime)
     try:
         with open(path, "r") as f:
             data = json.load(f)
         ts = data.get("timestamp")
         if ts:
             try:
-                age = time.time() - time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+                parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    # Native EdgeSight workers set TZ=UTC before writing snapshots.
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                age = time.time() - parsed.timestamp()
                 if age > 15:
                     data["_stale"] = True
             except Exception:
@@ -433,10 +536,25 @@ def _read_live_snapshot(camera_id: Optional[str] = None) -> Optional[Dict[str, A
         return None
 
 
+def _snapshot_for_store(
+    snapshot: Optional[Dict[str, Any]], store_id: str
+) -> Optional[Dict[str, Any]]:
+    """Only overlay live frame data on the store that produced that snapshot."""
+    if not snapshot:
+        return None
+    snapshot_store = snapshot.get("store_id")
+    if snapshot_store is None:
+        # Older edge workers omitted the field and were tied to the original demo store.
+        return snapshot if store_id == "store_mumbai_001" else None
+    if snapshot_store != store_id:
+        return None
+    return snapshot
+
+
 # Live Store Telemetry
 @app.get("/api/v1/live")
 def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str] = None):
-    snap = _read_live_snapshot(camera_id)
+    snap = _snapshot_for_store(_read_live_snapshot(camera_id), store_id)
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -619,8 +737,12 @@ def get_live_metrics(store_id: str = "store_mumbai_001", camera_id: Optional[str
         # Prefer per-camera rows from frame-synced files when present (fresher than rollups).
         # Skip cams not listed in store snapshot when max_cameras pruned the active set.
         live_dir = _live_dir()
-        active_cams = set(snap.get("cameras") or []) if snap and not snap.get("_stale") else set()
-        if os.path.isdir(live_dir):
+        active_cams = (
+            set(snap.get("cameras") or ([snap.get("camera_id")] if snap.get("camera_id") else []))
+            if snap and not snap.get("_stale")
+            else set()
+        )
+        if snap and not snap.get("_stale") and os.path.isdir(live_dir):
             snap_cams = []
             for name in sorted(os.listdir(live_dir)):
                 if not name.endswith(".json") or name in ("store.json",) or name.endswith(".tmp.json"):
@@ -1206,6 +1328,32 @@ def get_engagement_analytics(
             "series": series,
         }
 
+class ModelControlUpdate(BaseModel):
+    key: str
+    enabled: bool
+
+
+@app.get("/api/v1/models/controls")
+def get_model_controls():
+    """Current local inference switches, shared with the EdgeSight worker."""
+    return {"controls": read_controls(MODEL_SWITCHES_PATH), "supported": list(CONTROL_KEYS)}
+
+
+@app.post("/api/v1/models/controls")
+def set_model_control(body: ModelControlUpdate):
+    if body.key not in CONTROL_KEYS:
+        raise HTTPException(status_code=422, detail=f"Unsupported model control: {body.key}")
+    if body.key == "demographics" and body.enabled:
+        from src.perception.model_stack import demographics_env_enabled, dpia_gate_ok
+        if not (demographics_env_enabled() and dpia_gate_ok()):
+            raise HTTPException(
+                status_code=409,
+                detail="Demographics remain gated until ENABLE_DEMOGRAPHICS and DEMOGRAPHICS_DPIA_OK are approved.",
+            )
+    controls = write_control(body.key, body.enabled, MODEL_SWITCHES_PATH)
+    return {"controls": controls, "key": body.key, "enabled": controls[body.key]}
+
+
 @app.get("/api/v1/models/stack")
 def get_model_stack():
     """Honest model-stack catalog (LIVE|PACKED|PARTIAL|GATED|FUTURE|SKIP).
@@ -1218,20 +1366,21 @@ def get_model_stack():
             sys.path.insert(0, root)
         from src.perception.model_stack import build_model_stack
         result = build_model_stack(root)
+        controls = read_controls(MODEL_SWITCHES_PATH)
         audit_path = os.path.join(root, "local-runtime", "rfdetr-state.json")
         try:
             with open(audit_path, "r") as stream:
                 audit = json.load(stream)
-            audit_fresh = time.time() - float(audit.get("last_success", 0) or 0) <= 15
+            audit_fresh = time.time() - float(audit.get("last_success", 0) or 0) <= 25
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             audit, audit_fresh = {}, False
-        if audit_fresh and int(audit.get("successful_inferences", 0) or 0) > 0:
+        if controls["rfdetr"] and audit_fresh and int(audit.get("successful_inferences", 0) or 0) > 0:
             for entry in result.get("models", []):
                 if entry.get("key") == "rfdetr":
                     entry["status"] = "LIVE"
                     entry["run_state"] = "ON"
                     entry["notes"] = (
-                        "Running continuous secondary person audit; it is not fused into visitor counts. "
+                        "Running periodic secondary person audit; it is not fused into visitor counts. "
                         f"{audit.get('successful_inferences')} inferences; latest {audit.get('people')} people."
                     )
             result["rfdetr_audit"] = {
@@ -1249,13 +1398,16 @@ def get_model_stack():
                 "yolo26s": bool(models.get("detector_loaded") and "yolo26s" in str(models.get("person_detector", "")).lower()),
                 "yolo26n": bool(models.get("detector_loaded") and "yolo26n" in str(models.get("person_detector", "")).lower()),
                 "yolo26m_pose": bool(models.get("pose_model_loaded")),
-                "yolo_world_clip": bool(models.get("products") and models.get("clip_vit_enabled")),
+                "yolo_world_clip": bool(
+                    models.get("products")
+                    and models.get("products_backend") == "world"
+                    and models.get("clip_vit_enabled")
+                ),
                 "osnet_reid": bool(models.get("osnet_reid_enabled") or reid.get("active")),
                 "clip_vit_b32": bool(models.get("clip_vit_enabled")),
                 "rtmpose": bool(models.get("rtmpose")),
                 "mivolo_v2": bool(models.get("mivolo_v2_enabled")),
-                # YOLOE is a selectable alternative; the live product model is YOLO-World.
-                "yoloe": False,
+                "yoloe": bool(models.get("products") and models.get("products_backend") == "yoloe"),
             }
             for entry in result.get("models", []):
                 key = entry.get("key")
@@ -1272,7 +1424,39 @@ def get_model_stack():
                 "camera_id": snapshot.get("camera_id"),
                 "timestamp": snapshot.get("timestamp"),
                 "infer_fps": snapshot.get("infer_fps"),
+                "models": {
+                    "person_detector": models.get("person_detector") or models.get("detect_model"),
+                    "detector_loaded": bool(models.get("detector_loaded")),
+                    "tracker": models.get("tracker"),
+                },
             }
+        active_detector = str(((snapshot or {}).get("models") or {}).get("person_detector", "yolo26s")).lower()
+        control_rows = {
+            "yolo26n": "person_detector" if "yolo26n" in active_detector else None,
+            "yolo26s": "person_detector" if "yolo26s" in active_detector else None,
+            # YOLO pose is disabled in the consolidated live profile and cannot
+            # be activated by a switch alone; leave the standby weight untoggled.
+            "yolo26m_pose": None,
+            "yolo_world_clip": None,
+            "yoloe": "products",
+            "osnet_reid": "reid",
+            "rtmpose": "rtmpose",
+            "mivolo_v2": "demographics" if result.get("env", {}).get("demographics_runtime_allowed") else None,
+            # RF-DETR requires a separately launched audit process; the switch
+            # file alone cannot start it, so do not expose a misleading toggle.
+            "rfdetr": None,
+        }
+        for entry in result.get("models", []):
+            control_key = control_rows.get(entry.get("key"))
+            if not control_key:
+                continue
+            entry["control_key"] = control_key
+            entry["control_enabled"] = controls[control_key]
+            if not controls[control_key]:
+                entry["run_state"] = "OFF"
+                if entry.get("status") == "LIVE":
+                    entry["status"] = "PACKED"
+                entry["notes"] = "Paused by the operator in the live model controls."
         return result
     except Exception as e:
         logger.exception("model stack catalog failed")
@@ -1280,6 +1464,19 @@ def get_model_stack():
             status_code=500,
             content={"error": str(e), "policy": "docs/models/model-stack-policy.md"},
         )
+
+
+@app.get("/api/v1/models/evaluation")
+def get_model_evaluation():
+    """Ground-truth model metrics only; no report means no numeric estimate."""
+    from server.model_evaluation import read_model_evaluation
+
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    report_path = os.environ.get(
+        "MODEL_EVALUATION_PATH",
+        os.path.join(root, "ml_dataset", "reports", "model-evaluation.json"),
+    )
+    return read_model_evaluation(report_path)
 
 
 @app.get("/api/v1/analytics/demographics")
@@ -1456,7 +1653,7 @@ def get_stream(camera_id: str):
                         )
                 except Exception:
                     pass
-            time.sleep(0.08)  # ~12 FPS streaming rate
+            time.sleep(0.033)  # do not cap a 15 FPS camera below target; snapshots are unique-frame gated
 
     return StreamingResponse(frame_generator(), media_type="multipart/x-mixed-replace; boundary=frame")
 
@@ -1555,13 +1752,23 @@ def _validate_source(source: str) -> str:
     if source.lower().startswith(STREAM_PREFIXES):
         return source
     normalized = os.path.normpath(source).replace("\\", "/")
-    video_dir = os.path.normpath(VIDEO_DIR).replace("\\", "/")
-    if not normalized.startswith(video_dir + "/"):
-        raise HTTPException(status_code=400, detail=f"Local sources must live under {VIDEO_DIR}/ (or use an rtsp:// URL)")
+    candidate = os.path.realpath(normalized)
+    allowed_dirs = [os.path.realpath(directory) for directory in [VIDEO_DIR, *EXTRA_VIDEO_DIRS]]
+    allowed = False
+    for directory in allowed_dirs:
+        try:
+            if os.path.commonpath((candidate, directory)) == directory and candidate != directory:
+                allowed = True
+                break
+        except ValueError:
+            continue
+    if not allowed:
+        roots = ", ".join(allowed_dirs)
+        raise HTTPException(status_code=400, detail=f"Local sources must live under an approved video folder ({roots}) or use an rtsp:// URL")
     if not normalized.lower().endswith(VIDEO_EXTS):
         raise HTTPException(status_code=400, detail=f"Unsupported video type; expected one of {', '.join(VIDEO_EXTS)}")
-    if not os.path.isfile(normalized):
-        raise HTTPException(status_code=400, detail=f"Video file not found: {normalized}")
+    if not os.path.isfile(candidate):
+        raise HTTPException(status_code=400, detail=f"Video file not found: {candidate}")
     return normalized
 
 class SourceUpdate(BaseModel):
@@ -1667,10 +1874,17 @@ class CalibrationUpdate(BaseModel):
 # Selectable video files for the camera source switcher
 @app.get("/api/v1/config/sources")
 def list_video_sources():
-    if not os.path.isdir(VIDEO_DIR):
-        return {"video_dir": VIDEO_DIR, "videos": []}
-    videos = sorted(f for f in os.listdir(VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS))
-    return {"video_dir": VIDEO_DIR, "videos": [f"{VIDEO_DIR}/{f}" for f in videos]}
+    videos = []
+    for directory in [VIDEO_DIR, *EXTRA_VIDEO_DIRS]:
+        if not os.path.isdir(directory):
+            continue
+        for root, _dirs, files in os.walk(directory):
+            for filename in files:
+                if not filename.lower().endswith(VIDEO_EXTS):
+                    continue
+                path = os.path.join(root, filename).replace("\\", "/")
+                videos.append(path)
+    return {"video_dir": VIDEO_DIR, "video_dirs": [VIDEO_DIR, *EXTRA_VIDEO_DIRS], "videos": sorted(set(videos))}
 
 # Switch one camera's input; pixel calibration is namespaced by a hash of its source and restored on return.
 @app.post("/api/v1/config/cameras/{camera_id}/source")
@@ -1724,16 +1938,16 @@ _OVERLAY_ALIASES = {"pallet": "nvidia"}
 
 
 def _resolve_overlay_box_style(snap: Optional[Dict[str, Any]] = None) -> str:
-    """Read overlay style from live snapshot (edge) or local env; default foot."""
+    """Read overlay style from live snapshot (edge) or local env; default clean AABB."""
     if snap:
         style = snap.get("overlay_box_style") or (snap.get("models") or {}).get("overlay_box_style")
         if style:
             style = _OVERLAY_ALIASES.get(str(style).lower(), str(style).lower())
             if style in _OVERLAY_STYLES:
                 return style
-    raw = (os.environ.get("OVERLAY_BOX_STYLE") or "foot").strip().lower()
+    raw = (os.environ.get("OVERLAY_BOX_STYLE") or "aabb").strip().lower()
     raw = _OVERLAY_ALIASES.get(raw, raw)
-    return raw if raw in _OVERLAY_STYLES else "foot"
+    return raw if raw in _OVERLAY_STYLES else "aabb"
 
 
 @app.get("/api/v1/overlay")
@@ -1743,12 +1957,12 @@ def get_overlay_settings():
     style = _resolve_overlay_box_style(snap)
     return {
         "overlay_box_style": style,
-        "options": ["foot", "skeleton", "nvidia", "parallel", "aabb"],
-        "default": "foot",
+        "options": ["aabb", "foot", "skeleton", "nvidia", "parallel"],
+        "default": "aabb",
         "note": (
-            "Set OVERLAY_BOX_STYLE=foot|skeleton|nvidia|parallel|aabb on edge-analyzer (Compose) "
-            "and restart. Default foot = red ground mark + trail (tripwire/dwell use the same "
-            "point). nvidia = LocateAnything pallet look-alike (optional); pallet aliases to nvidia."
+            "Set OVERLAY_BOX_STYLE=aabb|foot|skeleton|nvidia|parallel on edge-analyzer and restart. "
+            "Default aabb = clipped person boxes + readable labels. Store-object boxes stay hidden unless "
+            "OVERLAY_SHOW_STORE_OBJECTS=1."
         ),
         "docs": "docs/models/foot-tracking-retail-models.md",
     }
@@ -1762,16 +1976,14 @@ def get_device_health():
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory().percent
     except ImportError:
-        cpu = 14.2
-        mem = 38.5
+        cpu = None
+        mem = None
     # Camera clocks are not phase-locked. Fusion uses same-edge receive monotonic timestamps.
     snap = _read_live_snapshot()
     # Never invent FPS — null until a live snapshot exists.
     pipeline_fps = None
     if snap and snap.get("infer_fps") is not None:
         pipeline_fps = float(snap.get("infer_fps") or 0)
-    elif snap and snap.get("decode_fps") is not None:
-        pipeline_fps = float(snap.get("decode_fps") or 0)
     models = (snap or {}).get("models") or {}
     fusion = (snap or {}).get("fusion") or {}
     perf_mode = (
@@ -1789,22 +2001,24 @@ def get_device_health():
     if _reg and _reg[1]:
         engine = _reg[1]
     else:
-        # Honest fallback until the edge self-registers (POST /api/v1/device/register).
-        engine = "PyTorch CPU (Docker)" if os.path.exists("/.dockerenv") else "PyTorch MPS (native; self-registration pending)"
+        # Do not infer an accelerator or backend before the worker registers.
+        engine = "CPU inference (Docker; not registered)" if os.path.exists("/.dockerenv") else "Runtime not registered"
+    has_fresh_live = bool(snap and not snap.get("_stale"))
     return {
         "device_id": "edge_node_macmini_01",
-        "device_name": "Apple Silicon Mac mini (Edge Node)",
+        "device_name": (_reg[0] if _reg and _reg[0] else "Edge node (not registered)"),
         "cpu_usage_percent": cpu,
         "memory_usage_percent": mem,
         "inference_engine": engine,
         "pipeline_fps": pipeline_fps,
         "decode_fps": snap.get("decode_fps") if snap else None,
         "infer_fps": snap.get("infer_fps") if snap else None,
+        "display_fps": snap.get("display_fps") if snap else None,
         "people_now": snap.get("people_now") if snap else None,
         "perf_mode": perf_mode,
         "overlay_box_style": _resolve_overlay_box_style(snap),
         "person_detector": models.get("person_detector") or models.get("detect_model"),
-        "status": "Healthy (Online)",
+        "status": "Healthy (Online)" if has_fresh_live else "Waiting for live data",
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "live_source": "live_snapshot" if snap and not snap.get("_stale") else "none",
         "clock_sync": {
@@ -1820,8 +2034,8 @@ def get_device_health():
             "backend": (snap or {}).get("reid", {}).get("backend") if snap else None,
             "gallery_size": (snap or {}).get("reid", {}).get("gallery_size") if snap else None,
             "flag": (
-                "models.reid.enabled: true + EDGE_PERF_MODE=quality "
-                "(ONNX OSNet/YouTu; session-scoped). Fast mode keeps ReID off for FPS."
+                "models.reid.enabled: true + owner ReID switch ON "
+                "(ONNX OSNet/YouTu; sampled, session-scoped; supported in fast mode)."
             ),
             "note": (
                 "Soft body ReID only — no face ID / multi-day gallery. "

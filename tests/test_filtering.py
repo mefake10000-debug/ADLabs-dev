@@ -15,7 +15,7 @@ class TestFalsePositiveFiltering(unittest.TestCase):
 
     def test_anthropometric_filtering(self):
         detector = PersonDetector(
-            model_name="yolov8n.pt",
+            model_name="models/yolo26n.pt",
             conf_thresh=0.50,
             min_height=85.0,
             min_width=30.0,
@@ -156,7 +156,7 @@ class TestFalsePositiveFiltering(unittest.TestCase):
         # There is no lower-accuracy fallback detector any more (the HOG one recovered ~7-14% of people on
         # real footage). A detector whose model failed to load must not look like a working one.
         with patch.dict(sys.modules, {"ultralytics": None}):   # makes `from ultralytics import YOLO` fail
-            detector = PersonDetector(model_name="yolov8n.pt")
+            detector = PersonDetector(model_name="models/yolo26n.pt")
         self.assertIsNone(detector.model)
         with self.assertLogs("src.perception.detector", level="ERROR") as logs:
             self.assertEqual(detector.detect(object()), [])
@@ -165,7 +165,7 @@ class TestFalsePositiveFiltering(unittest.TestCase):
     def test_require_model_makes_a_failed_model_load_a_startup_error(self):
         with patch.dict(sys.modules, {"ultralytics": None}):
             with self.assertRaises(RuntimeError) as ctx:
-                PersonDetector(model_name="yolov8n.pt", require_model=True)
+                PersonDetector(model_name="models/yolo26n.pt", require_model=True)
         self.assertIn("Refusing to run without a working detector", str(ctx.exception))
 
     def test_tripwire_lifetime_deduping(self):

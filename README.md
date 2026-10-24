@@ -3,9 +3,8 @@
 ## 🗺️ What's in this repo (plain-English map)
 
 If you're new here, start with these two files:
-- **[product.md](product.md)** — the plan: what problem we're solving and what we're
-  trying to build.
-- **[README.md](README.md)** (this file) — how to actually run it.
+- **[product.md](product.md)** — the plan: what problem we're solving and what we're trying to build.
+- **[README.md](README.md)** — how to actually run it.
 
 Then here's what every folder is, in one sentence each:
 
@@ -34,8 +33,95 @@ Then here's what every folder is, in one sentence each:
 | `docs/tools/` | "How do I prepare/record test footage?" |
 | `docs/handoff/` | A complete snapshot for someone picking this project up fresh. |
 
+For the exact model source paths and the process for adding one safely, start with
+[`docs/models/adding-models.md`](docs/models/adding-models.md). The model catalog,
+runtime loader, live worker, and dashboard each report different stages; a model is
+shown as running only when a fresh worker snapshot confirms it.
+
+The website lives in the separate sibling repository at `../website/`; it is not part of this repo.
 
 > **On-Premise Retail Edge AI & Computer Vision Analytics Platform for Existing CCTV Infrastructure**
+
+## Current local friend-review build (23 Oct 2026)
+
+This private `ADLabs-dev` checkout is being prepared under the `mefake10000-debug`
+account for personal review. Local follow-up work is in `fps-optimization-enhance`,
+created from `codex/local-model-repair`; those edits remain uncommitted and have not been pushed. The friend’s main branch is
+untouched. This checkout is the source for the Docker pilot run below.
+
+See [`docs/model-stack-evaluation-2026-10-23.md`](docs/model-stack-evaluation-2026-10-23.md)
+for the researched use-case scores and keep/disable decisions. The checked-in base
+profile defaults to one YOLO26n people detector. This machine's private local switch
+override additionally enables YOLOE, OSNet, and RTMPose. The all-role run now publishes
+every decoded frame and detects every third frame, but still does not reach 15 FPS.
+MiVOLO age/gender remains off unless its privacy gate is explicitly approved.
+
+The live path uses YOLO26n for person detections and ByteTrack IDs. Red foot marks are
+drawn together with visible person boxes and labels. The current local profile also
+turns on YOLOE product categories, OSNet short-visit ReID, and RTMPose foot refinement.
+CLIP and RF-DETR are alternate detector/product paths, not duplicate simultaneous
+workers. Shelf-gap requires an ROI; MiVOLO demographics remain privacy-gated. A model
+is shown ON only when runtime evidence confirms activity; otherwise it remains waiting/off.
+Counts and charts come from actual tracks, crossings, and calibrated zones; absent
+signals stay zero or unknown.
+
+Earlier detector-only Docker samples measured 4–9 inference FPS and 10–12 displayed
+FPS. With YOLOE products, OSNet ReID, and RTMPose enabled alongside YOLO26n, the latest
+live samples measured 1.2–2.4 inference FPS and 11.3–12.2 displayed FPS. One final
+Docker resource snapshot showed the edge worker at 311% CPU and 1.29 GiB memory; Docker
+still uses the host CPU. This does not meet the 15 FPS target.
+The entrance sample itself is 13.1 FPS, so its unique source frames cannot reach 15 FPS.
+The local profile uses 512-pixel detection input and samples the slower product/ReID
+models less often; it now draws full person boxes and IDs because foot-only marks were
+hard to read. Docker on Apple Silicon is CPU-only here and does not offload work from
+the host CPU. Meeting 15 FPS with all models active requires a hardware-accelerated edge
+runtime or a lower-cost model schedule; the current Mac/Docker combination has not
+demonstrated it. Garage and restaurant clips are mounted read-only at 20 and 25 FPS.
+Missing tripwires or zones produce zero/unknown values, not estimates.
+
+### Run this checkout in Docker
+
+Start Docker Desktop, then from this directory run:
+
+```bash
+docker compose -f docker-compose.yml -f compose.local-models.yaml \
+  up -d --build cloud-dashboard edge-analyzer
+```
+
+This local profile starts the API/dashboard and edge worker (two containers). It uses
+the selected local entrance clip and does not start the optional RTSP simulator. The
+two pilot images currently total about 3.5 GB. The obsolete 11 GB-class images and
+four stopped legacy containers were removed. Docker build cache was subsequently
+pruned; its verified current size is recorded in the audit below. See
+[`docs/docker-pilot-image-audit-2026-10-23.md`](docs/docker-pilot-image-audit-2026-10-23.md).
+The API is published at `http://localhost:8001`; the API docs are at
+`http://localhost:8001/docs`. The portal in `../website` can then run at port 3001
+with `EDGE_SIGHT_URL=http://127.0.0.1:8001` set at build and start time. Inspect with:
+
+```bash
+docker compose -f docker-compose.yml -f compose.local-models.yaml ps
+docker compose -f docker-compose.yml -f compose.local-models.yaml logs -f edge-analyzer
+```
+
+See [`docs/handoff/2026-10-23-local-live-review.md`](docs/handoff/2026-10-23-local-live-review.md)
+for the change log, state of verification, and exact file map. See
+[`docs/branch-map.md`](docs/branch-map.md) for the friend-review and working branches.
+The latest CPU/FPS, Docker, Vercel and Desktop audit is in
+[`docs/handoff/2026-10-23-performance-cleanup-audit.md`](docs/handoff/2026-10-23-performance-cleanup-audit.md).
+
+### Source and configuration map
+
+- `server/` — FastAPI endpoints, Streamlit dashboard, live session, source picker,
+  model switches, and telemetry presentation.
+- `src/ingestion/` — camera/video decoding and frame delivery.
+- `src/perception/` — people detection, tracking, model scheduling, and refiners.
+- `src/analytics/` — zones, tripwires, queues, dwell, safety, staff, and product signals.
+- `src/visualizer/` — person boxes, labels, foot points, and video overlays.
+- `configs/` — shared camera and pipeline defaults.
+- `local-runtime/` — local camera, pipeline, and model-switch settings for this machine.
+- `compose.local-models.yaml` — local footage/model mounts and the two-service Docker profile.
+- `docs/handoff/` — dated change notes, verification, schemas, and reviewer handoff.
+- `../website/` — separate sibling Next.js portal repository; it is not inside EdgeSight.
 
 ---
 
@@ -55,7 +141,10 @@ Brick-and-mortar retailers maintain substantial surveillance infrastructure (Hik
 
 ## 🐳 Containerized Architecture (`docker-compose.yml`)
 
-The platform is fully containerized into 3 modular services:
+The development Compose file defines three modular services. The local pilot overlay
+starts only the API/dashboard and edge worker; the RTSP simulator is optional and is
+not needed when using the selected local video file. This avoids running a third
+container at the pilot store:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -65,7 +154,7 @@ The platform is fully containerized into 3 modular services:
 │  │    rtsp-simulator     │             │          edge-analyzer          │  │
 │  │                       │             │                                 │  │
 │  │  • MediaMTX Server    │  RTSP       │  • StreamReader (Multi-threaded)│  │
-│  │  • FFmpeg Stream Loop │────────────►│  • YOLO Person Detector (FP16)  │  │
+│  │  • FFmpeg Stream Loop │────────────►│  • YOLO26n Person Detector (CPU)│  │
 │  │  • Feeds:             │  Port 8554  │  • ByteTrack Object Tracking    │  │
 │  │    /entrance          │             │  • Bidirectional Tripwires      │  │
 │  │    /checkout          │             │  • Dwell & Queue Analyzers      │  │
@@ -92,7 +181,7 @@ The platform is fully containerized into 3 modular services:
    * **Enables complete end-to-end development, testing, and demos without requiring live in-store CCTV IP addresses.**
 2. **`edge-analyzer`:**
    * Ingests RTSP streams or local video files via threaded `StreamReader`.
-   * Runs YOLOv8/v11 person detection (targeting class 0) with automatic hardware acceleration (Core ML / MPS on Apple Silicon, CUDA, or AVX CPU).
+   * The local Docker profile runs YOLO26n person detection on CPU with ByteTrack. Docker does not expose Apple Metal (MPS) in this setup; see the measured local rates above.
    * Tracks individual shoppers using IoU ByteTrack across frames.
    * Computes spatial retail telemetry: entrance/exit tripwires, polygonal dwell zones, and cashier queue wait-times.
    * Periodically saves 30-second metric rollups to local SQLite storage and flushes them to the cloud.
@@ -248,54 +337,3 @@ to zero when) — read that before trying to validate or debug a specific number
 * **Encrypted Communication:** TLS 1.3 encryption for cloud sync and local FileVault disk encryption.
 
 ---
-
-## 📂 Repository Structure
-
-```
-adlabs-edgesight/
-├── docker-compose.yml              # 3-service orchestration (simulator, edge, dashboard)
-├── configs/
-│   ├── cameras.yaml               # Camera stream URLs, tripwires, queue polygons
-│   └── pipeline.yaml              # Detection confidence, tracking params, rollup intervals
-├── data/
-│   ├── sample_videos/             # Sample retail test clips (entrance, checkout)
-│   └── storage/                   # Persisted SQLite databases
-├── docker/
-│   ├── Dockerfile.edge            # Python 3.11 edge CV analyzer image
-│   ├── Dockerfile.simulator       # MediaMTX + FFmpeg RTSP streaming image
-│   ├── Dockerfile.dashboard       # FastAPI + Streamlit analytics dashboard image
-│   └── simulator_entrypoint.sh    # Simulator stream broadcaster
-├── src/                           # Edge Processing Engine
-│   ├── main.py                    # Edge pipeline coordinator
-│   ├── ingestion/
-│   │   ├── stream_reader.py       # Threaded RTSP & video reader with reconnect logic
-│   │   └── frame_buffer.py        # Thread-safe ring buffer with drop-oldest policy
-│   ├── perception/
-│   │   ├── detector.py            # YOLOv8/v11 person detector (MPS/CUDA/CPU)
-│   │   └── tracker.py             # IoU ByteTrack multi-object tracking
-│   ├── analytics/
-│   │   ├── tripwire.py            # Bidirectional entrance/exit line counter
-│   │   ├── zones.py               # Polygon dwell time & occupancy calculator
-│   │   └── queue_analyzer.py      # Checkout queue wait-time & congestion alert engine
-│   ├── storage/
-│   │   ├── local_buffer.py        # Local SQLite database manager
-│   │   └── schema.sql             # Edge telemetry schema
-│   ├── telemetry/
-│   │   ├── exporter.py            # Cloud telemetry syncer with retry buffer
-│   │   └── health.py              # Uptime and resource health telemetry
-│   └── visualizer/
-│       └── debug_overlay.py       # OpenCV HUD for calibration and inspection
-├── server/                        # Cloud Receiver & Dashboard Service
-│   ├── app.py                     # FastAPI ingestion endpoint
-│   └── dashboard.py               # Streamlit real-time operations dashboard
-├── scripts/
-│   ├── generate_sample_video.py   # Procedural retail video generator
-│   ├── benchmark_performance.py   # Hardware inference benchmark tool
-│   └── run_edge.py                # Standalone native runner
-├── tests/
-│   └── test_pipeline_core.py      # Automated unit tests
-├── requirements-edge.txt          # Python dependencies for edge engine
-├── requirements-dashboard.txt     # Python dependencies for dashboard service
-├── product.md                     # Comprehensive market research & pilot strategy
-└── README.md                      # Project documentation (this file)
-```

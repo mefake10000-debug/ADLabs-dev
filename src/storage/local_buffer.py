@@ -1,16 +1,18 @@
 import sqlite3
 import os
+import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 class LocalBuffer:
     def __init__(self, db_path: str = "data/storage/edgesight.db"):
         self.db_path = db_path
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=10000")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -20,6 +22,7 @@ class LocalBuffer:
             schema_sql = f.read()
         conn = self._get_connection()
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             with conn:
                 conn.executescript(schema_sql)
                 self._migrate(conn)
@@ -40,6 +43,12 @@ class LocalBuffer:
     ]
 
     def _migrate(self, conn: sqlite3.Connection):
+        for table in ("store_rollups", "crossing_events", "product_interest"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if "record_id" not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN record_id TEXT")
+            conn.execute(f"UPDATE {table} SET record_id=lower(hex(randomblob(16))) WHERE record_id IS NULL")
+            conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_record_id ON {table}(record_id)")
         for table, column, decl in self._MIGRATIONS:
             existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
             if not existing:
@@ -55,16 +64,17 @@ class LocalBuffer:
             in_count, out_count, current_occupancy, avg_dwell_seconds,
             queue_length, avg_queue_wait_seconds, queue_alert_active,
             avg_attention_score, facing_ratio, phone_usage_rate, engaged_ratio,
-            group_count, people_in_groups, demographics_json, exported
+            group_count, people_in_groups, demographics_json, record_id, exported
         ) VALUES (
             :store_id, :device_id, :camera_id, :timestamp_start, :timestamp_end,
             :in_count, :out_count, :current_occupancy, :avg_dwell_seconds,
             :queue_length, :avg_queue_wait_seconds, :queue_alert_active,
             :avg_attention_score, :facing_ratio, :phone_usage_rate, :engaged_ratio,
-            :group_count, :people_in_groups, :demographics_json, 0
+            :group_count, :people_in_groups, :demographics_json, :record_id, 0
         )
         """
         payload = dict(rollup)
+        payload["record_id"] = uuid.uuid4().hex
         payload.setdefault("avg_attention_score", 0.0)
         payload.setdefault("facing_ratio", 0.0)
         payload.setdefault("phone_usage_rate", 0.0)
@@ -110,15 +120,15 @@ class LocalBuffer:
     def save_event(self, event: Dict[str, Any]) -> int:
         query = """
         INSERT INTO crossing_events (
-            store_id, device_id, camera_id, wire_id, track_id, direction, event_timestamp, exported
+            store_id, device_id, camera_id, wire_id, track_id, direction, event_timestamp, record_id, exported
         ) VALUES (
-            :store_id, :device_id, :camera_id, :wire_id, :track_id, :direction, :event_timestamp, 0
+            :store_id, :device_id, :camera_id, :wire_id, :track_id, :direction, :event_timestamp, :record_id, 0
         )
         """
         conn = self._get_connection()
         try:
             with conn:
-                cursor = conn.execute(query, event)
+                cursor = conn.execute(query, dict(event, record_id=uuid.uuid4().hex))
                 return cursor.lastrowid
         finally:
             conn.close()
@@ -166,16 +176,16 @@ class LocalBuffer:
         query = """
         INSERT INTO product_interest (
             store_id, device_id, camera_id, category, viewers, detections,
-            total_dwell_seconds, avg_dwell_seconds, timestamp_start, timestamp_end, exported
+            total_dwell_seconds, avg_dwell_seconds, timestamp_start, timestamp_end, record_id, exported
         ) VALUES (
             :store_id, :device_id, :camera_id, :category, :viewers, :detections,
-            :total_dwell_seconds, :avg_dwell_seconds, :timestamp_start, :timestamp_end, 0
+            :total_dwell_seconds, :avg_dwell_seconds, :timestamp_start, :timestamp_end, :record_id, 0
         )
         """
         conn = self._get_connection()
         try:
             with conn:
-                cursor = conn.execute(query, record)
+                cursor = conn.execute(query, dict(record, record_id=uuid.uuid4().hex))
                 return cursor.lastrowid
         finally:
             conn.close()
@@ -235,5 +245,36 @@ class LocalBuffer:
         try:
             with conn:
                 conn.execute(query, product_ids)
+        finally:
+            conn.close()
+
+    def maintenance(self, retention_days: int = 7) -> int:
+        """Prune acknowledged history only; pending records are never evicted."""
+        if retention_days < 1:
+            raise ValueError("retention_days must be positive")
+        conn = self._get_connection()
+        deleted = 0
+        try:
+            with conn:
+                for table in ("store_rollups", "crossing_events", "product_interest"):
+                    cursor = conn.execute(f"DELETE FROM {table} WHERE exported=1 AND created_at < datetime('now', ?)", (f"-{retention_days} days",))
+                    deleted += cursor.rowcount
+                conn.execute("DELETE FROM camera_health WHERE timestamp < datetime('now', ?)", (f"-{retention_days} days",))
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            return deleted
+        finally:
+            conn.close()
+
+    def backlog_stats(self) -> Dict[str, Any]:
+        conn = self._get_connection()
+        try:
+            pending = 0
+            oldest = None
+            for table in ("store_rollups", "crossing_events", "product_interest"):
+                count, stamp = conn.execute(f"SELECT count(*), min(created_at) FROM {table} WHERE exported=0").fetchone()
+                pending += count
+                if stamp and (oldest is None or stamp < oldest):
+                    oldest = stamp
+            return {"pending_records": pending, "oldest_pending_at": oldest}
         finally:
             conn.close()

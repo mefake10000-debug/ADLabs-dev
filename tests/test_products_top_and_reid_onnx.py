@@ -43,6 +43,25 @@ class TestProductsTopShape(unittest.TestCase):
         self.assertEqual(products_top[0]["category"], "handbag")
         self.assertGreaterEqual(products_top[0]["viewers"], 1)
 
+    def test_snapshot_drops_categories_when_the_current_inference_has_no_detections(self):
+        analyzer = ProductInterestAnalyzer(engagement_radius_px=200.0, min_dwell_seconds=0.5)
+        track = _FakeTrack(1, (100.0, 100.0))
+        detection = {"label": "handbag", "bbox": [90.0, 80.0, 110.0, 120.0]}
+        analyzer.observe([detection], [track], 1.0)
+        analyzer.observe([detection], [track], 2.0)
+        analyzer.observe([], [track], 3.0)
+        self.assertEqual(analyzer.snapshot()["products"], [])
+
+    def test_viewers_in_live_snapshot_do_not_include_people_from_finished_tracks(self):
+        analyzer = ProductInterestAnalyzer(engagement_radius_px=200.0, min_dwell_seconds=0.5)
+        track = _FakeTrack(1, (100.0, 100.0))
+        detection = {"label": "handbag", "bbox": [90.0, 80.0, 110.0, 120.0]}
+        analyzer.observe([detection], [track], 1.0)
+        analyzer.observe([detection], [track], 2.0)
+        analyzer.prune([])
+        analyzer.observe([detection], [], 3.0)
+        self.assertEqual(analyzer.snapshot()["products"][0]["viewers"], 0)
+
 
 class TestPromptFreeLabelMap(unittest.TestCase):
     def test_maps_yoloe_names(self):
