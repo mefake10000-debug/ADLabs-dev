@@ -1,52 +1,29 @@
 import os
 import sys
+import argparse
+import copy
 import time
 import json
 import signal
 import yaml
 import logging
 import threading
-from typing import Dict, List, Any, Optional
-
-
-def _lifetime_product_rows(rows: Any, people_now: int) -> bool:
-    """All-time product SQL sums are not a live frame KPI."""
-    if not isinstance(rows, list) or not rows:
-        return False
-    viewers = 0
-    detections = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            viewers = max(viewers, int(row.get("viewers") or 0))
-            detections = max(detections, int(row.get("detections") or 0))
-        except (TypeError, ValueError):
-            continue
-    cap = max(int(people_now or 0), 1) * 50
-    return viewers > max(cap, 200) or detections > max(cap * 4, 800)
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Dict, List, Any, Optional
 
 from src.ingestion.stream_reader import StreamReader
-from src.perception.detector import PersonDetector, is_person_detection
-
-
-def _object_layer(dets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Overlay objects only. Person boxes never share this layer or a track id."""
-    out: List[Dict[str, Any]] = []
-    for det in dets or []:
-        if not isinstance(det, dict) or is_person_detection(det):
-            continue
-        out.append(det)
-    return out
+from src.perception.detector import PersonDetector
 from src.perception.tracker import SimpleByteTracker, tracker_params_for_infer_gap
 from src.perception.performance import limit_cameras, resolve_performance
+from src.perception.async_pose import AsyncPoseRefiner
 from src.perception.detector_backend import BACKEND_RFDETR, backend_label
 from src.perception.registry import ModelRegistry, ModelSpec, select_device, TIER_FAST, TIER_SLOW
-from src.perception.model_stack import demographics_env_enabled
+from src.perception.model_stack import demographics_env_enabled, dpia_gate_ok
 from src.perception.pose_estimator import PoseEstimator, match_pose_to_track
 from src.perception.rtmpose_estimator import RTMPoseFootEstimator, resolve_rtmpose_onnx
 from src.analytics.pose_fall_candidate import status as pose_fall_status
-from src.analytics.shelf_gap_geometry import snapshot as shelf_gap_snapshot
+from src.analytics.shelf_gap_geometry import snapshot_from_products as shelf_gap_snapshot
 from src.perception.face_detector import FaceDetector, face_inside_box, crop_face, align_face
 from src.perception.age_gender import AgeGenderEstimator
 from src.perception.head_pose import HeadPoseEstimator
@@ -63,11 +40,15 @@ from src.analytics.glass_analyzer import GlassROIAnalyzer, build_glass_block
 from src.analytics.floor_analytics import FloorAnalytics
 from src.analytics.alerts_engine import AlertsEngine
 from src.analytics.safety_analytics import SafetyAnalytics
+from src.analytics.cross_camera_fusion import CrossCameraFusion, project_homography
 from src.analytics.journey import build_journey_block
 from src.analytics.staff_response import StaffQueueResponseTracker, build_staff_block
 from src.storage.local_buffer import LocalBuffer
 from src.telemetry.exporter import TelemetryExporter
 from src.telemetry.health import HealthMonitor
+from src.runtime_lock import acquire_runtime_lock, runtime_lock_is_held
+from src.runtime.supervisor import notify_worker_ready
+from server.model_switches import active_model_names, read_controls
 from src.visualizer.debug_overlay import DebugOverlay, resolve_overlay_box_style
 from src.perception.reid import ReIdEmbedding, SoftReIdExtractor, SoftReIdGallery
 
@@ -84,12 +65,13 @@ logging.basicConfig(
 logger = logging.getLogger("ADLabs-EdgeSight")
 
 class EdgePipeline:
-    def __init__(self, pipeline_config_path: str, cameras_config_path: str):
+    def __init__(self, pipeline_config_path: str, cameras_config_path: str, camera_config_override: Optional[Dict[str, Any]] = None):
         self.pipeline_cfg = self._load_yaml(pipeline_config_path)
-        self.cameras_cfg = self._load_yaml(cameras_config_path)
+        self.cameras_cfg = camera_config_override if camera_config_override is not None else self._load_yaml(cameras_config_path)
 
         self.store_id = self.pipeline_cfg.get("edge", {}).get("store_id", "store_default")
         self.device_id = self.pipeline_cfg.get("edge", {}).get("device_id", "edge_01")
+        self.source_session_id = uuid.uuid4().hex
         self.alerts_engine = AlertsEngine()
         self.staff_response = StaffQueueResponseTracker(
             response_timeout_seconds=float(
@@ -128,8 +110,8 @@ class EdgePipeline:
         self.live_dir = os.path.join(os.path.dirname(db_path), "live")
         os.makedirs(self.live_dir, exist_ok=True)
 
-        # Performance preset (EDGE_PERF_MODE / performance.mode). Balanced is the
-        # Docker Mac ARM demo default — see docs/live-fps.md.
+        # Performance preset (EDGE_PERF_MODE / performance.mode). Detect
+        # (yolo26s @ 640, infer every 2) is the Docker demo default — see docs/performance/live-fps.md.
         self.perf = resolve_performance(self.pipeline_cfg)
         self.perf_mode = self.perf["mode"]
         self.infer_every_n = int(self.perf["infer_every_n"])
@@ -141,10 +123,14 @@ class EdgePipeline:
             os.environ.get("EDGESIGHT_DETECT_MODEL")
             or self.perf.get("model_name")
             or p_cfg.get("model_name")
-            or "yolov8n.pt"
+            or "models/yolo26n.pt"
         )
-        conf_thresh = float(p_cfg.get("confidence_threshold", 0.20))
-        object_conf = float(p_cfg.get("object_confidence_threshold", 0.50))
+        # Detect mode pins person conf to 0.20–0.25. Other modes keep yaml.
+        if self.perf.get("person_conf") is not None:
+            conf_thresh = float(self.perf["person_conf"])
+        else:
+            conf_thresh = p_cfg.get("confidence_threshold", 0.50)
+        object_conf = float(self.perf.get("object_conf") or p_cfg.get("object_confidence") or 0.45)
         iou_thresh = p_cfg.get("iou_threshold", 0.45)
         min_height = p_cfg.get("min_height", 85.0)
         min_width = p_cfg.get("min_width", 30.0)
@@ -171,7 +157,10 @@ class EdgePipeline:
             rfdetr_weights=self.perf.get("rfdetr_weights"),
             pipeline_cfg=self.pipeline_cfg,
             object_conf=object_conf,
+            detect_store_objects=bool(p_cfg.get("detect_store_objects", True)),
         )
+        self.person_conf = float(conf_thresh)
+        self.object_conf = float(object_conf)
 
         # Mirror person detector into the registry (ultralytics or rfdetr kind).
         self.registry = ModelRegistry(os.getcwd())
@@ -223,8 +212,8 @@ class EdgePipeline:
         # untouched. These models add the retail-analytics detail the fast tier cannot
         # see: body behaviour, head orientation, population cohorts and products.
         self.models_cfg = self.pipeline_cfg.get("models", {}) or {}
-        # Enrichment tier is EXPLICIT: fast/balanced force it off; quality keeps the
-        # models.* yaml gating truthful (no silent re-enable). EDGE_ENRICHMENT overrides.
+        # Enrichment tier is EXPLICIT: fast/balanced/detect force it off; quality keeps
+        # the models.* yaml gating truthful (no silent re-enable). EDGE_ENRICHMENT overrides.
         _env_enrichment = os.environ.get("EDGE_ENRICHMENT")
         if _env_enrichment is not None:
             self.models_enabled = _env_enrichment not in ("", "0", "false", "False")
@@ -232,7 +221,7 @@ class EdgePipeline:
                 f"EDGE_ENRICHMENT={_env_enrichment} env override — enrichment "
                 f"{'ON' if self.models_enabled else 'OFF'}"
             )
-        elif self.perf_mode in ("fast", "balanced"):
+        elif self.perf_mode in ("fast", "balanced", "detect") or not self.perf.get("enrichment"):
             self.models_enabled = False
         else:
             self.models_enabled = bool(self.models_cfg.get("enabled", True))
@@ -262,19 +251,27 @@ class EdgePipeline:
         # self.registry already created with the person detector entry above.
         self.pose_estimator = None
         self.rtmpose = None
+        self.rtmpose_refiner = None
         self.face_detector = None
         self.age_gender = None
         self.head_pose = None
         self.world_detector = None
         self.model_errors: Dict[str, str] = {}
+        self._slow_model_locks = {
+            name: threading.Lock() for name in ("pose", "face", "products", "demographics", "reid")
+        }
 
         if self.models_enabled:
             self._init_enrichment_models()
         self._init_rtmpose()
+        if self.rtmpose is not None:
+            self.rtmpose_refiner = AsyncPoseRefiner(self.rtmpose)
 
         reid_cfg = (self.models_cfg.get("reid") or {}) if getattr(self, "models_cfg", None) is not None else {}
-        # Fast/balanced keep ReID off; quality still requires models.reid.enabled: true.
-        reid_enabled = bool(reid_cfg.get("enabled", False)) and self.perf_mode == "quality"
+        # ReID is explicitly sampled at a low cadence, so it may run in fast mode
+        # when both the profile and owner switch enable it. Do not silently force
+        # this separate short-visit role to quality mode.
+        reid_enabled = bool(reid_cfg.get("enabled", False)) and read_controls()["reid"]
         self.reid_cfg = reid_cfg
         self.reid_extractor = SoftReIdExtractor(
             weights=reid_cfg.get("weights"),
@@ -285,6 +282,36 @@ class EdgePipeline:
         )
         self.reid_gallery = SoftReIdGallery(
             max_age_seconds=float(reid_cfg.get("gallery_ttl_seconds", 3600)),
+        )
+        fusion_cfg = self.pipeline_cfg.get("cross_camera_fusion", {}) or {}
+        shared_zone_cameras: Dict[str, set] = {}
+        camera_homographies: Dict[str, Any] = {}
+        for camera in self.cameras_cfg.get("cameras", []) or []:
+            camera_id = str(camera.get("id", ""))
+            if camera.get("floor_homography") is not None:
+                camera_homographies[camera_id] = camera.get("floor_homography")
+            for zone in camera.get("zones", []) or []:
+                if zone.get("type", "dwell") == "staff":
+                    continue
+                store_zone_id = zone.get("store_zone_id")
+                if store_zone_id:
+                    shared_zone_cameras.setdefault(str(store_zone_id), set()).add(camera_id)
+        self.cross_camera_fusion = CrossCameraFusion(
+            requested_enabled=bool(fusion_cfg.get("enabled", False)),
+            reid_active=self.reid_extractor.active,
+            shared_zone_cameras=shared_zone_cameras,
+            camera_homographies=camera_homographies,
+            association_window_seconds=float(fusion_cfg.get("association_window_seconds", 1.5)),
+            cosine_threshold=float(fusion_cfg.get("cosine_similarity_min", 0.86)),
+            max_floor_distance_m=float(fusion_cfg.get("max_floor_distance_m", 2.5)),
+            gallery_ttl_seconds=float(fusion_cfg.get("gallery_ttl_seconds", 20.0)),
+        )
+        logger.info(
+            "Cross-camera fusion requested=%s enabled=%s gate=%s mapped_zones=%s",
+            bool(fusion_cfg.get("enabled", False)),
+            self.cross_camera_fusion.enabled,
+            self.cross_camera_fusion.gate_reason,
+            len(self.cross_camera_fusion.shared_zone_cameras),
         )
 
         logger.info(
@@ -336,7 +363,7 @@ class EdgePipeline:
             failed assertion _status < MTLCommandBufferStatusCommitted
             in -[IOGPUMetalCommandBuffer setCurrentCommandEncoder:]
 
-        (reproduced by scripts/check_mps_concurrency.py). So when the fast tier owns
+        (reproduced by scripts/dev-tools/check_mps_concurrency.py). So when the fast tier owns
         MPS, the enrichment tier runs on the CPU instead. The enrichment tier is
         deliberately low-frequency, so CPU inference there costs nothing that matters.
 
@@ -372,13 +399,14 @@ class EdgePipeline:
         prod_cfg = self.models_cfg.get("products", {}) or {}
 
         # DPIA / k-anon latch: ENABLE_DEMOGRAPHICS defaults off — never load MiVOLO/age path live.
-        if not demographics_env_enabled():
+        if not (demographics_env_enabled() and dpia_gate_ok()):
             demo_cfg["enabled"] = False
             self.models_cfg["demographics"] = demo_cfg
             logger.info(
-                "Demographics model gated off (ENABLE_DEMOGRAPHICS=%s). "
-                "Set ENABLE_DEMOGRAPHICS=1 and DEMOGRAPHICS_DPIA_OK=1 after DPIA + k≥10 wiring.",
+                "Demographics model gated off (ENABLE_DEMOGRAPHICS=%s, DPIA gate=%s). "
+                "Set both the explicit enable and DPIA gate after k≥10 wiring.",
                 os.environ.get("ENABLE_DEMOGRAPHICS", "0"),
+                dpia_gate_ok(),
             )
 
         if pose_cfg.get("enabled", True):
@@ -398,7 +426,10 @@ class EdgePipeline:
                 capability="face", tier=TIER_SLOW,
                 params={"intra_op_num_threads": self.enrichment_threads},
             ))
-        if demo_cfg.get("enabled", True):
+        mivolo_dir = demo_cfg.get("mivolo_directory")
+        # MiVOLO and the legacy age_gender ONNX both produce age/gender
+        # estimates. Load only the explicitly selected estimator.
+        if demo_cfg.get("enabled", True) and not mivolo_dir:
             demo_path = self._resolve_demographics_weights(demo_cfg)
             self.registry.register(ModelSpec(
                 key="demographics", kind="onnx", path=demo_path,
@@ -461,7 +492,7 @@ class EdgePipeline:
                 self.model_errors["face"] = str(e)
                 logger.error(f"Face detector unavailable: {e}")
 
-        if demo_cfg.get("enabled", True):
+        if demo_cfg.get("enabled", True) and not mivolo_dir:
             session = self.registry.get("demographics")
             if session is not None:
                 self.age_gender = AgeGenderEstimator(
@@ -470,6 +501,15 @@ class EdgePipeline:
                 )
             else:
                 self.model_errors["demographics"] = self.registry.error("demographics") or "unavailable"
+
+        if demo_cfg.get("enabled") and mivolo_dir:
+            try:
+                from src.perception.mivolo_estimator import MiVoloEstimator
+                self.age_gender = MiVoloEstimator(mivolo_dir)
+                logger.info("MiVOLO v2 demographics estimator loaded from %s", mivolo_dir)
+            except Exception as error:
+                self.model_errors["mivolo_v2"] = str(error)
+                logger.error("MiVOLO v2 failed: %s", error)
 
         if head_cfg.get("enabled", True):
             self.head_pose = HeadPoseEstimator(focal_scale=float(head_cfg.get("focal_scale", 1.0)))
@@ -512,11 +552,7 @@ class EdgePipeline:
 
     def _init_rtmpose(self) -> None:
         """Load RTMPose-t/s ONNX for ankle feet (rtmlib preferred)."""
-        # Default off. Skeleton style opts in. Explicit ENABLE_RTMPOSE still wins.
-        raw_flag = os.environ.get("ENABLE_RTMPOSE")
-        if raw_flag is None or str(raw_flag).strip() == "":
-            raw_flag = "1" if resolve_overlay_box_style() == "skeleton" else "0"
-        flag = str(raw_flag).strip().lower()
+        flag = (os.environ.get("ENABLE_RTMPOSE") or "1").strip().lower()
         if flag in ("0", "false", "off", "no"):
             logger.info("RTMPose disabled (ENABLE_RTMPOSE=%s).", flag)
             return
@@ -546,26 +582,12 @@ class EdgePipeline:
         )
 
     def _apply_rtmpose_feet(self, tracks: List[Any], frame: Any, ctx: Dict[str, Any]) -> None:
-        if self.rtmpose is None or not tracks or frame is None:
+        if self.rtmpose is None or not read_controls()["rtmpose"] or not tracks or frame is None:
             return
         every = int(getattr(self, "rtmpose_every_n", 4) or 4)
-        tick = int(ctx.get("rtmpose_tick", 0) or 0) + 1
-        ctx["rtmpose_tick"] = tick
-        if tick % every != 0:
-            return
-        try:
-            poses = self.rtmpose.estimate_on_bboxes(frame, [t.bbox for t in tracks])
-        except Exception as e:  # noqa: BLE001
-            logger.debug("RTMPose pass failed: %s", e)
-            return
-        for track, pose in zip(tracks, poses):
-            foot = pose.get("foot_point")
-            if foot:
-                track.set_pose(
-                    foot=(float(foot[0]), float(foot[1])),
-                    keypoints=pose.get("keypoints"),
-                    keypoints_xy=pose.get("keypoints_xy"),
-                )
+        refiner = getattr(self, "rtmpose_refiner", None)
+        if refiner is not None:
+            refiner.update(tracks, frame, every_n=every)
 
     def _resolve_demographics_weights(self, demo_cfg: Dict[str, Any]) -> str:
         """Picks the demographics checkpoint to load.
@@ -618,9 +640,10 @@ class EdgePipeline:
                 )
                 sz.expected_on_post = z.get("expected_on_post")
                 sz.linked_queue_ids = list(z.get("linked_queue_ids") or [])
+                sz.store_zone_id = z.get("store_zone_id")
                 staff_zones.append(sz)
             elif ztype == "queue":
-                queues.append(QueueAnalyzer(
+                queue = QueueAnalyzer(
                     zone_id=z["id"],
                     name=z.get("name", z["id"]),
                     polygon=z["polygon"],
@@ -631,7 +654,9 @@ class EdgePipeline:
                     alert_wait_ms=z.get("alert_wait_ms"),
                     alert_length=z.get("alert_length"),
                     staff_zone_id=z.get("staff_zone_id"),
-                ))
+                )
+                queue.store_zone_id = z.get("store_zone_id")
+                queues.append(queue)
             elif ztype == "glass":
                 glass_rois.append(GlassROIAnalyzer(
                     glass_id=z["id"],
@@ -649,6 +674,7 @@ class EdgePipeline:
                     zone_type=ztype,
                     exit_grace_seconds=grace
                 )
+                zone.store_zone_id = z.get("store_zone_id")
                 if z.get("zone_capacity_people") is not None:
                     zone.zone_capacity_people = z.get("zone_capacity_people")
                 if z.get("blocked_grace_seconds") is not None:
@@ -677,17 +703,23 @@ class EdgePipeline:
             "tripwires": cam.get("tripwires", []),
             "zones": cam.get("zones", []),
             "glass_views": cam.get("glass_views", []),
+            "floor_homography": cam.get("floor_homography"),
         }, sort_keys=True)
 
     def _make_tracker(self) -> SimpleByteTracker:
         """ByteTrack knobs aligned with ``infer_every_n`` (skipped frames break IDs)."""
         t_cfg = self.pipeline_cfg.get("tracking", {}) or {}
+        perf_cfg = getattr(self, "perf", {}) or {}
         scaled = tracker_params_for_infer_gap(
             int(getattr(self, "infer_every_n", 1) or 1),
             track_buffer=int(t_cfg.get("track_buffer", 45)),
             match_thresh=float(t_cfg.get("match_thresh", 0.45)),
             min_hits=int(t_cfg.get("min_hits", 4)),
-            track_thresh=float(t_cfg.get("track_thresh", 0.5)),
+            track_thresh=float(
+                perf_cfg["track_thresh"]
+                if perf_cfg.get("track_thresh") is not None
+                else t_cfg.get("track_thresh", 0.5)
+            ),
         )
         return SimpleByteTracker(
             max_age=scaled["max_age"],
@@ -698,6 +730,40 @@ class EdgePipeline:
             dist_gate=scaled["dist_gate"],
             pred_dist_gate=scaled["pred_dist_gate"],
             infer_every_n=scaled["infer_every_n"],
+        )
+
+    def _refresh_cross_camera_fusion(self) -> None:
+        """Rebuild fusion gates after camera coverage or homography config changes."""
+        if not hasattr(self, "reid_extractor"):
+            return
+        fusion_cfg = self.pipeline_cfg.get("cross_camera_fusion", {}) or {}
+        shared_zone_cameras: Dict[str, set] = {}
+        camera_homographies: Dict[str, Any] = {}
+        for camera in self.cameras_cfg.get("cameras", []) or []:
+            camera_id = str(camera.get("id", ""))
+            if camera.get("floor_homography") is not None:
+                camera_homographies[camera_id] = camera.get("floor_homography")
+            for zone in camera.get("zones", []) or []:
+                if zone.get("type", "dwell") == "staff":
+                    continue
+                store_zone_id = zone.get("store_zone_id")
+                if store_zone_id:
+                    shared_zone_cameras.setdefault(str(store_zone_id), set()).add(camera_id)
+        self.cross_camera_fusion = CrossCameraFusion(
+            requested_enabled=bool(fusion_cfg.get("enabled", False)),
+            reid_active=self.reid_extractor.active,
+            shared_zone_cameras=shared_zone_cameras,
+            camera_homographies=camera_homographies,
+            association_window_seconds=float(fusion_cfg.get("association_window_seconds", 1.5)),
+            cosine_threshold=float(fusion_cfg.get("cosine_similarity_min", 0.86)),
+            max_floor_distance_m=float(fusion_cfg.get("max_floor_distance_m", 2.5)),
+            gallery_ttl_seconds=float(fusion_cfg.get("gallery_ttl_seconds", 20.0)),
+        )
+        logger.info(
+            "Cross-camera fusion refreshed enabled=%s gate=%s mapped_zones=%s",
+            self.cross_camera_fusion.enabled,
+            self.cross_camera_fusion.gate_reason,
+            len(self.cross_camera_fusion.shared_zone_cameras),
         )
 
     def _build_camera_context(self, cam: Dict[str, Any]) -> Dict[str, Any]:
@@ -735,6 +801,7 @@ class EdgePipeline:
             "name": cam.get("name", cam_id),
             "source": source,
             "fps_target": fps_target,
+            "floor_homography": cam.get("floor_homography"),
             "calibration_sig": self._calibration_signature(cam),
             "reader": StreamReader(camera_id=cam_id, source=source, fps_target=fps_target),
             "tracker": self._make_tracker(),
@@ -785,15 +852,20 @@ class EdgePipeline:
             "slow_ticks": 0,
             "demo_cursor": 0,
             "slow_thread": None,
+            "display_thread": None,
         }
 
     def _init_cameras(self):
-        cams = list(self.cameras_cfg.get("cameras", []))
-        limited = limit_cameras(cams, self.perf.get("max_cameras"))
+        cams = [
+            camera for camera in self.cameras_cfg.get("cameras", [])
+            if isinstance(camera, dict) and camera.get("enabled", True) is not False
+        ]
+        max_cameras = (getattr(self, "perf", {}) or {}).get("max_cameras")
+        limited = limit_cameras(cams, max_cameras)
         if len(limited) < len(cams):
             logger.info(
                 "EDGE_MAX_CAMERAS / performance.max_cameras=%s — using %s of %s cameras for FPS budget",
-                self.perf.get("max_cameras"),
+                max_cameras,
                 len(limited),
                 len(cams),
             )
@@ -801,8 +873,103 @@ class EdgePipeline:
             self.camera_contexts[cam["id"]] = self._build_camera_context(cam)
             logger.info(f"Initialized pipeline for camera: {cam.get('name', cam['id'])} ({cam['id']})")
 
+    @staticmethod
+    def _display_tracks_at_time(tracks: List[Any], frame_time: float, frame_shape: Any) -> List[Any]:
+        """Project cached boxes a short distance for display between detector passes.
+
+        Projection is display-only; analytics and tracking continue to use observed
+        boxes. The 0.35 s / 30%-height caps prevent stale tracks from drifting away.
+        """
+        height, width = frame_shape[:2]
+        projected = []
+        for track in tracks:
+            dt = min(0.35, max(0.0, frame_time - float(getattr(track, "last_seen", frame_time))))
+            velocity = getattr(track, "velocity", (0.0, 0.0)) or (0.0, 0.0)
+            dx, dy = float(velocity[0]) * dt, float(velocity[1]) * dt
+            box = list(getattr(track, "bbox", []) or [])
+            if len(box) >= 4:
+                box_h = max(1.0, float(box[3]) - float(box[1]))
+                distance = (dx * dx + dy * dy) ** 0.5
+                limit = min(float(max(width, height)), box_h * 0.30)
+                if distance > limit and distance > 0:
+                    dx, dy = dx * limit / distance, dy * limit / distance
+                if dt > 0:
+                    shown = copy.copy(track)
+                    shown.bbox = [
+                        max(0.0, min(float(width), float(box[0]) + dx)),
+                        max(0.0, min(float(height), float(box[1]) + dy)),
+                        max(0.0, min(float(width), float(box[2]) + dx)),
+                        max(0.0, min(float(height), float(box[3]) + dy)),
+                    ]
+                    pose_foot = getattr(track, "pose_foot", None)
+                    if pose_foot is not None:
+                        shown.pose_foot = (
+                            max(0.0, min(float(width), float(pose_foot[0]) + dx)),
+                            max(0.0, min(float(height), float(pose_foot[1]) + dy)),
+                        )
+                    projected.append(shown)
+                    continue
+            projected.append(track)
+        return projected
+
+    def _start_display_tier(self, ctx: Dict[str, Any]) -> None:
+        """Publish each unique captured frame independently of model inference."""
+        cam_id = ctx.get("camera_id", "camera")
+
+        def _worker():
+            last_frame_idx = -1
+            while self.running and ctx["reader"].running:
+                item = ctx["reader"].peek_latest_frame()
+                if item is None or item[0] == last_frame_idx:
+                    time.sleep(0.004)
+                    continue
+                frame_idx, stamp, frame = item
+                last_frame_idx = frame_idx
+                frame_time = stamp.utc if hasattr(stamp, "utc") else float(stamp)
+                tracks = self._display_tracks_at_time(
+                    list(ctx.get("last_overlay_tracks") or []), frame_time, frame.shape
+                )
+                try:
+                    draw_kwargs = dict(
+                        frame=frame,
+                        tracks=tracks,
+                        tripwires=list(ctx.get("tripwires") or []),
+                        zones=list(ctx.get("zones") or []),
+                        queues=list(ctx.get("queues") or []),
+                        camera_name=ctx["name"],
+                        fps=ctx["reader"].fps_actual,
+                        infer_fps=ctx.get("processed_fps", 0.0),
+                    )
+                    try:
+                        annotated = DebugOverlay.draw_pipeline(
+                            **draw_kwargs,
+                            staff_zones=list(ctx.get("staff_zones") or []),
+                            staff_ids=set(ctx.get("staff_ids") or set()),
+                            objects=list(ctx.get("last_overlay_objects") or []),
+                        )
+                    except TypeError:
+                        annotated = DebugOverlay.draw_pipeline(**draw_kwargs)
+                    frame_path = os.path.join(self.frames_dir, f"{cam_id}.jpg")
+                    tmp_path = os.path.join(self.frames_dir, f"{cam_id}.tmp.jpg")
+                    if cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 70]):
+                        os.replace(tmp_path, frame_path)
+                        ctx["display_window_frames"] = int(ctx.get("display_window_frames", 0) or 0) + 1
+                        dwin = time.time() - float(ctx.get("display_window_start", time.time()))
+                        if dwin >= 2.0:
+                            ctx["display_fps"] = round(ctx["display_window_frames"] / dwin, 1)
+                            ctx["display_window_start"] = time.time()
+                            ctx["display_window_frames"] = 0
+                except Exception as e:
+                    logger.debug("Frame publish error for %s: %s", cam_id, e)
+
+        thread = threading.Thread(target=_worker, name=f"Display-{cam_id}", daemon=True)
+        ctx["display_thread"] = thread
+        thread.start()
+        logger.info("Independent live display publisher started for camera '%s'.", cam_id)
+
     def start(self):
         self.running = True
+        self._processing_ready_notified = False
         self.exporter.start()
 
         import threading as _threading
@@ -812,6 +979,7 @@ class EdgePipeline:
         for ctx in self.camera_contexts.values():
             ctx["reader"].start()
             self._start_slow_tier(ctx)
+            self._start_display_tier(ctx)
 
         logger.info(f"AD Labs EdgeSight running for store '{self.store_id}'. Processing active streams...")
 
@@ -824,23 +992,30 @@ class EdgePipeline:
                         continue
 
                     frame_idx, stamp, frame = item
+                    if not self._processing_ready_notified:
+                        notify_worker_ready()
+                        self._processing_ready_notified = True
                     # stamp.utc = wall clock (tripwire/zones); stamp.mono = interval-safe
                     frame_time = stamp.utc if hasattr(stamp, "utc") else float(stamp)
+                    frame_time_mono = getattr(stamp, "mono", frame_time)
                     ctx["frames_processed"] += 1
                     ctx["last_capture_ts_utc"] = frame_time
-                    ctx["last_capture_ts_mono"] = getattr(stamp, "mono", frame_time)
+                    ctx["last_capture_ts_mono"] = frame_time_mono
 
                     # Display vs analytics cadence: decode every frame for a smooth MJPEG
                     # path; run detect+track only every infer_every_n frames.
                     do_infer = (ctx["frames_processed"] % self.infer_every_n) == 0
 
-                    if self.models_enabled:
+                    controls = read_controls()
+                    if (self.models_enabled or bool(getattr(self.reid_extractor, "active", False))) and any(
+                        controls[key] for key in ("pose", "face", "products", "demographics", "reid")
+                    ):
                         # Publish the frame for the enrichment tier. The slow worker runs
                         # in its own thread, so it gets its own copy: the debug overlay
                         # draws on this buffer in place and a half-drawn frame would be
                         # nonsense to a face model.
                         with ctx["frame_lock"]:
-                            ctx["latest_frame"] = (frame_idx, frame_time, frame.copy())
+                            ctx["latest_frame"] = (frame_idx, frame_time, frame_time_mono, frame.copy())
 
                     if do_infer:
                         # Inference throughput (frames actually run through detect+track).
@@ -852,72 +1027,38 @@ class EdgePipeline:
                             ctx["fps_window_frames"] = 0
 
                         # 1. Perception — Ultralytics YOLO people (+ COCO store objects for overlay)
-                        if hasattr(self.detector, "detect_frame"):
+                        controls = read_controls()
+                        if not controls["person_detector"]:
+                            detections, store_objects = [], []
+                        elif hasattr(self.detector, "detect_frame"):
                             detections, store_objects = self.detector.detect_frame(frame)
                         else:
                             detections = self.detector.detect(frame)
                             store_objects = []
                         # Open-vocab (YOLOE / YOLO-World) labels when enrichment last wrote them.
                         ov_objects = list(ctx.get("last_overlay_objects_ov") or [])
-                        ctx["last_overlay_objects"] = _object_layer(list(store_objects) + ov_objects)
+                        ctx["last_overlay_objects"] = list(store_objects) + ov_objects
 
                         # 2. Tracking (people only — store objects are visual labels)
                         active_tracks = ctx["tracker"].update(detections, frame_time)
+                        # 2b. RTMPose ankle feet (red mark / tripwire / dwell) when ONNX present
+                        self._apply_rtmpose_feet(active_tracks, frame, ctx)
                         # Early tracks (≥2 hits): tripwire needs ground-point history during
                         # min_hits confirmation or entrance crossings are lost forever.
                         early_tracks = ctx["tracker"].early_tracks()
-                        # Ankles before the line, including IDs still in confirmation.
-                        self._apply_rtmpose_feet(early_tracks or active_tracks, frame, ctx)
-                        self._update_analytics(
-                            cam_id, ctx, active_tracks, frame_time,
-                            early_tracks=early_tracks, frame=frame,
+                        customers = self._update_analytics(
+                            cam_id,
+                            ctx,
+                            active_tracks,
+                            frame_time,
+                            frame=frame,
+                            early_tracks=early_tracks,
                         )
-                        ctx["last_overlay_tracks"] = active_tracks
-                        customers = list(ctx.get("current_active_tracks") or [])
-
-                        if ctx.get("heatmap") is None:
-                            ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
-                        ctx["heatmap"].add(customers, frame_time)
-                        if cv2 is not None and frame_time - ctx.get("last_heatmap_write", 0.0) >= self.heatmap_write_seconds:
-                            self._write_heatmap(cam_id, ctx, frame, frame_time)
                     else:
                         active_tracks = list(ctx.get("last_overlay_tracks") or [])
 
-                    # 4. Display stream — refresh MJPEG from latest decode + last tracks
-                    # even when this frame skipped inference (smoother portal video).
-                    if cv2 is not None and (ctx["frames_processed"] % self.display_every_n) == 0:
-                        try:
-                            draw_kwargs = dict(
-                                frame=frame,
-                                tracks=active_tracks,
-                                tripwires=ctx["tripwires"],
-                                zones=ctx["zones"],
-                                queues=ctx["queues"],
-                                camera_name=ctx["name"],
-                                fps=ctx["reader"].fps_actual,
-                                infer_fps=ctx["processed_fps"],
-                            )
-                            # One draw. Foot is the default mark; box styles do not add a second foot.
-                            annotated = DebugOverlay.draw_pipeline(
-                                **draw_kwargs,
-                                staff_zones=ctx.get("staff_zones", []),
-                                staff_ids=ctx.get("staff_ids", set()),
-                                objects=list(ctx.get("last_overlay_objects") or []),
-                            )
-                            frame_path = os.path.join(self.frames_dir, f"{cam_id}.jpg")
-                            tmp_path = os.path.join(self.frames_dir, f"{cam_id}.tmp.jpg")
-                            cv2.imwrite(tmp_path, annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-                            os.replace(tmp_path, frame_path)
-                            ctx["display_window_frames"] = int(ctx.get("display_window_frames", 0) or 0) + 1
-                            dwin = time.time() - float(ctx.get("display_window_start", time.time()))
-                            if dwin >= 2.0:
-                                ctx["display_fps"] = round(ctx["display_window_frames"] / dwin, 1)
-                                ctx["display_window_start"] = time.time()
-                                ctx["display_window_frames"] = 0
-                        except Exception as e:
-                            logger.debug(f"Frame export error for {cam_id}: {e}")
-
-                    # 4b. Frame-synced live JSON (portal KPIs tick with the YOLO overlay)
+                    # Frame-synced live JSON follows detector/tracker updates. The
+                    # annotated feed is published by its own unique-frame worker.
                     if do_infer or (ctx["frames_processed"] % max(2, self.display_every_n * 2)) == 0:
                         try:
                             self._write_live_snapshot(cam_id, ctx, frame_time)
@@ -944,7 +1085,130 @@ class EdgePipeline:
         finally:
             self.stop()
 
+    def _update_analytics(
+        self,
+        cam_id: str,
+        ctx: Dict[str, Any],
+        active_tracks: List[Any],
+        frame_time: float,
+        frame: Any = None,
+        early_tracks: Optional[List[Any]] = None,
+    ) -> List[Any]:
+        """Update the camera's staff, crossing, zone, queue, safety and heatmap state.
+
+        Kept as one testable operation so both the live loop and deterministic track
+        tests exercise the exact same staff-exclusion and customer-only analytics.
+        """
+        reader = ctx.get("reader")
+        loop_count = int(getattr(reader, "loop_count", 0) or 0)
+        if loop_count != ctx.get("reader_loop_seen", 0):
+            self._reset_sim_pass(cam_id, ctx, loop_count)
+
+        for staff_zone in ctx.get("staff_zones", []):
+            staff_zone.update(active_tracks, frame_time)
+            for tid, entered in staff_zone.active_tracks_in_zone.items():
+                if frame_time - entered >= self.staff_min_seconds:
+                    ctx["staff_ids"].add(tid)
+
+        customers = [track for track in active_tracks if track.track_id not in ctx["staff_ids"]]
+        crossing_tracks = early_tracks if early_tracks is not None else active_tracks
+        crossing_customers = [track for track in crossing_tracks if track.track_id not in ctx["staff_ids"]]
+        for track in customers:
+            track.dwell_s = 0.0
+            track.zone_id = None
+        ctx["current_active_tracks"] = customers
+        ctx["last_overlay_tracks"] = active_tracks
+        ctx["staff_visible"] = len(active_tracks) - len(customers)
+
+        ctx["tracked_ids_today"].update(track.track_id for track in customers)
+        # A local track may be tagged as staff only after its dwell verification window.
+        # Remove it from the per-pass visitor set once that tag becomes stable.
+        ctx["tracked_ids_today"].difference_update(ctx["staff_ids"])
+
+        crossing_events: List[Dict[str, Any]] = []
+        for tripwire in ctx.get("tripwires", []):
+            crossing_events.extend(tripwire.update(crossing_customers, frame_time))
+        if crossing_events:
+            self._persist_crossing_events(cam_id, crossing_events)
+            recent = ctx.setdefault("recent_trip_in", {})
+            for event in crossing_events:
+                direction = str(event.get("direction", "")).lower()
+                if direction in ("in", "trip_in", "enter") and event.get("track_id") is not None:
+                    recent[int(event["track_id"])] = float(event.get("timestamp") or frame_time)
+            cutoff = frame_time - 120.0
+            for track_id in list(recent):
+                if recent[track_id] < cutoff:
+                    del recent[track_id]
+
+        for zone in ctx.get("zones", []):
+            zone.update(customers, frame_time)
+
+        staff_on_post = int(ctx.get("staff_visible", 0) or 0)
+        analytic_events: List[Dict[str, Any]] = []
+        for queue in ctx.get("queues", []):
+            try:
+                analytic_events.extend(queue.update(customers, frame_time, staff_on_post=staff_on_post) or [])
+            except TypeError:
+                queue.update(customers, frame_time)
+        for glass in ctx.get("glass_rois") or []:
+            analytic_events.extend(
+                glass.update(
+                    customers,
+                    frame_time,
+                    recent_trip_in_ids=ctx.get("recent_trip_in") or {},
+                ) or []
+            )
+
+        floor = ctx.get("floor")
+        if floor is not None:
+            if frame is not None:
+                try:
+                    floor.set_frame_size(float(frame.shape[1]), float(frame.shape[0]))
+                except Exception:
+                    pass
+            floor.update(customers, list(ctx.get("zones") or []), frame_time)
+
+        safety = ctx.get("safety")
+        if safety is not None:
+            safety.update(customers, list(ctx.get("zones") or []), frame_time, cam_id)
+        if analytic_events and hasattr(self, "_persist_analytic_events"):
+            self._persist_analytic_events(cam_id, analytic_events)
+
+        if frame is not None:
+            if ctx.get("heatmap") is None:
+                ctx["heatmap"] = Heatmap(frame.shape[1], frame.shape[0])
+            ctx["heatmap"].add(customers, frame_time)
+            if cv2 is not None and frame_time - ctx.get("last_heatmap_write", 0.0) >= self.heatmap_write_seconds:
+                self._write_heatmap(cam_id, ctx, frame, frame_time)
+        return customers
+
     # --------------------------------------------------------- enrichment tier
+    @staticmethod
+    def _run_independent_model_jobs(
+        jobs: Dict[str, Callable[[], Any]],
+        max_workers: int = 3,
+    ) -> Dict[str, Any]:
+        """Run independent per-frame model calls concurrently; isolate one model failure."""
+        if not jobs:
+            return {}
+        results: Dict[str, Any] = {}
+        worker_count = max(1, min(int(max_workers), len(jobs)))
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="edge-model") as pool:
+            futures = {pool.submit(job): name for name, job in jobs.items()}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception as exc:  # one unavailable model must not suppress peers
+                    logger.warning("Slow model %s pass failed: %s", name, exc)
+        return results
+
+    def _run_locked_model(self, name: str, job: Callable[[], Any]) -> Any:
+        """Serialize calls into shared model instances while different models overlap."""
+        lock = self._slow_model_locks.setdefault(name, threading.Lock())
+        with lock:
+            return job()
+
     def _start_slow_tier(self, ctx: Dict[str, Any]):
         """Starts the enrichment worker for one camera.
 
@@ -954,10 +1218,11 @@ class EdgePipeline:
         The fast tier therefore keeps its latency while the enrichment tier catches up
         on its own cadence.
         """
-        if not getattr(self, "models_enabled", False):
+        reid_active = bool(getattr(getattr(self, "reid_extractor", None), "active", False))
+        if not getattr(self, "models_enabled", False) and not reid_active:
             return
         if self.pose_estimator is None and self.face_detector is None \
-                and self.age_gender is None and self.world_detector is None:
+                and self.age_gender is None and self.world_detector is None and not reid_active:
             logger.warning("Enrichment tier enabled but no enrichment model loaded; skipping.")
             return
 
@@ -971,7 +1236,7 @@ class EdgePipeline:
                 if latest is None:
                     time.sleep(0.05)
                     continue
-                frame_idx, frame_time, frame = latest
+                frame_idx, frame_time, frame_time_mono, frame = latest
                 # Honour the configured cadence. The frame index counts decoded frames,
                 # so this is "every N video frames" regardless of how fast inference runs.
                 if frame_idx - ctx["last_slow_frame_idx"] < interval:
@@ -979,7 +1244,7 @@ class EdgePipeline:
                     continue
                 ctx["last_slow_frame_idx"] = frame_idx
                 try:
-                    self._process_slow_tier(cam_id, ctx, frame_time, frame)
+                    self._process_slow_tier(cam_id, ctx, frame_time, frame, frame_time_mono)
                     ctx["slow_ticks"] += 1
                 except Exception as e:
                     logger.error(f"Enrichment pass failed on {cam_id}: {e}", exc_info=True)
@@ -989,7 +1254,14 @@ class EdgePipeline:
         thread.start()
         logger.info(f"Enrichment tier started for camera '{cam_id}' (every {interval} frames).")
 
-    def _process_slow_tier(self, cam_id: str, ctx: Dict[str, Any], frame_time: float, frame: Any):
+    def _process_slow_tier(
+        self,
+        cam_id: str,
+        ctx: Dict[str, Any],
+        frame_time: float,
+        frame: Any,
+        frame_time_mono: Optional[float] = None,
+    ):
         """One enrichment pass: pose, face, head pose, demographics, groups, attention.
 
         Everything produced here is ephemeral. No face crop, landmark, embedding or
@@ -1005,12 +1277,29 @@ class EdgePipeline:
         pose_cfg = self.models_cfg.get("pose", {}) or {}
         face_cfg = self.models_cfg.get("face", {}) or {}
         prod_cfg = self.models_cfg.get("products", {}) or {}
+        controls = read_controls()
+
+        # Pose and face detection can consume the same immutable frame together.
+        # A lock per shared model protects a reused instance across camera workers.
+        model_jobs: Dict[str, Callable[[], Any]] = {}
+        if self.pose_estimator is not None and controls["pose"]:
+            model_jobs["pose"] = lambda: self._run_locked_model(
+                "pose", lambda: self.pose_estimator.estimate(frame)
+            )
+        if self.face_detector is not None and controls["face"]:
+            model_jobs["faces"] = lambda: self._run_locked_model(
+                "face", lambda: self.face_detector.detect(frame)
+            )
+        model_outputs = self._run_independent_model_jobs(
+            model_jobs,
+            max_workers=int(slow_cfg.get("parallel_model_workers", 3) or 3),
+        )
 
         # --- 1. Pose: what the body is doing ---------------------------------
         pose_by_track: Dict[int, Dict[str, Any]] = {}
-        if self.pose_estimator is not None:
+        if "pose" in model_outputs:
             iou_min = float(pose_cfg.get("match_iou", 0.30))
-            for pose in self.pose_estimator.estimate(frame):
+            for pose in model_outputs["pose"]:
                 best_track = None
                 best_iou = 0.0
                 for track in tracks:
@@ -1023,7 +1312,7 @@ class EdgePipeline:
 
         # --- 2. Faces: assign a face to the body it belongs to -------------
         face_by_track: Dict[int, Dict[str, Any]] = {}
-        faces = self.face_detector.detect(frame) if self.face_detector is not None else []
+        faces = model_outputs.get("faces", [])
         if faces:
             for face in faces:
                 for track in tracks:
@@ -1036,7 +1325,7 @@ class EdgePipeline:
 
         # Wide-angle store cameras put faces at 20-40px, which YuNet can miss at
         # frame level. Re-running it on an upscaled person crop recovers them.
-        if self.face_detector is not None and bool(face_cfg.get("upscale_crops", True)):
+        if self.face_detector is not None and controls["face"] and bool(face_cfg.get("upscale_crops", True)):
             max_crops = int(slow_cfg.get("max_faces_per_tick", 8))
             missing = [t for t in tracks if t.track_id not in face_by_track]
             for track in missing[:max_crops]:
@@ -1055,7 +1344,9 @@ class EdgePipeline:
                     head_by_track[track_id] = pose
 
         predictions: Dict[int, Dict[str, Any]] = {}
-        if self.age_gender is not None and face_by_track:
+        selected = []
+        crops = []
+        if self.age_gender is not None and controls["demographics"] and face_by_track:
             max_faces = int(slow_cfg.get("max_faces_per_tick", 2))
             # Rotate the sampled faces every tick. The demographic model is the most
             # expensive step in the tier (~0.28s/face on CPU), so only a couple of
@@ -1070,7 +1361,6 @@ class EdgePipeline:
             ctx["demo_cursor"] = (cursor + max_faces) % max(1, len(candidates))
 
             align = bool(face_cfg.get("align", True))
-            crops = []
             for _track_id, face in selected:
                 crop = None
                 if align:
@@ -1078,9 +1368,32 @@ class EdgePipeline:
                 if crop is None:
                     crop = crop_face(frame, face)
                 crops.append(crop)
-            results = self.age_gender.predict_batch(crops)
-            for (track_id, _face), prediction in zip(selected, results):
-                predictions[track_id] = prediction
+        # The product model, demographics model, and OSNet consume independent
+        # inputs now. Run them side by side after face-to-track assignment, while
+        # keeping each underlying model instance serialized across camera threads.
+        followup_jobs: Dict[str, Callable[[], Any]] = {}
+        if self.age_gender is not None and controls["demographics"] and crops:
+            followup_jobs["demographics"] = lambda: self._run_locked_model(
+                "demographics", lambda: self.age_gender.predict_batch(crops)
+            )
+        if self.world_detector is not None and controls["products"]:
+            followup_jobs["products"] = lambda: self._run_locked_model(
+                "products", lambda: self.world_detector.detect(frame)
+            )
+        if self.reid_extractor.active and controls["reid"]:
+            followup_jobs["reid"] = lambda: self._run_locked_model(
+                "reid",
+                lambda: self._sample_soft_reid(
+                    cam_id, ctx, tracks, frame, frame_time, frame_time_mono
+                ),
+            )
+        followup_outputs = self._run_independent_model_jobs(
+            followup_jobs,
+            max_workers=int(slow_cfg.get("parallel_model_workers", 3) or 3),
+        )
+        results = followup_outputs.get("demographics", [])
+        for (track_id, _face), prediction in zip(selected, results):
+            predictions[track_id] = prediction
 
         demographics = ctx["demographics"]
         for track_id, prediction in predictions.items():
@@ -1104,8 +1417,8 @@ class EdgePipeline:
         ctx["groups"].update(tracks)
 
         # --- 6. Product interest --------------------------------------------
-        if self.world_detector is not None:
-            detections = self.world_detector.detect(frame)
+        if "products" in followup_outputs:
+            detections = followup_outputs["products"]
             # A shopper wearing a jacket is not a product on display.
             detections = filter_out_persons(
                 detections,
@@ -1117,8 +1430,9 @@ class EdgePipeline:
             ctx["products"].observe(kept, tracks, frame_time)
             # Feed open-vocab class names into the MJPEG overlay (person boxes stay on tracks).
             ctx["last_overlay_objects_ov"] = kept
-        self._sample_soft_reid(cam_id, ctx, tracks, frame, frame_time)
-
+        elif not controls["products"]:
+            ctx["products"].reset()
+            ctx["last_overlay_objects_ov"] = []
         # --- 7. Housekeeping -------------------------------------------------
         active_ids = [t.track_id for t in tracks]
         demographics.prune(active_ids, frame_time)
@@ -1127,7 +1441,7 @@ class EdgePipeline:
         ctx["products"].prune(active_ids)
 
 
-    def _sample_soft_reid(self, cam_id, ctx, tracks, frame, frame_time):
+    def _sample_soft_reid(self, cam_id, ctx, tracks, frame, frame_time, frame_time_mono=None):
         if not self.reid_extractor.active or not tracks:
             return
         interval = int(getattr(self, "reid_cfg", {}).get("interval_frames", 16))
@@ -1158,7 +1472,30 @@ class EdgePipeline:
                 camera_id=cam_id, track_id=int(track.track_id), embedding=emb,
                 capture_ts_utc=float(frame_time),
                 foot_xy=(float(foot[0]), float(foot[1])) if foot is not None else None,
+                capture_ts_mono=float(frame_time_mono) if frame_time_mono is not None else None,
             ))
+            if self.cross_camera_fusion.enabled and foot is not None and frame_time_mono is not None:
+                from src.analytics.zones import point_in_polygon
+
+                shared_zone_ids = []
+                for zone in list(ctx.get("zones", []) or []):
+                    shared_id = getattr(zone, "store_zone_id", None)
+                    if shared_id and point_in_polygon(foot, zone.polygon):
+                        shared_zone_ids.append(str(shared_id))
+                for queue in list(ctx.get("queues", []) or []):
+                    queue_zone = getattr(queue, "zone", None)
+                    shared_id = getattr(queue, "store_zone_id", None)
+                    if shared_id and queue_zone is not None and point_in_polygon(foot, queue_zone.polygon):
+                        shared_zone_ids.append(str(shared_id))
+                floor_xy = project_homography(foot, ctx.get("floor_homography"))
+                self.cross_camera_fusion.observe(
+                    camera_id=cam_id,
+                    track_id=int(track.track_id),
+                    embedding=emb,
+                    timestamp_mono=float(frame_time_mono),
+                    store_zone_ids=shared_zone_ids,
+                    floor_xy=floor_xy,
+                )
 
     @staticmethod
     def _track_in_zone(ctx: Dict[str, Any], track: Any) -> bool:
@@ -1201,7 +1538,7 @@ class EdgePipeline:
         cams_list = [c for c in new_cfg.get("cameras", []) if c.get("id")]
         # Honor EDGE_MAX_CAMERAS / performance.max_cameras on hot-reload too
         # (otherwise calib saves re-add cams and collapse Docker CPU FPS).
-        cams_list = limit_cameras(cams_list, self.perf.get("max_cameras"))
+        cams_list = limit_cameras(cams_list, (getattr(self, "perf", {}) or {}).get("max_cameras"))
         new_cams = {c["id"]: c for c in cams_list}
 
         for cam_id in list(self.camera_contexts):
@@ -1219,16 +1556,21 @@ class EdgePipeline:
                 if self.running:
                     self.camera_contexts[cam_id]["reader"].start()
                     self._start_slow_tier(self.camera_contexts[cam_id])
+                    self._start_display_tier(self.camera_contexts[cam_id])
                 logger.info(f"Camera {cam_id} added from config.")
                 continue
 
             if cam.get("source", "") != ctx["source"] or cam.get("fps_target", 15) != ctx["fps_target"]:
                 self._generate_and_save_rollup(cam_id, ctx, time.time())
+                display_thread = ctx.get("display_thread")
                 ctx["reader"].stop()
+                if display_thread is not None and display_thread.is_alive():
+                    display_thread.join(timeout=1.0)
                 self.camera_contexts[cam_id] = self._build_camera_context(cam)
                 if self.running:
                     self.camera_contexts[cam_id]["reader"].start()
                     self._start_slow_tier(self.camera_contexts[cam_id])
+                    self._start_display_tier(self.camera_contexts[cam_id])
                 logger.info(f"Camera {cam_id} source changed: {ctx['source']} -> {cam.get('source', '')}")
                 continue
 
@@ -1239,6 +1581,7 @@ class EdgePipeline:
                 # next rollup's delta negative.
                 self._generate_and_save_rollup(cam_id, ctx, time.time())
                 ctx["tripwires"], ctx["zones"], ctx["queues"], ctx["staff_zones"], ctx["glass_rois"] = self._build_analytics(cam)
+                ctx["floor_homography"] = cam.get("floor_homography")
                 ctx["calibration_sig"] = self._calibration_signature(cam)
                 ctx["last_in_count"] = 0
                 ctx["last_out_count"] = 0
@@ -1247,6 +1590,9 @@ class EdgePipeline:
                     f"Hot-reloaded {len(ctx['tripwires'])} tripwires and "
                     f"{len(ctx['zones']) + len(ctx['queues']) + len(ctx.get('staff_zones', []))} zones for {cam_id}"
                 )
+
+        self.cameras_cfg = new_cfg
+        self._refresh_cross_camera_fusion()
 
     def _write_heatmap(self, cam_id: str, ctx: Dict[str, Any], frame: Any, frame_time: float):
         """Renders the camera's heatmap over the current clean (un-annotated) frame and writes it
@@ -1267,6 +1613,7 @@ class EdgePipeline:
         Occupancy here is active customer tracks (matches the YOLO HUD), not tripwire
         IN−OUT net — looping sample footage makes net occupancy misleading.
         """
+        controls = read_controls()
         customers = list(ctx.get("current_active_tracks", []))
         tripwire_in = sum(tw.in_count for tw in ctx.get("tripwires", []))
         tripwire_out = sum(tw.out_count for tw in ctx.get("tripwires", []))
@@ -1280,6 +1627,7 @@ class EdgePipeline:
             queues_out.append({
                 "id": getattr(q, "zone_id", None) or getattr(q, "id", "queue"),
                 "name": getattr(q, "name", "queue"),
+                "store_zone_id": getattr(q, "store_zone_id", None),
                 "queue_length": m.get("queue_length", 0),
                 "avg_wait_seconds": m.get("avg_wait_seconds", 0.0),
                 "alert_active": bool(m.get("alert_active")),
@@ -1314,6 +1662,7 @@ class EdgePipeline:
                 "id": getattr(z, "zone_id", None) or getattr(z, "id", "zone"),
                 "name": getattr(z, "name", "zone"),
                 "type": getattr(z, "zone_type", None) or getattr(z, "type", "dwell"),
+                "store_zone_id": getattr(z, "store_zone_id", None),
                 "occupancy": m.get("current_occupancy", m.get("occupancy", 0)),
                 "visits": visits,
                 "total_visits": visits,
@@ -1357,7 +1706,7 @@ class EdgePipeline:
         groups = ctx["groups"].snapshot() if ctx.get("groups") else {}
 
         products_top = None
-        if ctx.get("products"):
+        if controls.get("products", False) and ctx.get("products"):
             prod_snap = ctx["products"].snapshot()
             products = prod_snap.get("products") or []
             if products:
@@ -1370,11 +1719,42 @@ class EdgePipeline:
                     }
                     for p in products[:8]
                 ]
-        # Lifetime SQL sums (10^4 viewers) are not this frame. Leave products_top empty
-        # until the live product model writes a session snapshot.
         if products_top is not None and len(products_top) == 0:
             products_top = None
+        # Join a category to a shelf/display only when the current product box is
+        # physically inside a client-drawn display zone. Category totals remain
+        # useful on their own, but we never guess which fixture they belong to.
+        if products_top:
+            from src.analytics.zones import point_in_polygon
+
+            shelf_zones = [
+                zone for zone in ctx.get("zones", [])
+                if any(word in str(getattr(zone, "name", "")).lower() for word in ("shelf", "display", "fixture"))
+            ]
+            labels_to_zones: Dict[str, set] = {}
+            for obj in list(ctx.get("last_overlay_objects_ov") or []):
+                bbox = obj.get("bbox") or []
+                label = str(obj.get("label") or "").strip()
+                if not label or len(bbox) != 4:
+                    continue
+                center = ((float(bbox[0]) + float(bbox[2])) / 2, (float(bbox[1]) + float(bbox[3])) / 2)
+                for zone in shelf_zones:
+                    if point_in_polygon(center, zone.polygon):
+                        labels_to_zones.setdefault(label, set()).add(str(getattr(zone, "name", zone.zone_id)))
+            for product in products_top:
+                product["shelf_zones"] = sorted(labels_to_zones.get(str(product.get("category") or ""), set()))
         reid_status = self.reid_extractor.status() if getattr(self, "reid_extractor", None) else {}
+        slow_loaded = {
+            "pose": getattr(self, "pose_estimator", None) is not None,
+            "face": getattr(self, "face_detector", None) is not None,
+            "demographics": getattr(self, "age_gender", None) is not None,
+            "head_pose": getattr(self, "head_pose", None) is not None,
+            "products": getattr(self, "world_detector", None) is not None,
+            "reid": bool(reid_status.get("active")),
+        }
+        slow_controls = {**controls, "head_pose": controls.get("face", False)}
+        active_slow_models = active_model_names(slow_loaded, slow_controls)
+        rtmpose_active = bool(getattr(self, "rtmpose", None)) and controls.get("rtmpose", False)
 
         glass_block = build_glass_block(list(ctx.get("glass_rois") or []))
         if glass_block is None:
@@ -1421,6 +1801,37 @@ class EdgePipeline:
             "staff": staff_block,
             "safety": safety_block,
         }, now=frame_time)
+        active_tracks_by_camera = {
+            camera_id: [int(track.track_id) for track in camera_ctx.get("current_active_tracks", [])]
+            for camera_id, camera_ctx in self.camera_contexts.items()
+        }
+        from src.analytics.zones import point_in_polygon
+
+        active_store_zones: Dict[str, Dict[int, List[str]]] = {}
+        for camera_id, camera_ctx in self.camera_contexts.items():
+            zone_map: Dict[int, List[str]] = {}
+            configured_zones = list(camera_ctx.get("zones", []) or [])
+            configured_zones.extend(
+                getattr(queue, "zone", None)
+                for queue in list(camera_ctx.get("queues", []) or [])
+            )
+            for track in camera_ctx.get("current_active_tracks", []) or []:
+                foot = getattr(track, "foot_point", None)
+                if foot is None:
+                    continue
+                mapped = []
+                for zone in configured_zones:
+                    store_zone_id = getattr(zone, "store_zone_id", None)
+                    polygon = getattr(zone, "polygon", None)
+                    if store_zone_id and polygon and point_in_polygon(foot, polygon):
+                        mapped.append(str(store_zone_id))
+                if mapped:
+                    zone_map[int(track.track_id)] = mapped
+            active_store_zones[camera_id] = zone_map
+        fusion_block = self.cross_camera_fusion.snapshot(
+            active_tracks_by_camera,
+            active_store_zones=active_store_zones,
+        )
 
         payload = {
             "store_id": self.store_id,
@@ -1443,7 +1854,6 @@ class EdgePipeline:
             },
             "frame_time": frame_time,
             "people_now": len(customers),
-            "objects_now": len(_object_layer(ctx.get("last_overlay_objects") or [])),
             "staff_now": int(ctx.get("staff_visible", 0) or 0),
             "unique_tracks_today": len(ctx.get("tracked_ids_today", set())),
             "total_visitors": tripwire_in,
@@ -1488,7 +1898,8 @@ class EdgePipeline:
             "staff": staff_block,
             "safety": safety_block,
             "alerts": alerts_block,
-            "shelf_gap": shelf_gap_snapshot([]),
+            "fusion": fusion_block,
+            "shelf_gap": shelf_gap_snapshot(list(ctx.get("last_overlay_objects_ov") or [])),
             "pose_fall": pose_fall_status(
                 pose_weights_on_disk=self._rtmpose_on_disk(),
                 wired=bool(getattr(self, "rtmpose", None)) or bool(self.pose_estimator),
@@ -1515,18 +1926,15 @@ class EdgePipeline:
                 "safety": "LIVE",
                 "alerts": "LIVE",
                 "multi_store": "FUTURE",
+                "cross_camera_fusion": "LIVE" if fusion_block.get("enabled") else "GATED",
                 "display_interest": "LIVE" if products_top else "PARTIAL",
             },
-            "engagement": (
-                None
-                if not getattr(self, "models_enabled", False)
-                else {
-                    "avg_attention_score": attention.get("avg_attention_score"),
-                    "facing_ratio": attention.get("facing_ratio"),
-                    "engaged_ratio": attention.get("engaged_ratio"),
-                    "group_count": groups.get("group_count"),
-                }
-            ),
+            "engagement": {
+                "avg_attention_score": attention.get("avg_attention_score", 0.0),
+                "facing_ratio": attention.get("facing_ratio", 0.0),
+                "engaged_ratio": attention.get("engaged_ratio", 0.0),
+                "group_count": groups.get("group_count", 0),
+            },
             "models": {
                 "person_detector": backend_label(
                     getattr(self.detector, "backend", "yolo26"),
@@ -1541,33 +1949,83 @@ class EdgePipeline:
                 if getattr(self.detector, "backend", "") == BACKEND_RFDETR
                 else None,
                 "detector_loaded": bool(getattr(self.detector, "is_loaded", False)),
-                "weights": getattr(self.detector, "model_name", None),
-                "person_conf": getattr(self.detector, "conf_thresh", None),
-                "object_conf": getattr(self.detector, "object_conf", None),
+                "illumination_mode": getattr(self.detector, "last_illumination_mode", "normal"),
                 "imgsz": int(getattr(self.detector, "imgsz", 0) or 0) or None,
                 "tracker": "bytetrack",
+                "controls": controls,
                 "perf_mode": getattr(self, "perf_mode", "balanced"),
                 "infer_every_n": int(getattr(self, "infer_every_n", 1) or 1),
+                "person_conf": round(float(getattr(self, "person_conf", 0.0) or 0.0), 3),
+                "object_conf": round(float(getattr(self, "object_conf", 0.0) or 0.0), 3),
                 "overlay_box_style": resolve_overlay_box_style(),
-                "enrichment": bool(getattr(self, "models_enabled", False)),
-                "pose": bool(getattr(self, "rtmpose", None)) or bool(getattr(self, "pose_estimator", None)),
-                "rtmpose": bool(getattr(self, "rtmpose", None)),
+                "enrichment": bool(active_slow_models),
+                "pose_model_loaded": bool(getattr(self, "pose_estimator", None)),
+                "pose": rtmpose_active or (slow_loaded["pose"] and controls.get("pose", False)),
+                "rtmpose": rtmpose_active,
                 "rtmpose_backend": getattr(getattr(self, "rtmpose", None), "backend", None),
-                "face_boxes": bool(getattr(self, "face_detector", None)),
-                "products": bool(getattr(self, "world_detector", None)) or bool(products_top),
-                "demographics_enabled": demographics_env_enabled(),
+                "rtmpose_calls": int(getattr(getattr(self, "rtmpose", None), "calls", 0) or 0),
+                "face_boxes": slow_loaded["face"] and controls.get("face", False),
+                "products_loaded": slow_loaded["products"],
+                "products": slow_loaded["products"] and controls.get("products", False),
+                "products_backend": getattr(self, "_products_backend", None),
+                "clip_vit_enabled": bool(
+                    getattr(self, "world_detector", None)
+                    and controls.get("products", False)
+                    and getattr(self.world_detector, "_classes_set", False)
+                    and not getattr(self.world_detector, "_prompt_free", False)
+                ),
+                "osnet_reid_enabled": slow_loaded["reid"] and controls.get("reid", False),
+                "mivolo_v2_enabled": bool(
+                    getattr(self, "age_gender", None)
+                    and self.age_gender.__class__.__name__ == "MiVoloEstimator"
+                    and controls.get("demographics", False)
+                    and demographics_env_enabled()
+                    and dpia_gate_ok()
+                ),
+                "mivolo_v2_calls": int(getattr(getattr(self, "age_gender", None), "calls", 0) or 0),
+                "slow_scheduler": {
+                    "state": (
+                        "running"
+                        if active_slow_models and getattr(ctx.get("slow_thread"), "is_alive", lambda: False)()
+                        else ("ready" if active_slow_models else "paused")
+                    ),
+                    "execution": "bounded-worker-pool",
+                    "parallel_workers": int(
+                        (self.models_cfg.get("slow_tier", {}) or {}).get("parallel_model_workers", 3) or 3
+                    ),
+                    "interval_frames": int(
+                        (self.models_cfg.get("slow_tier", {}) or {}).get("interval_frames", 4) or 4
+                    ),
+                    "ticks_completed": int(ctx.get("slow_ticks", 0) or 0),
+                    "enabled_models": active_slow_models,
+                    "note": "Lists loaded models whose operator switches are on. Jobs run at the configured cadence; the bounded worker pool does not guarantee every model runs at once.",
+                },
+                "demographics_enabled": bool(
+                    getattr(self, "age_gender", None)
+                    and controls.get("demographics", False)
+                    and demographics_env_enabled()
+                    and dpia_gate_ok()
+                ),
                 "face_identity": False,
-                "stack_policy": "docs/model-stack-policy.md",
+                "stack_policy": "docs/models/model-stack-policy.md",
                 "note": (
                     f"perf={getattr(self, 'perf_mode', 'balanced')}: "
                     f"backend={getattr(self.detector, 'backend', 'yolo26')}; "
                     f"overlay={resolve_overlay_box_style()}; "
                     "person detect+track+foot zones"
-                    + ("; rtmpose on" if getattr(self, "rtmpose", None) else "; foot=bbox")
-                    + ("; enrichment on" if getattr(self, "models_enabled", False) else "; enrichment off")
+                    + ("; rtmpose on" if rtmpose_active else "; foot=bbox")
+                    + ("; enrichment on" if active_slow_models else "; enrichment off")
                     + ". Face boxes (if on) = k-anon age/gender only — no face ID. "
                     "Soft ReID session-scoped only. products_top = open-vocab categories, not POS SKUs. "
-                    "MiVOLO demographics stay GATED."
+                    + (
+                        " MiVOLO v2 is active; output remains k-anonymous."
+                        if getattr(self, "age_gender", None)
+                        and self.age_gender.__class__.__name__ == "MiVoloEstimator"
+                        and controls.get("demographics", False)
+                        and demographics_env_enabled()
+                        and dpia_gate_ok()
+                        else " MiVOLO v2 is not active."
+                    )
                 ),
             },
             "perf_mode": getattr(self, "perf_mode", "balanced"),
@@ -1576,7 +2034,7 @@ class EdgePipeline:
                 "backend": reid_status.get("backend"),
                 "gallery_size": self.reid_gallery.size() if self.reid_gallery else 0,
                 "session_scoped": True,
-                "cross_cam_fusion": False,
+                "cross_cam_fusion": bool(fusion_block.get("enabled")),
             },
             "track_ids": [t.track_id for t in customers[:40]],
             "tracks": [
@@ -1605,7 +2063,6 @@ class EdgePipeline:
             "timestamp": payload["timestamp"],
             "cameras": [],
             "people_now": 0,
-            "objects_now": 0,
             "staff_now": 0,
             "total_visitors": 0,
             "total_exits": 0,
@@ -1622,14 +2079,10 @@ class EdgePipeline:
             "perf_mode": payload.get("perf_mode"),
             "engagement": payload.get("engagement"),
             "reid": payload.get("reid"),
-            "products_top": None,
-            "track_ids": [],
-            "tripwires": [],
-            "present_binding": "active_tracks",
-            "inout_binding": "session_tripwire",
+            "fusion": payload.get("fusion"),
+            "products_top": payload.get("products_top"),
         }
         dwell_acc = []
-        saw_track_ids = False
         active = set(self.camera_contexts.keys())
         for name in os.listdir(self.live_dir):
             if not name.endswith(".json") or name.startswith("store") or name.endswith(".tmp.json"):
@@ -1644,7 +2097,6 @@ class EdgePipeline:
                 continue
             store["cameras"].append(row.get("camera_id"))
             store["people_now"] += int(row.get("people_now", 0) or 0)
-            store["objects_now"] += int(row.get("objects_now", 0) or 0)
             store["staff_now"] += int(row.get("staff_now", 0) or 0)
             store["total_visitors"] += int(row.get("total_visitors", 0) or 0)
             store["total_exits"] += int(row.get("total_exits", 0) or 0)
@@ -1669,18 +2121,10 @@ class EdgePipeline:
                 store["engagement"] = row["engagement"]
             if row.get("reid"):
                 store["reid"] = row["reid"]
-            raw_ids = row.get("track_ids")
-            if isinstance(raw_ids, list):
-                saw_track_ids = True
-                for tid in raw_ids:
-                    if tid not in store["track_ids"]:
-                        store["track_ids"].append(tid)
-            for tw in row.get("tripwires") or []:
-                if isinstance(tw, dict):
-                    store["tripwires"].append(tw)
-            prods = row.get("products_top")
-            if prods and not _lifetime_product_rows(prods, int(row.get("people_now") or 0)):
-                store["products_top"] = prods
+            if row.get("fusion"):
+                store["fusion"] = row["fusion"]
+            if row.get("products_top"):
+                store["products_top"] = row["products_top"]
             if row.get("entrance"):
                 store["entrance"] = row["entrance"]
                 store["stop_rate"] = row.get("stop_rate")
@@ -1698,131 +2142,27 @@ class EdgePipeline:
                 store["queues"] = row["queues"]
         if dwell_acc:
             store["avg_dwell_seconds"] = round(sum(dwell_acc) / len(dwell_acc), 1)
-        if saw_track_ids:
-            store["active_tracks"] = len(store["track_ids"])
-            store["people_now"] = store["active_tracks"]
-            store["net_occupancy"] = store["active_tracks"]
+        fusion = store.get("fusion") or {}
+        if fusion.get("enabled") and fusion.get("deduplicated_active_count") is not None:
+            store["camera_people_sum"] = store["people_now"]
+            store["people_now"] = int(fusion["deduplicated_active_count"])
+            store["net_occupancy"] = int(fusion["deduplicated_active_count"])
+            store["occupancy_mode"] = "overlap_reid_union"
+            store["occupancy_note"] = (
+                "Shared calibrated zones use session-scoped ReID union; unmatched tracks remain separate. "
+                "Per-camera values remain available in per_camera."
+            )
         else:
-            store.pop("track_ids", None)
-            store.pop("present_binding", None)
-        if store["tripwires"]:
-            store["total_visitors"] = sum(int(t.get("in_count") or 0) for t in store["tripwires"])
-            store["total_exits"] = sum(int(t.get("out_count") or 0) for t in store["tripwires"])
-            store["session_in"] = store["total_visitors"]
-            store["session_out"] = store["total_exits"]
-        else:
-            store.pop("tripwires", None)
-            store.pop("inout_binding", None)
-        models = store.get("models") or {}
-        if isinstance(models, dict) and models.get("enrichment") is False:
-            store["engagement"] = None
-        if _lifetime_product_rows(store.get("products_top"), int(store.get("people_now") or 0)):
-            store["products_top"] = None
+            store["occupancy_mode"] = "sum"
+            store["occupancy_note"] = (
+                "Per-camera occupancies are summed; overlapping views may double-count until calibration and ReID gates pass."
+            )
 
         store_tmp = os.path.join(self.live_dir, "store.tmp.json")
         store_path = os.path.join(self.live_dir, "store.json")
         with open(store_tmp, "w") as f:
             json.dump(store, f)
         os.replace(store_tmp, store_path)
-
-    def _update_analytics(
-        self,
-        cam_id: str,
-        ctx: Dict[str, Any],
-        tracks: List[Any],
-        frame_time: float,
-        early_tracks: Optional[List[Any]] = None,
-        frame: Any = None,
-    ) -> List[Any]:
-        """Staff tag, then tripwire / zones / dwell for customers only.
-
-        ``early_tracks`` (default: ``tracks``) is who the line sees, so a crossing
-        during ByteTrack confirmation is not lost. Tagged staff are removed from
-        visitor uniques.
-        """
-        tracks = list(tracks or [])
-        if early_tracks is None:
-            early_tracks = tracks
-        ctx.setdefault("staff_ids", set())
-        for staff_zone in ctx.get("staff_zones") or []:
-            staff_zone.update(tracks, frame_time)
-            for tid, entered in list(staff_zone.active_tracks_in_zone.items()):
-                if frame_time - entered >= float(self.staff_min_seconds or 0.0):
-                    ctx["staff_ids"].add(tid)
-        staff_ids = ctx["staff_ids"]
-        customers = [t for t in tracks if t.track_id not in staff_ids]
-        early_customers = [t for t in early_tracks if t.track_id not in staff_ids]
-        for t in customers:
-            t.dwell_s = 0.0
-            t.zone_id = None
-        ctx["current_active_tracks"] = customers
-        ctx["staff_visible"] = max(0, len(tracks) - len(customers))
-
-        _reader = ctx.get("reader")
-        _loops = int(getattr(_reader, "loop_count", 0) or 0)
-        if _loops != ctx.get("reader_loop_seen", 0):
-            self._reset_sim_pass(cam_id, ctx, _loops)
-            ctx["current_active_tracks"] = customers
-            ctx["staff_visible"] = max(0, len(tracks) - len(customers))
-
-        seen = ctx.setdefault("tracked_ids_today", set())
-        seen.update(t.track_id for t in customers)
-        for tid in ctx.get("staff_ids") or ():
-            seen.discard(tid)
-
-        crossing_events: List[Dict[str, Any]] = []
-        for tw in ctx.get("tripwires") or []:
-            crossing_events.extend(tw.update(early_customers, frame_time))
-        if crossing_events and getattr(self, "local_buffer", None) is not None:
-            self._persist_crossing_events(cam_id, crossing_events)
-            recent = ctx.setdefault("recent_trip_in", {})
-            for ev in crossing_events:
-                direction = str(ev.get("direction", "")).lower()
-                if direction in ("in", "trip_in", "enter"):
-                    tid = ev.get("track_id")
-                    if tid is not None:
-                        recent[int(tid)] = float(ev.get("timestamp") or frame_time)
-            cutoff = frame_time - 120.0
-            for tid in list(recent.keys()):
-                if recent[tid] < cutoff:
-                    del recent[tid]
-
-        for zone in ctx.get("zones") or []:
-            zone.update(customers, frame_time)
-
-        staff_on_post = int(ctx.get("staff_visible", 0) or 0)
-        analytic_events: List[Dict[str, Any]] = []
-        for q in ctx.get("queues") or []:
-            try:
-                analytic_events.extend(q.update(customers, frame_time, staff_on_post=staff_on_post) or [])
-            except TypeError:
-                q.update(customers, frame_time)
-
-        for glass in ctx.get("glass_rois") or []:
-            analytic_events.extend(
-                glass.update(
-                    customers,
-                    frame_time,
-                    recent_trip_in_ids=ctx.get("recent_trip_in") or {},
-                ) or []
-            )
-
-        floor = ctx.get("floor")
-        if floor is not None:
-            if frame is not None:
-                try:
-                    floor.set_frame_size(float(frame.shape[1]), float(frame.shape[0]))
-                except Exception:
-                    pass
-            floor.update(customers, list(ctx.get("zones") or []), frame_time)
-
-        safety = ctx.get("safety")
-        if safety is not None:
-            safety.update(customers, list(ctx.get("zones") or []), frame_time, cam_id)
-
-        if analytic_events and getattr(self, "local_buffer", None) is not None:
-            self._persist_analytic_events(cam_id, analytic_events)
-        return customers
 
     def _reset_sim_pass(self, cam_id: str, ctx: Dict[str, Any], loop_count: int):
         """Loop boundary on a replaying sample video: archive this pass's uniques and
@@ -1832,6 +2172,7 @@ class EdgePipeline:
         everything answering 'how many shoppers today/entered' becomes per-pass + archived.
         """
         archived = len(ctx.get("tracked_ids_today", set()) or set())
+        self.cross_camera_fusion.reset()
         ctx["unique_total_all_passes"] = int(ctx.get("unique_total_all_passes", 0) or 0) + archived
         ctx["tracked_ids_today"] = set()
         ctx["reader_loop_seen"] = loop_count
@@ -2097,6 +2438,7 @@ class EdgePipeline:
             "demographics_json": json.dumps(demographics_metrics),
             "loop_count": int(getattr(ctx.get("reader"), "loop_count", 0) or 0),
             "is_simulated": 1 if getattr(ctx.get("reader"), "is_file", False) else 0,
+            "source_session_id": getattr(self, "source_session_id", "test-session"),
         }
 
         self.local_buffer.save_rollup(rollup)
@@ -2153,19 +2495,62 @@ class EdgePipeline:
     def stop(self):
         self.running = False
         logger.info("Stopping pipeline and saving state...")
+        if self.rtmpose_refiner is not None:
+            self.rtmpose_refiner.close()
         for ctx in self.camera_contexts.values():
             thread = ctx.get("slow_thread")
             if thread is not None and thread.is_alive():
                 thread.join(timeout=1.0)
+            display_thread = ctx.get("display_thread")
             ctx["reader"].stop()
+            if display_thread is not None and display_thread.is_alive():
+                display_thread.join(timeout=1.0)
         self.exporter.stop()
         logger.info("EdgePipeline cleanly terminated.")
 
-def main():
+def filter_camera_config(config: Dict[str, Any], camera_ids: List[str]) -> Dict[str, Any]:
+    """Return only explicitly selected, enabled cameras or reject the request."""
+    if not camera_ids or any(not isinstance(camera_id, str) or not camera_id for camera_id in camera_ids):
+        raise ValueError("Select at least one configured camera.")
+    if len(camera_ids) != len(set(camera_ids)):
+        raise ValueError("Camera IDs must be unique.")
+    cameras = [camera for camera in config.get("cameras", []) if isinstance(camera, dict)]
+    by_id = {camera.get("id"): camera for camera in cameras if camera.get("id")}
+    missing = [camera_id for camera_id in camera_ids if camera_id not in by_id or by_id[camera_id].get("enabled", True) is False]
+    if missing:
+        raise ValueError(f"Unknown or disabled camera ID(s): {', '.join(missing)}")
+    return {**config, "cameras": [by_id[camera_id] for camera_id in camera_ids]}
+
+
+def main(argv: Optional[List[str]] = None):
+    parser = argparse.ArgumentParser(description="Run an explicitly selected EdgeSight camera session.")
+    parser.add_argument("--camera-ids", required=True, help="Comma-separated configured camera IDs")
+    args = parser.parse_args(argv)
     pipeline_cfg = os.environ.get("PIPELINE_CONFIG", "configs/pipeline.yaml")
     cameras_cfg = os.environ.get("CAMERAS_CONFIG", "configs/cameras.yaml")
 
-    pipeline = EdgePipeline(pipeline_cfg, cameras_cfg)
+    try:
+        with open(cameras_cfg, "r", encoding="utf-8") as stream:
+            camera_config = yaml.safe_load(stream) or {}
+        selected_config = filter_camera_config(camera_config, [item.strip() for item in args.camera_ids.split(",") if item.strip()])
+    except (OSError, yaml.YAMLError, ValueError) as exc:
+        logger.error("Cannot start selected camera session: %s", exc)
+        return 2
+
+    try:
+        with open(pipeline_cfg, "r") as f:
+            config = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        config = {}
+    db_path = (config.get("storage") or {}).get("db_path", "data/storage/edgesight.db")
+    store_id = (config.get("edge") or {}).get("store_id", "store_default")
+    try:
+        runtime_lock = acquire_runtime_lock(db_path, store_id=store_id)
+    except RuntimeError as exc:
+        logger.error("Refusing duplicate live edge process: %s", exc)
+        return
+
+    pipeline = EdgePipeline(pipeline_cfg, cameras_cfg, camera_config_override=selected_config)
 
     def handle_signal(sig, frame):
         logger.info("Received termination signal.")
@@ -2175,8 +2560,10 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    pipeline.start()
+    try:
+        pipeline.start()
+    finally:
+        runtime_lock.close()
 
 if __name__ == "__main__":
     main()
-

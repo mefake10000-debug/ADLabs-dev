@@ -23,6 +23,8 @@ class StreamReader:
         self.fps_target = fps_target
         self.frame_interval = 1.0 / max(1, fps_target)
         self.buffer = FrameBuffer(maxsize=buffer_size)
+        self._latest_lock = threading.Lock()
+        self._latest_item: Optional[Tuple[int, Any, Any]] = None
 
         self.running = False
         self.thread: Optional[threading.Thread] = None
@@ -124,6 +126,8 @@ class StreamReader:
             fps_counter += 1
 
             # Put frame in thread-safe buffer (utc + mono for future multi-cam windows)
+            with self._latest_lock:
+                self._latest_item = (frame_idx, stamp, frame)
             self.buffer.put(frame_idx, stamp, frame)
 
             # Update FPS calculations every second
@@ -134,4 +138,13 @@ class StreamReader:
 
     def get_latest_frame(self, timeout: float = 0.5) -> Optional[Tuple[int, FrameStamp, Any]]:
         return self.buffer.get(timeout=timeout)
+
+    def peek_latest_frame(self) -> Optional[Tuple[int, FrameStamp, Any]]:
+        """Read the newest captured frame without consuming the inference queue.
+
+        The display publisher uses this separate latest-frame slot so slow model
+        inference cannot stall the annotated video stream or build display latency.
+        """
+        with self._latest_lock:
+            return self._latest_item
 

@@ -1,11 +1,15 @@
 """Declarative EdgeSight model-stack catalog (LIVE|PACKED|PARTIAL|GATED|FUTURE|SKIP|OFF).
 
 Honest statuses for health / dashboard. Does not invent LIVE demographics.
-See docs/model-stack-policy.md.
+See docs/models/model-stack-policy.md.
 """
 from __future__ import annotations
 
+import json
 import os
+import importlib.util
+import time
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -75,6 +79,39 @@ def _any_exists(base: Path, *rels: str) -> bool:
     return any(_exists(base, r) for r in rels if r)
 
 
+def _live_person_detector(base: Path) -> str:
+    """Selected detector from a fresh edge snapshot; stale values are not LIVE."""
+    data = _fresh_live_snapshot(base)
+    return str((data.get("models") or {}).get("person_detector") or "").strip()
+
+
+def _fresh_live_snapshot(base: Path) -> Dict[str, Any]:
+    """Return the newest edge snapshot only while its source timestamp is fresh."""
+    live = base / "data" / "storage" / "live"
+    if not live.is_dir():
+        return {}
+    paths = []
+    store = live / "store.json"
+    if store.is_file():
+        paths.append(store)
+    paths.extend(sorted(live.glob("cam_*.json")))
+    if not paths:
+        return {}
+    path = max(paths, key=lambda candidate: candidate.stat().st_mtime)
+    try:
+        data = json.loads(path.read_text())
+        timestamp = data.get("timestamp")
+        if timestamp:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if time.time() - parsed.timestamp() > 15:
+                return {}
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
     """Catalog + disk probes for GET /api/v1/models/stack."""
     base = Path(base_dir or os.getcwd())
@@ -88,10 +125,44 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             job="Finds people in the camera frame",
             feeds_kpi="Present · In/Out (with entrance line)",
             license="AGPL-3.0",
-            status="LIVE",
+            status="PACKED",
             path_hint="models/yolo26n.pt",
-            env_flag="DETECTOR_BACKEND=yolo26 (Ultralytics default, all perf modes)",
-            notes="Jan 2026 edge-optimized; ~38.9 ms CPU-ONNX. Default person detector.",
+            env_flag="EDGE_PERF_MODE=fast|balanced · DETECTOR_BACKEND=yolo26",
+            notes="Jan 2026 edge-optimized nano. Opt-in speed tier. Demo default is yolo26s (detect).",
+        ),
+        StackEntry(
+            key="yolo26s",
+            name="YOLO26s detector",
+            role="Person detect (demo)",
+            job="Finds people in the camera frame",
+            feeds_kpi="Present · In/Out (with entrance line)",
+            license="AGPL-3.0",
+            status="PACKED",
+            path_hint="models/yolo26s.pt",
+            env_flag="EDGE_PERF_MODE=detect (demo default) · Ultralytics only",
+            notes="imgsz 640, infer every 2 frames, person conf 0.22. RF-DETR is not the default.",
+        ),
+        StackEntry(
+            key="yolo26m_pose",
+            name="YOLO26m pose",
+            role="Body pose / engagement",
+            license="AGPL-3.0",
+            status="PACKED",
+            path_hint="models/yolo26m-pose.pt",
+            notes="Pose keypoints used by the enrichment worker.",
+            job="Estimates body pose and activity cues",
+            feeds_kpi="Engagement · safety cues",
+        ),
+        StackEntry(
+            key="yolo_world_clip",
+            name="YOLO-World + CLIP ViT-B/32",
+            role="Open vocabulary display interest",
+            license="AGPL-3.0 + MIT",
+            status="PACKED",
+            path_hint="models/yolov8s-worldv2.pt + weights/clip/ViT-B-32.pt",
+            notes="Product category detections use CLIP text embeddings.",
+            job="Finds retail product categories",
+            feeds_kpi="Shelf / display interest",
         ),
         StackEntry(
             key="yoloe",
@@ -100,7 +171,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             job="Names product categories on shelves",
             feeds_kpi="Shelf / display interest",
             license="AGPL-3.0",
-            status="LIVE",
+            status="PACKED",
             path_hint="models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
             notes="Pilot OK under AGPL; commercial needs Enterprise or Apache swap.",
         ),
@@ -111,9 +182,9 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             job="Keeps the same person ID within a short visit",
             feeds_kpi="Path / journey (same visit)",
             license="MIT",
-            status="LIVE",
+            status="PACKED",
             path_hint="models/pack/03-reid/",
-            env_flag="models.reid.enabled + EDGE_PERF_MODE=quality",
+            env_flag="models.reid.enabled + owner ReID switch; sampled in fast mode",
             notes="MIT code+weights. No multi-day identity gallery.",
         ),
         StackEntry(
@@ -123,7 +194,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             feeds_kpi="Shelf category tags",
             role="Zero-shot text / shelf interest",
             license="MIT",
-            status="LIVE",
+            status="PACKED",
             path_hint="weights/clip/ViT-B-32.pt",
         ),
         StackEntry(
@@ -224,11 +295,21 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
     for e in entries:
         if e.key == "yolo26n":
             e.on_disk = _any_exists(base, "models/yolo26n.pt")
+        elif e.key == "yolo26s":
+            e.on_disk = _any_exists(base, "models/yolo26s.pt", "models/pack/01-detection/yolo26s/yolo26s.pt")
         elif e.key == "yoloe":
             e.on_disk = _any_exists(
                 base,
                 "models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
                 "models/yolov8s-worldv2.pt",
+            )
+        elif e.key == "yolo26m_pose":
+            e.on_disk = _any_exists(base, "models/yolo26m-pose.pt")
+        elif e.key == "yolo_world_clip":
+            e.on_disk = _any_exists(base, "models/yolov8s-worldv2.pt") and _any_exists(
+                base,
+                "weights/clip/ViT-B-32.pt",
+                "models/pack/05-open-vocab/clip-vit-base-patch32/pytorch_model.bin",
             )
         elif e.key == "osnet_reid":
             reid_dir = base / "models/pack/03-reid"
@@ -271,6 +352,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             e.on_disk = _any_exists(
                 base,
                 "models/pack/08-demographics/mivolo_v2/model.safetensors",
+                "models-extra/mivolo_v2/model.safetensors",
             )
             if not demo_on:
                 e.status = "GATED"
@@ -282,6 +364,9 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             variant = resolve_rfdetr_variant()
             weight_name = RFDETR_WEIGHT_IDS.get(variant, RFDETR_WEIGHT_IDS["nano"])
             pack_path = base / "models/pack/01-detection/rfdetr" / weight_name
+            local_path = base / "models-extra/rfdetr" / weight_name
+            if local_path.is_file() and local_path.stat().st_size > 100:
+                pack_path = local_path
             rf_home = Path(
                 os.path.expanduser(
                     os.environ.get("RF_HOME")
@@ -294,7 +379,8 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
             e.on_disk = _exists(base, str(pack_path)) or (
                 cache_path.is_file() and cache_path.stat().st_size > 1000
             )
-            import_ok, import_detail = rfdetr_runtime_probe()
+            import_ok = importlib.util.find_spec("rfdetr") is not None
+            import_detail = "rfdetr package installed" if import_ok else "rfdetr package missing"
             selected = resolve_detector_backend() == BACKEND_RFDETR
             runtime_loaded = os.environ.get("RFDETR_RUNTIME_LOADED", "").strip() in (
                 "1", "true", "yes", "on",
@@ -334,27 +420,52 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
     # Do not flip YOLO to OFF on a failed path probe — Ultralytics may load from cache
     # while still producing live boxes (site strip also reconciles with live.models).
     backend = resolve_detector_backend()
+    snapshot = _fresh_live_snapshot(base)
+    live_det = str((snapshot.get("models") or {}).get("person_detector") or "").lower()
+    models_snapshot = snapshot.get("models") or {}
+    reid_snapshot = snapshot.get("reid") or {}
+    active_jobs = set((snapshot.get("slow_scheduler") or {}).get("enabled_models") or [])
     for e in entries:
+        if e.key in ("yolo26n", "yolo26s"):
+            if backend == BACKEND_RFDETR:
+                e.status = "PACKED" if e.on_disk else "OFF"
+                e.notes = (e.notes or "") + " RF-DETR selected (opt-in)."
+            elif e.key == "yolo26s" and "yolo26s" in live_det:
+                e.status = "LIVE" if e.on_disk else "OFF"
+            elif e.key == "yolo26n" and live_det and "yolo26s" not in live_det and "yolo" in live_det:
+                e.status = "LIVE" if e.on_disk else "OFF"
+            elif e.key == "yolo26n" and "yolo26s" in live_det:
+                e.status = "PACKED" if e.on_disk else "OFF"
+            elif e.key == "yolo26n" and not live_det:
+                perf_guess = os.environ.get("EDGE_PERF_MODE", "detect").strip().lower()
+                if perf_guess in ("", "detect", "quality"):
+                    e.status = "PACKED" if e.on_disk else "OFF"
         if e.key == "yolo26n" and backend == BACKEND_RFDETR:
-            e.status = "PACKED"
+            e.status = "PACKED" if e.on_disk else "OFF"
             e.notes = (
                 "Fast-path YOLO26n kept as selectable alternate "
                 "(DETECTOR_BACKEND=yolo26). RF-DETR currently selected."
             )
-        elif e.key in ("osnet_reid", "clip_vit_b32") and e.status == "LIVE":
-            perf = os.environ.get("EDGE_PERF_MODE", "balanced").strip().lower()
-            if e.on_disk is False:
+        elif e.key in ("osnet_reid", "clip_vit_b32"):
+            if e.key == "osnet_reid" and (
+                reid_snapshot.get("active") is True or models_snapshot.get("osnet_reid_enabled") is True
+            ):
+                e.status = "LIVE"
+                e.notes = "Live snapshot confirms ONNX OSNet ReID is running; session-scoped only."
+            elif e.key == "clip_vit_b32" and "clip" in active_jobs:
+                e.status = "LIVE"
+            elif e.on_disk is False:
                 e.status = "PACKED"
                 e.notes = (e.notes or "") + " Weights not on probed path — waiting."
-            elif perf in ("fast", "balanced"):
+            else:
                 e.status = "PACKED"
-                e.notes = (e.notes or "") + " Waiting: set EDGE_PERF_MODE=quality to run."
+                e.notes = (e.notes or "") + " Waiting for a fresh live snapshot to confirm runtime activity."
         elif e.key == "yoloe" and e.status == "LIVE" and e.on_disk is False:
             e.status = "PACKED"
             e.notes = (e.notes or "") + " Weights not on probed path — waiting."
 
     return {
-        "policy": "docs/model-stack-policy.md",
+        "policy": "docs/models/model-stack-policy.md",
         "env": {
             "ENABLE_DEMOGRAPHICS": os.environ.get("ENABLE_DEMOGRAPHICS", "0"),
             "DEMOGRAPHICS_DPIA_OK": os.environ.get("DEMOGRAPHICS_DPIA_OK", "0"),
@@ -366,7 +477,7 @@ def build_model_stack(base_dir: Optional[str] = None) -> Dict[str, Any]:
         },
         "models": [e.to_dict() for e in entries],
         "phase2": {
-            "script": "scripts/download_pack_models_phase2.py",
+            "script": "scripts/download/download_pack_models_phase2.py",
             "default": "dry-run",
             "download_flag": "--download",
         },

@@ -121,3 +121,8 @@ def snapshot(boxes: Optional[Sequence[Box]] = None, **kwargs: Any) -> Dict[str, 
             "SKU-110K weights intentionally SKIPPED (non-commercial)."
         ),
     }
+
+
+def snapshot_from_products(products: Sequence[Dict[str, Any]], **kwargs: Any) -> Dict[str, Any]:
+    """Evaluate measured product boxes; calibration still controls alert readiness."""
+    return snapshot([tuple(product['bbox']) for product in products if product.get('bbox') and len(product['bbox']) == 4], **kwargs)

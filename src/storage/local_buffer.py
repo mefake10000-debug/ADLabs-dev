@@ -37,6 +37,9 @@ class LocalBuffer:
         ("store_rollups", "group_count", "INTEGER DEFAULT 0"),
         ("store_rollups", "people_in_groups", "INTEGER DEFAULT 0"),
         ("store_rollups", "demographics_json", "TEXT DEFAULT ''"),
+        ("store_rollups", "camera_role", "TEXT"),
+        ("store_rollups", "camera_group", "TEXT"),
+        ("store_rollups", "is_primary", "INTEGER"),
     ]
 
     def _migrate(self, conn: sqlite3.Connection):
@@ -52,12 +55,14 @@ class LocalBuffer:
         query = """
         INSERT INTO store_rollups (
             store_id, device_id, camera_id, timestamp_start, timestamp_end,
+            camera_role, camera_group, is_primary,
             in_count, out_count, current_occupancy, avg_dwell_seconds,
             queue_length, avg_queue_wait_seconds, queue_alert_active,
             avg_attention_score, facing_ratio, phone_usage_rate, engaged_ratio,
             group_count, people_in_groups, demographics_json, exported
         ) VALUES (
             :store_id, :device_id, :camera_id, :timestamp_start, :timestamp_end,
+            :camera_role, :camera_group, :is_primary,
             :in_count, :out_count, :current_occupancy, :avg_dwell_seconds,
             :queue_length, :avg_queue_wait_seconds, :queue_alert_active,
             :avg_attention_score, :facing_ratio, :phone_usage_rate, :engaged_ratio,
@@ -72,6 +77,9 @@ class LocalBuffer:
         payload.setdefault("group_count", 0)
         payload.setdefault("people_in_groups", 0)
         payload.setdefault("demographics_json", "")
+        payload.setdefault("camera_role", None)
+        payload.setdefault("camera_group", None)
+        payload.setdefault("is_primary", None)
         conn = self._get_connection()
         try:
             with conn:
@@ -191,38 +199,6 @@ class LocalBuffer:
         try:
             cursor = conn.execute(query, (limit,))
             return [dict(row) for row in cursor.fetchall()]
-        finally:
-            conn.close()
-
-    def get_recent_products_top(
-        self, camera_id: str, limit: int = 8
-    ) -> List[Dict[str, Any]]:
-        """Aggregate product_interest rows for live_snapshot products_top (not POS SKUs)."""
-        query = """
-        SELECT category,
-               SUM(viewers) AS viewers,
-               SUM(detections) AS detections,
-               AVG(avg_dwell_seconds) AS avg_dwell_seconds
-        FROM product_interest
-        WHERE camera_id = ?
-        GROUP BY category
-        ORDER BY SUM(viewers) DESC, SUM(detections) DESC
-        LIMIT ?
-        """
-        conn = self._get_connection()
-        try:
-            cursor = conn.execute(query, (camera_id, limit))
-            rows = []
-            for row in cursor.fetchall():
-                rows.append({
-                    "category": row["category"],
-                    "viewers": int(row["viewers"] or 0),
-                    "detections": int(row["detections"] or 0),
-                    "avg_dwell_seconds": round(float(row["avg_dwell_seconds"] or 0.0), 1),
-                })
-            return rows
-        except Exception:
-            return []
         finally:
             conn.close()
 

@@ -1,0 +1,52 @@
+{
+  "dataset": "ADLabs local CV evaluation set",
+  "scope": "person-count spot checks only; no training data",
+  "selected_sources": [
+    {
+      "path": "data/sample_videos/mall_entrance_topdown_01.mp4",
+      "duration_seconds": 40.16,
+      "resolution": "1280x720",
+      "fps": 25.0,
+      "angle": "high/straight-down entrance view, per source notes",
+      "frames": [
+        "frames/eval/mall_entrance_topdown_f00500.jpg"
+      ],
+      "ground_truth_records": 1
+    },
+    {
+      "path": "data/sample_videos/mall_promenade_01.mp4",
+      "duration_seconds": 72.41,
+      "resolution": "1280x720",
+      "fps": 29.97,
+      "angle": "elevated multi-level promenade, per source notes",
+      "frames": [
+        "frames/eval/mall_promenade_f00900.jpg"
+      ],
+      "ground_truth_records": 1
+    }
+  ],
+  "excluded_or_candidate_only": [
+    {
+      "path": "data/sample_videos/entrance_sample.mp4",
+      "reason": "Unknown origin/license; excluded from dataset pending provenance resolution."
+    },
+    {
+      "path": "data/sample_videos/garage/",
+      "reason": "Owner-consented internal footage, but existing checkpoint counts are null; prep manifest and present clip set disagree. Not used for scoring or copied."
+    },
+    {
+      "path": "data/sample_videos/restaurant_ch17/",
+      "reason": "Owner-consented internal footage, but no independent labels; not used for scoring or copied."
+    },
+    {
+      "path": "data/sample_videos/checkout_sample.mp4",
+      "reason": "Synthetic footage; unsuitable as real-scene model benchmark."
+    },
+    {
+      "path": "data/storage/id_switch_runs/store_entrance_near_01_3fps_20261022-195515/",
+      "reason": "Automatically generated suspected ID-switch cases and model tracks; candidates only, not identity ground truth."
+    }
+  ],
+  "availability": "This review branch contains text-only manifests and count notes. Source video and extracted frame files are excluded from its current tree; source paths below are provenance references, not files available here.",
+  "privacy": "No source videos, extracted frames, face crops, embeddings, or person identities are included in this review branch."
+}

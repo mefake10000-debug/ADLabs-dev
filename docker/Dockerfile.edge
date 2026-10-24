@@ -25,9 +25,11 @@ WORKDIR /app
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir torch torchvision --index-url ${TORCH_INDEX_URL}
 
-# Everything else. Editing requirements-edge.txt no longer re-downloads torch.
+# Install the remaining requirements without asking PyPI to replace the CPU-only
+# torch/torchvision wheels installed above with default Linux (CUDA-enabled) wheels.
 COPY requirements-edge.txt .
-RUN pip install --no-cache-dir -r requirements-edge.txt
+RUN sed -E '/^(torch|torchvision)==/d' requirements-edge.txt > /tmp/requirements-edge-docker.txt \
+    && pip install --no-cache-dir -r /tmp/requirements-edge-docker.txt
 
 # Copy source code and default configs
 COPY configs/ ./configs/
@@ -37,4 +39,7 @@ COPY scripts/ ./scripts/
 # Create data directories
 RUN mkdir -p /app/data/sample_videos /app/data/storage /app/models
 
-CMD ["python", "-m", "src.main"]
+# The default container is a small control plane. It does not import the CV
+# pipeline or load weights; the supervisor starts src.main only after an
+# authenticated, explicit Start request.
+CMD ["python", "-m", "src.runtime.supervisor"]

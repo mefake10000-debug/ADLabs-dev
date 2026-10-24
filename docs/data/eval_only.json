@@ -1,0 +1,8 @@
+{
+  "split": "eval_only",
+  "records": [
+    "mall_entrance_topdown_f00500",
+    "mall_promenade_f00900"
+  ],
+  "reason": "Only two approximate count checkpoints exist; no box or identity labels."
+}

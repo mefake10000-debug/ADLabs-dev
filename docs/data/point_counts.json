@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "annotation_type": "point_in_time_visible_person_count",
+  "counting_rule": "Use the source annotation notes; count clearly distinguishable people only, including partially visible people when specified. No identity claims.",
+  "records": [
+    {
+      "id": "mall_entrance_topdown_f00500",
+      "source": "data/sample_videos/mall_entrance_topdown_01.mp4",
+      "frame_index": 500,
+      "frame": "frames/eval/mall_entrance_topdown_f00500.jpg",
+      "expected_visible_people": 9,
+      "quality": "approximate_manual_count",
+      "uncertainty": "Additional distant figures were excluded as too small/ambiguous; true count may be higher.",
+      "source_annotation": "scripts/benchmark/benchmark_ground_truth/mall_entrance_topdown_01.json",
+      "license_note": "Pexels license documented in data/sample_videos/SOURCES.md"
+    },
+    {
+      "id": "mall_promenade_f00900",
+      "source": "data/sample_videos/mall_promenade_01.mp4",
+      "frame_index": 900,
+      "frame": "frames/eval/mall_promenade_f00900.jpg",
+      "expected_visible_people": 4,
+      "quality": "approximate_manual_count",
+      "uncertainty": "Count excludes ambiguous figures in glass reflections; this is not exhaustive frame-level truth.",
+      "source_annotation": "scripts/benchmark/benchmark_ground_truth/mall_promenade_01.json",
+      "license_note": "Pexels license documented in data/sample_videos/SOURCES.md"
+    }
+  ]
+}

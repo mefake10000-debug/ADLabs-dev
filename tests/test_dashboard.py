@@ -17,7 +17,12 @@ os.environ["DASHBOARD_AUTO_REFRESH"] = "0"   # the app's sleep+rerun loop would 
 import yaml
 from PIL import Image
 from fastapi.testclient import TestClient
-from streamlit.testing.v1 import AppTest
+try:
+    from streamlit.testing.v1 import AppTest
+except ModuleNotFoundError as exc:
+    if exc.name and exc.name.startswith("streamlit"):
+        raise unittest.SkipTest("Streamlit AppTest requires the optional dashboard dependency")
+    raise
 
 import server.app as server_app
 
@@ -35,11 +40,24 @@ class TestDashboard(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        from tempfile import TemporaryDirectory
+
         server_app.init_db()
         cls.client = TestClient(server_app.app)
+        cls.fixture_dir = TemporaryDirectory(prefix="edgesight-dashboard-plumbing-")
+        cls.video_patch = patch.object(server_app, "VIDEO_DIR", cls.fixture_dir.name)
+        cls.video_patch.start()
+        global TEST_VIDEO, ENTRANCE_VIDEO
+        TEST_VIDEO = os.path.join(cls.fixture_dir.name, "mall_concourse_01.mp4")
+        ENTRANCE_VIDEO = os.path.join(cls.fixture_dir.name, "entrance_sample.mp4")
+        for fixture_path in (TEST_VIDEO, ENTRANCE_VIDEO):
+            with open(fixture_path, "wb") as fixture:
+                fixture.write(b"")
 
     @classmethod
     def tearDownClass(cls):
+        cls.video_patch.stop()
+        cls.fixture_dir.cleanup()
         for path in (server_app.CONFIG_PATH, server_app.CONFIG_PATH + ".tmp"):
             if os.path.exists(path):
                 os.remove(path)
@@ -48,7 +66,7 @@ class TestDashboard(unittest.TestCase):
         self.config_path = server_app.CONFIG_PATH
         with open(self.config_path, "w") as f:
             yaml.safe_dump({"cameras": [
-                {"id": "cam_a", "name": "Cam A", "source": "data/sample_videos/entrance_sample.mp4", "fps_target": 15},
+                {"id": "cam_a", "name": "Cam A", "source": ENTRANCE_VIDEO, "fps_target": 15},
                 {"id": "cam_b", "name": "Cam B", "source": "rtsp://10.0.0.5/stream", "fps_target": 10},
             ]}, f, sort_keys=False)
         self.store = f"dash_store_{time.time_ns()}"

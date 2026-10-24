@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "report": "MODEL_EVAL_REPORT.md",
+  "date": "2026-10-24",
+  "branch": "ml/dataset-research-train-eval",
+  "device": "cpu",
+  "runtime": {
+    "python": "repo .venv",
+    "ultralytics": "8.4.155",
+    "torch": "2.14.0",
+    "mps_available": false,
+    "cuda_available": false
+  },
+  "dataset": {
+    "mode": "eval_only",
+    "frame_count": 2,
+    "source_clip_count": 2,
+    "count_only_ground_truth": true,
+    "box_annotations": 0,
+    "identity_annotations": 0,
+    "training_ready": false
+  },
+  "models": [
+    {
+      "name": "YOLO26s",
+      "weights": "models/yolo26s.pt",
+      "status": "evaluated",
+      "evaluation_scope": "person-count spot checks; configured filters; 5 FPS sampled processing on CPU",
+      "aggregate": {
+        "checkpoint_count": 2,
+        "expected_count_sum": 13,
+        "kept_detection_count_sum": 0,
+        "tracker_output_count_sum": 0,
+        "count_coverage_proxy": 0.0
+      },
+      "metrics": {
+        "precision": null,
+        "recall": null,
+        "f1": null,
+        "tp": null,
+        "fp": null,
+        "fn": null,
+        "map50": null,
+        "map50_95": null,
+        "idf1": null,
+        "mota": null,
+        "motp": null,
+        "true_id_switches": null
+      },
+      "null_reasons": {
+        "precision_recall_f1_tp_fp_fn_map": "No box-level annotations.",
+        "idf1_mota_motp_true_id_switches": "No identity annotations or labeled sequences."
+      },
+      "checkpoints": [
+        {
+          "source": "data/sample_videos/mall_entrance_topdown_01.mp4",
+          "frame_index": 500,
+          "expected_count_approx": 9,
+          "yolo_boxes_at_configured_confidence": 2,
+          "size_rejected": 2,
+          "aspect_rejected": 0,
+          "kept_detections": 0,
+          "tracker_output": 0,
+          "count_coverage_proxy": 0.0,
+          "video_seconds_processed": 20.0,
+          "frames_processed": 99,
+          "wall_seconds": 14.9
+        },
+        {
+          "source": "data/sample_videos/mall_promenade_01.mp4",
+          "frame_index": 900,
+          "expected_count_approx": 4,
+          "yolo_boxes_at_configured_confidence": 5,
+          "size_rejected": 5,
+          "aspect_rejected": 0,
+          "kept_detections": 0,
+          "tracker_output": 0,
+          "count_coverage_proxy": 0.0,
+          "video_seconds_processed": 30.1,
+          "frames_processed": 151,
+          "wall_seconds": 18.7
+        }
+      ],
+      "interpretation": "Count coverage proxy is not recall. Every proposal at configured confidence was rejected by the configured size filter; false positives and misses cannot be separated without box labels."
+    },
+    {
+      "name": "YOLO26m-Pose",
+      "weights": "models/yolo26m-pose.pt",
+      "status": "not_scored",
+      "reason": "No pose keypoint/behavior labels."
+    },
+    {
+      "name": "YuNet",
+      "weights": "models/onnx/face_detection_yunet_2023mar.onnx",
+      "status": "not_scored",
+      "reason": "No face-box labels; face detection accuracy is not inferred from estimates."
+    },
+    {
+      "name": "Age/Gender INT8",
+      "weights": "models/onnx/age_gender_vit_int8.onnx",
+      "status": "not_scored",
+      "reason": "No valid attribute ground truth; two-frame anonymous count dataset is not suitable for attribute scoring."
+    },
+    {
+      "name": "HeadPoseEstimator",
+      "weights": null,
+      "status": "not_scored",
+      "reason": "Geometric estimator, no orientation/gaze labels."
+    },
+    {
+      "name": "YOLOv8s-Worldv2",
+      "weights": "models/yolov8s-worldv2.pt",
+      "status": "not_scored",
+      "reason": "No product/category box labels."
+    },
+    {
+      "name": "OSNet ReID",
+      "weights": "models/pack/03-reid/osnet_x0_25_msmt17.onnx",
+      "status": "not_run",
+      "reason": "Configured checkpoint missing; no inference consumer; identity/gallery use is excluded."
+    },
+    {
+      "name": "CLIP ViT-B/32",
+      "weights": "weights/clip/ViT-B-32.pt",
+      "status": "not_run",
+      "reason": "Disabled and no consumer."
+    },
+    {
+      "name": "YOLOE",
+      "weights": "models/pack/06-shelf/yoloe-v8s-seg-pf.pt",
+      "status": "not_run",
+      "reason": "Disabled; configured weight missing; no shelf consumer."
+    },
+    {
+      "name": "RF-DETR",
+      "weights": null,
+      "status": "not_run",
+      "reason": "Not configured or present."
+    }
+  ],
+  "recommendation": {
+    "decision": "TUNE_FIRST_NO_FINETUNE",
+    "basis": "Configured size filters rejected every proposal in both evaluated frames; available labels are only two approximate counts and cannot quantify false positives or mAP.",
+    "next_data_needed": "Independently reviewed person boxes across varied retail scenes, plus short anonymous-ID sequences for tracking."
+  },
+  "privacy": {
+    "private_footage_copied": false,
+    "face_crops_created": false,
+    "reid_embeddings_created": false,
+    "raw_frames_git_ignored": true
+  }
+}

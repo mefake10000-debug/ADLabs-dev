@@ -16,12 +16,12 @@ from src.perception.detector_backend import (
     resolve_rfdetr_variant,
     resolve_rfdetr_weights,
 )
+from src.perception.illumination import normalize_illumination
 
 logger = logging.getLogger(__name__)
 
 # COCO person class id (shared by YOLO26 and RF-DETR COCO checkpoints).
 _PERSON_CLASS_ID = 0
-_PERSON_LABELS = frozenset({"person", "people"})
 
 # Retail-relevant COCO class ids drawn on the MJPEG overlay (not tracked).
 # Person (0) is handled separately with anthropometric filters + ByteTrack.
@@ -34,87 +34,12 @@ _STORE_OBJECT_CLASS_IDS = (
 )
 
 
-def _box_iou(a: List[float], b: List[float]) -> float:
-    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
-    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
-    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-    if inter <= 0:
-        return 0.0
-    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
-    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
-
-
-def is_person_detection(det: Dict[str, Any]) -> bool:
-    """True only for COCO person (class 0) or an explicit person label.
-
-    Detections with no class and no label stay people so older callers that
-    pass ``{bbox, confidence}`` still track. Anything else is an object.
-    """
-    label = str(det.get("label") or det.get("class_name") or "").strip().lower()
-    if label in _PERSON_LABELS:
-        return True
-    if label:
-        return False
-    raw_cls = det.get("class_id", None)
-    if raw_cls is None:
-        return True
-    try:
-        return int(raw_cls) == _PERSON_CLASS_ID
-    except (TypeError, ValueError):
-        return False
-
-
-def keep_person_detections(detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """ByteTrack input: person boxes only. Objects never receive a track id."""
-    return [d for d in (detections or []) if is_person_detection(d)]
-
-
-def drop_objects_on_people(
-    objects: List[Dict[str, Any]],
-    people: List[Dict[str, Any]],
-    max_overlap: float = 0.45,
-) -> List[Dict[str, Any]]:
-    """Drop object boxes that sit on a person (bag/chair class on the body).
-
-    Uses the fraction of the *object* box covered by a person, not IoU.
-    A handbag on a torso can have modest IoU and still be entirely inside
-    the person box.
-    """
-    if not objects:
-        return []
-    if not people:
-        return [d for d in objects if not is_person_detection(d)]
-    person_boxes = [p["bbox"] for p in people if p.get("bbox")]
-    kept: List[Dict[str, Any]] = []
-    for det in objects:
-        if is_person_detection(det):
-            continue
-        box = det.get("bbox")
-        if not box or len(box) < 4:
-            continue
-        area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
-        covered = False
-        for pb in person_boxes:
-            ix1, iy1 = max(box[0], pb[0]), max(box[1], pb[1])
-            ix2, iy2 = min(box[2], pb[2]), min(box[3], pb[3])
-            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-            frac = inter / area if area > 0 else 0.0
-            if frac >= max_overlap or _box_iou(box, pb) >= max_overlap:
-                covered = True
-                break
-        if not covered:
-            kept.append(det)
-    return kept
-
-
 class PersonDetector:
     """Person (+ optional store-object) detector via Ultralytics YOLO by default.
 
     RF-DETR remains an opt-in Apache alternate (``DETECTOR_BACKEND=rfdetr``).
     There is deliberately no lower-accuracy classical fallback: HOG+SVM recovered only
-    ~7-14% of people on real shop footage (docs/tracking-benchmark.md). With
+    ~7-14% of people on real shop footage (docs/models/tracking-benchmark.md). With
     require_model=True a model that cannot load is a startup error. Without it the
     detector returns no detections and logs an error.
 
@@ -124,7 +49,7 @@ class PersonDetector:
 
     def __init__(
         self,
-        model_name: str = "yolov8n.pt",
+        model_name: str = "models/yolo26n.pt",
         conf_thresh: float = 0.50,
         iou_thresh: float = 0.45,
         min_height: float = 85.0,
@@ -139,7 +64,7 @@ class PersonDetector:
         rfdetr_weights: Optional[str] = None,
         pipeline_cfg: Optional[Dict[str, Any]] = None,
         detect_store_objects: bool = True,
-        object_conf: float = 0.50,
+        object_conf: float = 0.45,
     ):
         self.backend = (backend or BACKEND_YOLO26).strip().lower()
         if self.backend == BACKEND_YOLO11:
@@ -147,12 +72,11 @@ class PersonDetector:
         if self.backend not in (BACKEND_YOLO26, BACKEND_RFDETR):
             raise ValueError(f"Unknown detector backend '{backend}' (use yolo26|yolo11|rfdetr)")
         self.detect_store_objects = bool(detect_store_objects)
+        # Store fixtures/merch use a higher bar than people so chairs are not people.
+        self.object_conf = float(object_conf if object_conf is not None else 0.45)
 
         self.model_name = model_name
-        self.conf_thresh = float(conf_thresh)
-        # Objects use a higher floor than people so chairs/bags do not flood the
-        # overlay or compete with person boxes inside class-aware NMS output.
-        self.object_conf = float(object_conf)
+        self.conf_thresh = conf_thresh
         self.iou_thresh = iou_thresh
         self.min_height = min_height
         self.min_width = min_width
@@ -170,6 +94,7 @@ class PersonDetector:
             self.rfdetr_variant, pipeline_cfg
         )
         self._loaded = False
+        self.last_illumination_mode = "normal"
 
         if self.backend == BACKEND_RFDETR:
             self._init_rfdetr()
@@ -196,16 +121,7 @@ class PersonDetector:
             logger.info(f"Loading YOLO model '{self.model_name}' on device '{self.device}'...")
             self.model = YOLO(self.model_name)
             self._loaded = True
-            ckpt = getattr(self.model, "ckpt_path", None) or self.model_name
-            logger.info(
-                "YOLO weights loaded: %s (requested %s) device=%s imgsz=%s person_conf=%.2f object_conf=%.2f",
-                ckpt,
-                self.model_name,
-                self.device,
-                self.imgsz,
-                self.conf_thresh,
-                self.object_conf,
-            )
+            logger.info("YOLO model successfully loaded.")
         except Exception as e:
             self.model = None
             self._loaded = False
@@ -266,7 +182,7 @@ class PersonDetector:
             if self.require_model:
                 raise RuntimeError(
                     f"Could not load RF-DETR '{self.rfdetr_weights}': {e}. "
-                    f"Run `python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano` "
+                    f"Run `python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano` "
                     f"or let rfdetr auto-fetch into RF_HOME."
                 ) from e
             logger.error("Could not initialize RF-DETR (%s). This detector will return NO detections.", e)
@@ -288,9 +204,10 @@ class PersonDetector:
                 self._warned_no_model = True
             return [], []
 
+        inference_frame, self.last_illumination_mode = normalize_illumination(frame)
         if self.backend == BACKEND_RFDETR:
-            return self._detect_rfdetr(frame), []
-        return self._detect_yolo(frame)
+            return self._detect_rfdetr(inference_frame), []
+        return self._detect_yolo(inference_frame)
 
     def _class_name(self, cls: int) -> str:
         names = getattr(self.model, "names", None) or {}
@@ -306,12 +223,10 @@ class PersonDetector:
             if self.detect_store_objects and is_ultralytics_backend(self.backend):
                 class_ids = [_PERSON_CLASS_ID, *_STORE_OBJECT_CLASS_IDS]
 
-            # One forward at the lower (person) floor. Objects are dropped afterward
-            # if they sit under object_conf — a second predict would halve CPU FPS.
             results = self.model.predict(
                 source=frame,
                 classes=class_ids,
-                conf=min(self.conf_thresh, self.object_conf),
+                conf=self.conf_thresh,
                 iou=self.iou_thresh,
                 device=self.device,
                 imgsz=self.imgsz,
@@ -327,15 +242,13 @@ class PersonDetector:
                     conf = float(box.conf[0].item())
                     cls = int(box.cls[0].item())
                     if cls == _PERSON_CLASS_ID:
-                        if conf < self.conf_thresh:
-                            continue
                         det = self._filter_box(x1, y1, x2, y2, conf, cls)
                         if det:
                             det["label"] = "person"
                             det["class_name"] = "person"
-                            det["kind"] = "person"
                             people.append(det)
                     elif self.detect_store_objects:
+                        # Higher bar than people — a chair must not enter ByteTrack.
                         if conf < self.object_conf:
                             continue
                         # Looser geometry for merchandising / fixtures (not anthropometric).
@@ -343,19 +256,15 @@ class PersonDetector:
                         h = y2 - y1
                         if w < 12 or h < 12 or (w * h) < 400:
                             continue
-                        name = self._class_name(cls)
-                        if name.strip().lower() in _PERSON_LABELS:
-                            continue
                         objects.append({
                             "bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
                             "confidence": round(conf, 3),
                             "class_id": cls,
-                            "label": name,
-                            "class_name": name,
-                            "kind": "object",
+                            "label": self._class_name(cls),
+                            "class_name": self._class_name(cls),
                         })
             people = self._suppress_contained_duplicates(people)
-            objects = drop_objects_on_people(objects, people)
+            objects = self._drop_objects_on_people(people, objects)
             return people, objects[:32]
         except Exception as e:
             logger.error(f"Detection error: {e}")
@@ -447,3 +356,47 @@ class PersonDetector:
                 keep.append(det)
 
         return keep
+
+    @staticmethod
+    def _iou(a: List[float], b: List[float]) -> float:
+        ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+        ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+        area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+        return inter / (area_a + area_b - inter)
+
+    @classmethod
+    def _drop_objects_on_people(
+        cls,
+        people: List[Dict[str, Any]],
+        objects: List[Dict[str, Any]],
+        iou_min: float = 0.50,
+    ) -> List[Dict[str, Any]]:
+        """Drop store-object boxes that are the same region as a person.
+
+        A second annotator on the body (person foot + a 'chair' rectangle on the
+        same pixels) reads as a glitch. Handheld items that only partly overlap
+        a person stay labeled.
+        """
+        if not people or not objects:
+            return objects
+        kept: List[Dict[str, Any]] = []
+        for obj in objects:
+            label = str(obj.get("label") or obj.get("class_name") or "").lower()
+            if label in ("person", "people"):
+                continue
+            ob = obj.get("bbox") or []
+            if len(ob) < 4:
+                continue
+            if any(
+                len(person.get("bbox") or []) >= 4
+                and cls._iou(ob, person["bbox"]) >= iou_min
+                for person in people
+            ):
+                continue
+            kept.append(obj)
+        return kept

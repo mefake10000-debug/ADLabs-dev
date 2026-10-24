@@ -23,6 +23,11 @@ Drop consumed by the EdgeSight + portal wiring agent. **Rule:** real fields or h
 | `competitor-parity-field-stubs.md` | Portal card → live keys |
 | `arm-enrichment-budget-runbook.md` | Fast vs quality enrichment budget |
 | `IMPLEMENTATION.md` | What this tip wired LIVE vs still FUTURE |
+| `consolidation-manifest.md` | Source commits, migration paths, and exclusions |
+| `branch-inventory.md` | Reviewed branch locations and preservation status |
+| `foundation-audit.md` | Validation results, security limits, and blockers |
+| `model-runtime-inventory.md` | Configured vs loaded/inferred model status |
+| `final-consolidation-status.md` | DONE/PARTIAL/BLOCKED checklist for delivery |
 
 ## Local URLs
 

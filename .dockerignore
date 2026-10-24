@@ -8,6 +8,14 @@
 **/*.pyc
 data
 models
+weights
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+.env
+.env.*
 docs
 tests
 *.md

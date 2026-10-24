@@ -1,96 +1,162 @@
 cameras:
 - id: cam_entrance_01
   name: Main Store Floor & Entrance
-  source: data/sample_videos/entrance_sample.mp4
+  role: primary
+  group: store_mumbai_001
+  enabled: true
+  source: data/sample_videos/restaurant_ch17/20261016124627.mp4
   fps_target: 15
   resolution:
   - 1270
   - 720
   tripwires:
-  # Sample entrance line for 1270x720. Client owns all zone polygons below —
-  # Apply entrance template (Calibration Studio) only sets this tripwire, never queue/staff/dwell.
-  - id: entrance_tripwire
-    name: Entrance
+  - id: tripwire_1792681245802
+    name: tripwire_1792681245802
     line:
-    - - 160.0
-      - 520.0
-    - - 1110.0
-      - 520.0
+    - - 421.0
+      - 340.0
+    - - 1034.0
+      - 337.0
     in_direction: bottom_to_top
   zones:
-  # Restored client queue polygon (pre-61e79b7 template overwrite). Do not auto-rewrite.
-  - id: queue_zone_1790217226558
+  - id: queue_zone_1792681275504
     name: Checkout Queue
     polygon:
-    - - 295.0
-      - 328.0
-    - - 433.0
+    - - 363.0
+      - 273.0
+    - - 555.0
+      - 382.0
+    - - 564.0
+      - 683.0
+    - - 221.0
+      - 685.0
+    - - 363.0
       - 277.0
-    - - 354.0
-      - 169.0
-    - - 254.0
-      - 133.0
-    - - 191.0
-      - 157.0
-    - - 295.0
-      - 325.0
     type: queue
-  - id: staff_zone_1790733394769
+  - id: staff_zone_1792681303821
     name: Staff Area
     polygon:
-    - - 126.0
-      - 600.0
-    - - 277.0
-      - 539.0
-    - - 110.0
-      - 179.0
-    - - 3.0
-      - 222.0
-    - - 124.0
-      - 597.0
+    - - 342.0
+      - 287.0
+    - - 179.0
+      - 134.0
+    - - 2.0
+      - 337.0
+    - - 16.0
+      - 631.0
+    - - 157.0
+      - 637.0
+    - - 343.0
+      - 287.0
     type: staff
-  - id: dwell_welcome_e2e
-    name: Welcome dwell
-    polygon:
-    - - 400.0
-      - 400.0
-    - - 600.0
-      - 400.0
-    - - 600.0
-      - 550.0
-    - - 400.0
-      - 550.0
-    type: dwell
-- id: cam_checkout_01
-  name: Checkout Floor
-  source: data/sample_videos/checkout_sample.mp4
-  fps_target: 15
-  resolution:
-  - 1270
-  - 720
-  tripwires: []
-  zones:
-  - id: queue_zone_checkout_01
-    name: Checkout Queue
-    type: queue
-    polygon:
-    - - 200.0
-      - 400.0
-    - - 600.0
-      - 400.0
-    - - 600.0
-      - 700.0
-    - - 200.0
-      - 700.0
-  - id: staff_zone_checkout_01
-    name: Staff Counter
-    type: staff
-    polygon:
-    - - 50.0
-      - 100.0
-    - - 280.0
-      - 100.0
-    - - 280.0
-      - 350.0
-    - - 50.0
-      - 350.0
+  calibrations:
+    data/sample_videos/mall_promenade_01.mp4:
+      tripwires:
+      - id: tripwire_1792677460891
+        name: tripwire_1792677460891
+        line:
+        - - 379.0
+          - 557.0
+        - - 650.0
+          - 687.0
+        in_direction: bottom_to_top
+    data/sample_videos/entrance_sample.mp4:
+      tripwires:
+      - id: tripwire_1790217578233
+        name: tripwire_1790217578233
+        line:
+        - - 1116.0
+          - 457.0
+        - - 990.0
+          - 717.0
+        in_direction: bottom_to_top
+      zones:
+      - id: queue_zone_1790217226558
+        name: Checkout Queue
+        polygon:
+        - - 295.0
+          - 328.0
+        - - 433.0
+          - 277.0
+        - - 354.0
+          - 169.0
+        - - 254.0
+          - 133.0
+        - - 191.0
+          - 157.0
+        - - 295.0
+          - 325.0
+        type: queue
+      - id: staff_zone_1790733394769
+        name: Staff Area
+        polygon:
+        - - 126.0
+          - 600.0
+        - - 277.0
+          - 539.0
+        - - 110.0
+          - 179.0
+        - - 3.0
+          - 222.0
+        - - 124.0
+          - 597.0
+        type: staff
+    data/sample_videos/restaurant_ch17/20261016124745.mp4:
+      zones:
+      - id: staff_zone_1792680441942
+        name: Staff Area
+        polygon:
+        - - 131.0
+          - 574.0
+        - - 1.0
+          - 539.0
+        - - 0.0
+          - 263.0
+        - - 211.0
+          - 193.0
+        - - 353.0
+          - 264.0
+        - - 137.0
+          - 570.0
+        type: staff
+    data/sample_videos/restaurant_ch17/20261016124659.mp4:
+      tripwires:
+      - id: tripwire_1792680824132
+        name: tripwire_1792680824132
+        line:
+        - - 445.0
+          - 378.0
+        - - 1117.0
+          - 381.0
+        in_direction: top_to_bottom
+      zones:
+      - id: queue_zone_1792680866401
+        name: Checkout Queue
+        polygon:
+        - - 448.0
+          - 253.0
+        - - 592.0
+          - 351.0
+        - - 603.0
+          - 663.0
+        - - 249.0
+          - 684.0
+        - - 446.0
+          - 254.0
+        type: queue
+      - id: staff_zone_1792680878701
+        name: Staff Area
+        polygon:
+        - - 202.0
+          - 148.0
+        - - 360.0
+          - 262.0
+        - - 93.0
+          - 656.0
+        - - 0.0
+          - 656.0
+        - - 21.0
+          - 154.0
+        - - 200.0
+          - 147.0
+        type: staff

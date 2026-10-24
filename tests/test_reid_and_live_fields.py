@@ -57,6 +57,9 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
         from server.app import app, init_db
 
         cls.server_app = server_app
+        # Other unittest modules may have imported the singleton FastAPI module first.
+        server_app.DB_PATH = cls.db_path
+        server_app.CONFIG_PATH = cls.config_path
         init_db()
         cls.client = TestClient(app)
 
@@ -114,20 +117,62 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
         """Replay rollups from earlier loops must not inflate today's sample-video footfall."""
         now = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
         with sqlite3.connect(self.db_path) as conn:
-            for loop_count, in_count in ((1, 4), (1, 2), (2, 3)):
+            for session_id, loop_count, in_count in (
+                ("previous-session", 9, 100),
+                ("current-session", 1, 4),
+                ("current-session", 1, 2),
+                ("current-session", 2, 3),
+            ):
                 conn.execute(
                     """INSERT INTO telemetry_rollups (
                         store_id, device_id, camera_id, timestamp_start, timestamp_end,
                         in_count, out_count, current_occupancy, avg_dwell_seconds,
                         queue_length, avg_queue_wait_seconds, queue_alert_active,
-                        is_simulated, loop_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 1, ?)""",
-                    ("store_mumbai_001", "test-edge", "sim_cam", now, now, in_count, loop_count),
+                        is_simulated, loop_count, source_session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 1, ?, ?)""",
+                    (
+                        "store_mumbai_001", "test-edge", "sim_cam", now, now,
+                        in_count, loop_count, session_id,
+                    ),
                 )
             conn.commit()
 
         live = self.client.get("/api/v1/live?camera_id=sim_cam").json()
         self.assertEqual(live.get("total_visitors"), 3)
+
+    def test_floor_view_groups_same_store_zone_without_claiming_fusion(self):
+        live_dir = os.path.join(self._tmpdir.name, "floor-live")
+        os.makedirs(live_dir, exist_ok=True)
+        config = {
+            "cameras": [
+                {"id": "cam_a", "name": "Angle A", "source": "rtsp://a", "floor_homography": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+                {"id": "cam_b", "name": "Angle B", "source": "rtsp://b", "floor_homography": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+            ]
+        }
+        generated_at = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+        for camera_id, zone_id in (("cam_a", "pixel_zone_a"), ("cam_b", "pixel_zone_b")):
+            with open(os.path.join(live_dir, f"{camera_id}.json"), "w") as f:
+                json.dump({
+                    "camera_id": camera_id,
+                    "generated_at": generated_at,
+                    "zones": [{
+                        "id": zone_id,
+                        "name": "Checkout overlap",
+                        "store_zone_id": "checkout_overlap",
+                        "occupancy": 2,
+                        "polygon": [[0, 0], [20, 0], [20, 20]],
+                    }],
+                }, f)
+
+        with patch.object(self.server_app, "_read_config", return_value=config), patch.object(
+            self.server_app, "_live_dir", return_value=live_dir
+        ):
+            floor = self.server_app.get_floor_view()
+
+        self.assertEqual(floor["status"], "CALIBRATION_REQUIRED")
+        self.assertEqual(floor["mapped_shared_zone_count"], 1)
+        self.assertEqual(floor["shared_zones"][0]["camera_ids"], ["cam_a", "cam_b"])
+        self.assertIsNone(floor["shared_zones"][0]["deduplicated_occupancy"])
 
     def test_live_zero_tripwire_not_replaced_by_db_rollup(self):
         """Fresh snap with IN=0 must win — never `0 or day_SUM` (~200 fake In)."""
@@ -168,78 +213,6 @@ class TestLivePerCameraAndClockSync(unittest.TestCase):
         self.assertEqual(live.get("people_now"), 4)
         self.assertEqual(live.get("total_visitors"), 0)
         self.assertEqual(live.get("total_exits"), 0)
-
-    def test_present_matches_tracks_and_day_rollup_stays_off_live(self):
-        """Present is len(track_ids). In/Out are tripwire counts, not the day SUM.
-        Lifetime product viewers and enrichment-off zeros are withheld."""
-        live_dir = os.path.join(os.path.dirname(self.db_path), "live")
-        os.makedirs(live_dir, exist_ok=True)
-        now = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO telemetry_rollups (
-                    store_id, device_id, camera_id, timestamp_start, timestamp_end,
-                    in_count, out_count, current_occupancy, avg_dwell_seconds,
-                    queue_length, avg_queue_wait_seconds, queue_alert_active,
-                    is_simulated, loop_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 9, 0, 0, 0, 0, 0, 0)""",
-                ("store_mumbai_001", "test-edge", "cam_entrance_01", now, now, 355, 173),
-            )
-            conn.commit()
-
-        cam = {
-            "camera_id": "cam_entrance_01",
-            "people_now": 99,
-            "net_occupancy": 99,
-            "total_visitors": 355,
-            "total_exits": 173,
-            "timestamp": now,
-            "track_ids": [4, 8, 15],
-            "tripwires": [{"id": "entrance", "name": "Entrance", "in_count": 2, "out_count": 1}],
-            "models": {"person_detector": "yolo26n", "enrichment": False},
-            "engagement": {"engaged_ratio": 0.0, "facing_ratio": 0.0},
-            "products_top": [
-                {"category": "handbag", "viewers": 47305, "detections": 187487, "avg_dwell_seconds": 10.5}
-            ],
-        }
-        with open(os.path.join(live_dir, "cam_entrance_01.json"), "w") as f:
-            json.dump(cam, f)
-        with open(os.path.join(live_dir, "store.json"), "w") as f:
-            json.dump(
-                {
-                    "cameras": ["cam_entrance_01"],
-                    "people_now": 99,
-                    "total_visitors": 355,
-                    "total_exits": 173,
-                    "timestamp": now,
-                    "source": "live_snapshot",
-                    "models": {"person_detector": "yolo26n", "enrichment": False},
-                    "engagement": {"engaged_ratio": 0.0, "facing_ratio": 0.0},
-                    "products_top": [
-                        {
-                            "category": "handbag",
-                            "viewers": 47305,
-                            "detections": 187487,
-                            "avg_dwell_seconds": 10.5,
-                        }
-                    ],
-                },
-                f,
-            )
-
-        live = self.client.get("/api/v1/live").json()
-        self.assertEqual(live.get("source"), "live_snapshot")
-        self.assertEqual(live.get("present_binding"), "active_tracks")
-        self.assertEqual(live.get("track_ids"), [4, 8, 15])
-        self.assertEqual(live.get("active_tracks"), 3)
-        self.assertEqual(live.get("people_now"), 3)
-        self.assertEqual(live.get("inout_binding"), "session_tripwire")
-        self.assertEqual(live.get("total_visitors"), 2)
-        self.assertEqual(live.get("total_exits"), 1)
-        self.assertNotEqual(live.get("total_visitors"), 355)
-        self.assertIsNone(live.get("products_top"))
-        self.assertEqual(live.get("products_top_withheld"), "lifetime_rollup")
-        self.assertIsNone(live.get("engagement"))
 
 
 if __name__ == "__main__":

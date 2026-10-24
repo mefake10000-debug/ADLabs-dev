@@ -23,7 +23,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Prefer verified kaiyangzhou OSNet pack (download_pack_models.py), then ONNX, then legacy.
+# Prefer verified kaiyangzhou OSNet pack (scripts/download/download_pack_models.py), then ONNX, then legacy.
 DEFAULT_PTH_CANDIDATES = (
     "models/pack/03-reid/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth",
     "models/pack/03-reid/osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth",
@@ -47,6 +47,8 @@ class ReIdEmbedding:
     embedding: Any  # numpy vector when available
     capture_ts_utc: float
     foot_xy: Optional[Tuple[float, float]] = None
+    # Same-edge monotonic receive timestamp; association never relies on unsynced camera clocks.
+    capture_ts_mono: Optional[float] = None
 
 
 @dataclass
@@ -118,7 +120,7 @@ class SoftReIdExtractor:
         if self.enabled and self.weights_present:
             self._try_load()
         elif self.enabled and not self.weights_present:
-            self.load_error = "ReID weights missing — run python scripts/download_pack_models.py"
+            self.load_error = "ReID weights missing — run python scripts/download/download_pack_models.py"
             logger.warning(self.load_error)
         elif not self.enabled:
             logger.info(
@@ -212,7 +214,10 @@ class SoftReIdExtractor:
             self.load_error = f"onnxruntime missing ({e})"
             return False
         try:
-            sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+            sess = ort.InferenceSession(path, sess_options=options, providers=["CPUExecutionProvider"])
             inp = sess.get_inputs()[0]
             self._session = sess
             self._input_name = inp.name

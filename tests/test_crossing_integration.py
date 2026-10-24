@@ -92,16 +92,20 @@ class CrossingIntegrationTests(unittest.TestCase):
     def test_main_uses_one_annotator_and_early_line(self):
         with open(os.path.join(ROOT, "src", "main.py"), encoding="utf-8") as fh:
             text = fh.read()
-        self.assertEqual(text.count("DebugOverlay.draw_pipeline("), 1)
-        self.assertIn("tw.update(early_customers", text)
+        # The second call is a compatibility fallback if newer overlay kwargs are
+        # unsupported; only one of these calls can run for a given frame.
+        self.assertEqual(text.count("DebugOverlay.draw_pipeline("), 2)
+        self.assertIn("tripwire.update(crossing_customers", text)
         self.assertIn("self._update_analytics(", text)
-        self.assertIn("_apply_rtmpose_feet(early_tracks", text)
-        self.assertNotIn("draw_pipeline(**draw_kwargs)", text)
+        self.assertIn("_apply_rtmpose_feet(active_tracks", text)
+        self.assertIn("except TypeError:", text)
+        self.assertIn("draw_pipeline(**draw_kwargs)", text)
+        self.assertEqual(text.count("self._generate_and_save_rollup(cam_id, ctx, frame_time)"), 1)
 
 
 class LicenseSkipTests(unittest.TestCase):
     def test_nc_models_stay_skipped_rtmpose_is_apache(self):
-        script = os.path.join(ROOT, "scripts", "download_pack_models_phase2.py")
+        script = os.path.join(ROOT, "scripts", "download", "download_pack_models_phase2.py")
         spec = importlib.util.spec_from_file_location("phase2_pack", script)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

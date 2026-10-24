@@ -3,7 +3,7 @@
 | | |
 |--|--|
 | **Branch** | **`mefake/integration`** on mefake fork only |
-| **Download** | `python3 scripts/download_pack_models.py` (default dest = this folder) |
+| **Download** | `python3 scripts/download/download_pack_models.py` (default dest = this folder) |
 | **Docker** | `docker compose -f docker-compose.yml -f docker-compose.pack.yml up -d` → `/app/models/pack/` |
 | **Research** | Do **not** pass `--include-research` (buffalo_l NON-COMMERCIAL) unless gated license is documented |
 
@@ -76,6 +76,6 @@ Keep `yolo26s` until a local soak compares FPS / recall.
 ## Re-download
 
 ```bash
-python3 scripts/download_pack_models.py
+python3 scripts/download/download_pack_models.py
 # or: bash models/pack/download.sh
 ```

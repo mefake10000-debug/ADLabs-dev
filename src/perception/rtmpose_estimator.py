@@ -100,6 +100,7 @@ class RTMPoseFootEstimator:
         self._backend = "none"
         self._pose = None
         self._session = None
+        self.calls = 0
         self.onnx_path: Optional[Path] = None
         path = Path(onnx_path) if onnx_path else resolve_rtmpose_onnx(prefer=prefer)
         if path is None:
@@ -131,6 +132,14 @@ class RTMPoseFootEstimator:
                 backend="onnxruntime",
                 device=device if device in ("cpu", "cuda", "mps") else "cpu",
             )
+            # rtmlib otherwise gives every session an unrestricted CPU pool.
+            import onnxruntime as ort
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+            self._pose.session = ort.InferenceSession(
+                str(path), sess_options=options, providers=self._pose.session.get_providers()
+            )
             self._backend = "rtmlib"
             logger.info("RTMPose ready via rtmlib: %s", path.name)
         except Exception as e:  # noqa: BLE001
@@ -144,8 +153,11 @@ class RTMPoseFootEstimator:
             logger.warning("onnxruntime missing for RTMPose fallback: %s", e)
             return
         try:
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
             self._session = ort.InferenceSession(
-                str(path), providers=["CPUExecutionProvider"]
+                str(path), sess_options=options, providers=["CPUExecutionProvider"]
             )
             self._backend = "ort-simcc"
             logger.info("RTMPose ready via ORT SimCC: %s", path.name)
@@ -161,6 +173,8 @@ class RTMPoseFootEstimator:
         """Return one pose dict per bbox (keypoints, foot_point, scores)."""
         if frame is None or not bboxes:
             return []
+        if self.active:
+            self.calls += 1
         if self._pose is not None:
             return self._estimate_rtmlib(frame, bboxes)
         if self._session is not None:

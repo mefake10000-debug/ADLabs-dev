@@ -18,8 +18,8 @@ class OverlayBoxStyleTests(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("OVERLAY_BOX_STYLE", None)
 
-    def test_default_is_foot(self):
-        self.assertEqual(resolve_overlay_box_style({}), "foot")
+    def test_default_is_aabb(self):
+        self.assertEqual(resolve_overlay_box_style({}), "aabb")
 
     def test_env_aabb(self):
         self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "aabb"}), "aabb")
@@ -38,7 +38,7 @@ class OverlayBoxStyleTests(unittest.TestCase):
         )
 
     def test_unknown_falls_back(self):
-        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "obb"}), "foot")
+        self.assertEqual(resolve_overlay_box_style({"OVERLAY_BOX_STYLE": "obb"}), "aabb")
 
 
 class ParallelGeometryTests(unittest.TestCase):

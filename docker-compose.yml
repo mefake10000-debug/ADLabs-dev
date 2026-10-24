@@ -1,7 +1,7 @@
 # Pins the default Compose project name to "adlabs" (used below to build each container_name),
 # so `docker compose up` gives the same container names as always regardless of which directory
 # name the repo happens to be checked out under. `docker compose -p <other-name> up` (e.g. to run
-# a second environment side by side, as in docs/recorded-run-analysis.md §9) then gets distinctly
+# a second environment side by side, as in docs/performance/recorded-run-analysis.md §9) then gets distinctly
 # named containers instead of colliding with this one -- container_name used to be hardcoded,
 # which silently ignored -p entirely and made two stacks fight over the same container names.
 name: adlabs
@@ -9,6 +9,7 @@ name: adlabs
 services:
   # 1. Synthetic RTSP Multi-Camera Broadcaster
   rtsp-simulator:
+    profiles: [simulator]
     build:
       context: .
       dockerfile: docker/Dockerfile.simulator
@@ -28,42 +29,38 @@ services:
         # CPU-only torch by default; set TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 for NVIDIA GPU hosts
         TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     container_name: ${COMPOSE_PROJECT_NAME}-edge-analyzer
-    depends_on:
-      - rtsp-simulator
-      - cloud-dashboard
+    # Bound the pilot workload so inference cannot monopolize Docker Desktop.
+    # This is a CPU ceiling, not a promise of a particular inference FPS.
+    cpus: 4.0
     volumes:
       - ./configs:/app/configs:ro
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro   # benchmark scripts + ground truth run without rebuilding the image
       - ./data/sample_videos:/app/data/sample_videos:ro
       - ./data/storage:/app/data/storage
-      - ./models:/app/models
+      - ./models:/app/models:ro
       # CLIP text encoder for YOLO-World (host: weights/clip/ViT-B-32.pt → /app/weights/clip/)
       - ./weights:/app/weights:ro
     environment:
       - PYTHONUNBUFFERED=1
       - PIPELINE_CONFIG=/app/configs/pipeline.yaml
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
-      # Local demo default is quality: Ultralytics yolo26s @ imgsz 640.
-      # balanced (yolo26n @ 416) stays available via EDGE_PERF_MODE=balanced.
-      # See docs/live-fps.md. Default one cam on Docker CPU.
-      - EDGE_PERF_MODE=${EDGE_PERF_MODE:-quality}
+      # Live detect preset: detect (default — yolo26s, imgsz 640, infer every 2) | balanced | fast | quality.
+      # See docs/performance/live-fps.md. Default one cam on Docker CPU; set EDGE_MAX_CAMERAS= empty for all.
+      - EDGE_PERF_MODE=${EDGE_PERF_MODE:-detect}
       - EDGE_MAX_CAMERAS=${EDGE_MAX_CAMERAS:-1}
-      # One person language: red foot + short trail + person ID.
-      # skeleton adds thin joints. nvidia/parallel/aabb are opt-in box styles
-      # and must not be left on from an old container env.
+      # Person overlays: foot (default — red ground mark + trail) | skeleton | parallel | aabb.
+      # See docs/models/foot-tracking-retail-models.md.
       - OVERLAY_BOX_STYLE=${OVERLAY_BOX_STYLE:-foot}
-      # Pose ankles are optional. Default off so CPU stays on the person detector.
-      # Set ENABLE_RTMPOSE=1 (or OVERLAY_BOX_STYLE=skeleton) for thin skeletons.
-      - ENABLE_RTMPOSE=${ENABLE_RTMPOSE:-0}
+      - ENABLE_RTMPOSE=${ENABLE_RTMPOSE:-1}
       - RTMPOSE_VARIANT=${RTMPOSE_VARIANT:-t}
       - RTMPOSE_EVERY_N=${RTMPOSE_EVERY_N:-4}
       - EDGESIGHT_DETECT_MODEL=${EDGESIGHT_DETECT_MODEL:-}
-      # Detector backend: yolo26 (fast default) | rfdetr (SOTA Apache; quality default).
-      # See docs/rfdetr-integration.md. Optional: pip install rfdetr in the edge image.
+      # Detector backend: yolo26 (default, all modes) | rfdetr (opt-in only).
+      # See docs/models/rfdetr-integration.md. Optional: pip install rfdetr in the edge image.
       # RF-DETR weights are NOT baked (~350 MB nano). One-command optional pull (disk-gated):
-      #   python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
-      # Dry-run (default): python3 scripts/download_pack_models_phase2.py --only rfdetr-nano
+      #   python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1
+      # Dry-run (default): python3 scripts/download/download_pack_models_phase2.py --only rfdetr-nano
       # Until weights land, stack reports rfdetr OFF/PACKED; YOLO26n stays the live fast path.
       - DETECTOR_BACKEND=${DETECTOR_BACKEND:-}
       - RFDETR_VARIANT=${RFDETR_VARIANT:-nano}
@@ -75,7 +72,10 @@ services:
       - YOLO_CONFIG_DIR=/tmp/Ultralytics
       # Unset by default -- state-changing API calls stay unauthenticated (today's zero-config
       # behaviour) unless you set this to the same value on cloud-dashboard below.
-      - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
+      - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:?Set EDGESIGHT_API_KEY in .env before starting EdgeSight}
+      - PROCESSING_CONTROL_KEY=${PROCESSING_CONTROL_KEY:?Set PROCESSING_CONTROL_KEY in .env before starting the local supervisor}
+      - SUPERVISOR_HOST=0.0.0.0
+      - SUPERVISOR_PORT=8001
       # Optional override if CLIP lives elsewhere; default path matches the mount above.
       - CLIP_WEIGHTS_PATH=${CLIP_WEIGHTS_PATH:-/app/weights/clip/ViT-B-32.pt}
       # Edge → API telemetry must use Compose DNS. localhost:8000 inside this container is empty.
@@ -91,8 +91,10 @@ services:
       dockerfile: docker/Dockerfile.dashboard
     container_name: ${COMPOSE_PROJECT_NAME}-cloud-dashboard
     ports:
-      - "8000:8000"   # FastAPI Telemetry Ingestion Endpoint
-      - "8501:8501"   # Streamlit Real-Time Operations UI
+      - "127.0.0.1:8000:8000"   # FastAPI telemetry endpoint (loopback only)
+      - "127.0.0.1:8501:8501"   # Streamlit operations UI (loopback only)
+    depends_on:
+      - edge-analyzer
     # baseUrlPath aligns Streamlit with portal route /dashboard/live/ops (website embeds this).
     command:
       [
@@ -111,7 +113,9 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
       - CAMERAS_CONFIG=/app/configs/cameras.yaml
-      - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:-}
+      - EDGESIGHT_API_KEY=${EDGESIGHT_API_KEY:?Set EDGESIGHT_API_KEY in .env before starting EdgeSight}
+      - PROCESSING_CONTROL_KEY=${PROCESSING_CONTROL_KEY:?Set PROCESSING_CONTROL_KEY in .env before starting the local supervisor}
+      - PROCESSING_SUPERVISOR_URL=http://edge-analyzer:8001
       # Browser-facing API for Streamlit <img> tags — portal reverse-proxy on :3000
       - PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-http://localhost:3000}
       - PORTAL_LIVE_URL=${PORTAL_LIVE_URL:-http://localhost:3000/dashboard/live}

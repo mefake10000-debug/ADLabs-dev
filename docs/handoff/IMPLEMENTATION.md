@@ -17,7 +17,7 @@
 | Alerts catalog + QUEUE_LENGTH_OVER | ✅ LIVE | FUTURE catalog rows never fire |
 | Floor paths / traction | ✅ LIVE / EMPTY | From track foot history |
 | Display interest `products_top` | ✅ / PARTIAL | When model/history present |
-| RF-DETR selectable path | ✅ code; weights OFF/PACKED | One-command: `python3 scripts/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1` |
+| RF-DETR selectable path | ✅ code; weights OFF/PACKED | One-command: `python3 scripts/download/download_pack_models_phase2.py --download --only rfdetr-nano --min-free-gb 1` |
 | Multi-cam frame-accurate sync / ReID fusion | FUTURE | Plan only; fast single-cam default |
 | LocateAnything-3B | FUTURE | Docs only — do not download |
 | Accounting CV↔POS join | FUTURE | Stub card |
@@ -56,5 +56,5 @@
 curl -s http://localhost:8000/api/v1/live | jq '{stop_rate,entrance,field_status,staff:(.staff| {status,response_time_to_queue,zones:(.zones|length)}),queues:(.queues|length)}'
 curl -s 'http://localhost:8000/api/v1/live/snapshot?camera_id=cam_entrance_01' | jq '{floor,staff,safety,entrance}'
 curl -s http://localhost:8000/api/v1/alerts | jq '{active,partial_catalog:(.partial_catalog|length)}'
-python3 scripts/download_pack_models_phase2.py --only rfdetr-nano   # dry-run
+python3 scripts/download/download_pack_models_phase2.py --only rfdetr-nano   # dry-run
 ```

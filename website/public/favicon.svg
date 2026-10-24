@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="60" viewBox="0 0 200 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Logo Box -->
+  <rect x="0" y="10" width="44" height="40" rx="12" fill="#1D1D1F"/>
+  <text x="22" y="37" font-family="Inter, -apple-system, sans-serif" font-weight="800" font-size="22" fill="white" text-anchor="middle" letter-spacing="-1">Ad</text>
+
+  <!-- AD Labs Text -->
+  <text x="56" y="31" font-family="Inter, -apple-system, sans-serif" font-weight="800" font-size="26" fill="#1D1D1F" letter-spacing="-1">AD</text>
+  <text x="56" y="50" font-family="Inter, -apple-system, sans-serif" font-weight="600" font-size="18" fill="#6E6E73" letter-spacing="-0.5">Labs</text>
+</svg>
