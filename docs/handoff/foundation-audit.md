@@ -1,6 +1,6 @@
 # Foundation audit and release handoff
 
-**Observed:** 2026-10-24. **Destination:** `mefake10000-debug/ADLabs-dev`. **Local review branch:** `consolidate/adlabs-final-review`. **Base:** `5de866f0e4adfb88472a0bf48bb8744722257b8f`, the current `mefake/integration` default commit. The branch remains local until final staged-diff review and delivery.
+**Observed:** 2026-10-24, with branch state rechecked 2026-10-25. **Destination:** `mefake10000-debug/ADLabs-dev`. **Local review branch:** `consolidate/adlabs-final-review`. **Base:** `5de866f0e4adfb88472a0bf48bb8744722257b8f`, the verified `mefake/integration` baseline. The integration is committed locally; the remote branch is still absent because Git transport could not resolve `github.com`. No default-branch ref was changed.
 
 ## Integration overview
 
